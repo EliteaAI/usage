@@ -15,26 +15,14 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Runtime interface registry and startup diagnostics """
-
-import sys
+""" Runtime interface enumeration and startup diagnostics """
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from .mode import MODE_ENFORCE, MODE_OBSERVE, MODE_OFF
 
-REGISTRY_TOOL = "runtime_interfaces"
-
 INTERFACE_NAME_PREFIX = "runtime_interface_"
-
-
-def registry():
-    """The shared list every runtime_interface_* plugin appends itself to.
-
-    Read defensively: a pylon with no interface plugin is a valid deployment.
-    """
-    return list(getattr(sys.modules["tools"], REGISTRY_TOOL, None) or [])
 
 
 def declares_hooks(descriptor):
@@ -44,14 +32,12 @@ def declares_hooks(descriptor):
     return bool(metadata.get("usage_hooks", False))
 
 
-def describe(interface):
+def describe(name, descriptor):
     """One interface's diagnostic record."""
-    descriptor = getattr(interface, "descriptor", None)
-    metadata = getattr(descriptor, "metadata", None) or {}
     config = getattr(descriptor, "config", None) or {}
     #
     return {
-        "name": getattr(descriptor, "name", None) or metadata.get("name", "unknown"),
+        "name": name,
         "url_prefix": config.get("url_prefix", None),
         "usage_hooks": declares_hooks(descriptor),
     }
@@ -62,22 +48,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_list_interfaces(self):
-        """Diagnostic records for every registered runtime interface."""
-        return [describe(interface) for interface in registry()]
+        """Diagnostic records for every loaded runtime interface.
 
-    @web.method()
-    def usage_unregistered_interfaces(self):
-        """Plugins named like an interface that never appeared in the registry."""
-        registered = {record["name"] for record in self.usage_list_interfaces()}
-        #
+        Read from the loaded descriptors, so an interface needs to do nothing to be seen.
+        """
         try:
             descriptors = self.context.module_manager.descriptors
         except AttributeError:
             return []
         #
         return [
-            name for name in descriptors
-            if name.startswith(INTERFACE_NAME_PREFIX) and name not in registered
+            describe(name, descriptor) for name, descriptor in descriptors.items()
+            if name.startswith(INTERFACE_NAME_PREFIX)
         ]
 
     @web.method()
@@ -115,13 +97,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     record["name"], MODE_OFF,
                 )
         #
-        for name in self.usage_unregistered_interfaces():
-            log.warning(
-                "usage: plugin %s looks like a runtime interface but never registered itself",
-                name,
-            )
-        #
         if not records:
-            log.info("usage: no runtime interfaces registered")
+            log.info("usage: no runtime interfaces loaded")
         #
         return refused
