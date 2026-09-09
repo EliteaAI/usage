@@ -1,7 +1,13 @@
 {
   "name": "usage",
-  "version": "0.1",
+  "version": "0.2",
   "module": "plugins.usage",
-  "depends_on": ["shared"],
-  "init_after": ["costs", "scheduling", "runtime_interface_litellm"]
+  "depends_on": [
+    "shared"
+  ],
+  "init_after": [
+    "costs",
+    "scheduling",
+    "runtime_interface_litellm"
+  ]
 }
