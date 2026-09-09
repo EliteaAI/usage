@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c  # pylint: disable=E0401
@@ -38,10 +38,15 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Denormalised 'YYYYMM' of ts: month reports group on it without a range scan
+    period: Mapped[str] = mapped_column(Text, nullable=False)
+
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    run_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
-    conversation_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    user_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Text, not UUID/BIGINT: ids arrive as opaque strings from several entry points
+    run_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # What the user launched; fixed for the whole run
     root_entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -52,6 +57,7 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    entity_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     event_type: Mapped[str] = mapped_column(String(16), nullable=False)
 
@@ -66,6 +72,10 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
         BigInteger, nullable=False, server_default="0",
     )
     reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # Input tokens actually charged, after cache discounts
+    billable_input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0",
+    )
 
     # Integer micro-dollars, never float: money must not accumulate rounding error
     cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
@@ -80,28 +90,20 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
+        # Partitioned uniqueness only dedups within one (idempotency_key, ts); a retry that
+        # recomputes ts instead of reusing the original can slip through. Optional follow-up.
         Index("uq_usage_event_idempotency", "idempotency_key", "ts", unique=True),
+        Index("ix_usage_event_project_period", "project_id", "period"),
         Index("ix_usage_event_project_ts", "project_id", "ts"),
+        Index("ix_usage_event_project_entity_ts", "project_id", "entity_id", "ts"),
+        Index("ix_usage_event_project_root_ts", "project_id", "root_entity_id", "ts"),
         Index("ix_usage_event_project_user_ts", "project_id", "user_id", "ts"),
-        Index(
-            "ix_usage_event_project_model_ts", "project_id", "model_name", "ts",
-            postgresql_where=text("model_name IS NOT NULL"),
-        ),
-        Index(
-            "ix_usage_event_project_root_ts",
-            "project_id", "root_entity_type", "root_entity_id", "ts",
-        ),
-        Index(
-            "ix_usage_event_run", "run_id",
-            postgresql_where=text("run_id IS NOT NULL"),
-        ),
-        Index(
-            "ix_usage_event_project_conversation_ts", "project_id", "conversation_id", "ts",
-            postgresql_where=text("conversation_id IS NOT NULL"),
-        ),
+        Index("ix_usage_event_project_model_ts", "project_id", "model_name", "ts"),
         Index(
             "ix_usage_event_project_tool_ts", "project_id", "tool_name", "ts",
             postgresql_where=text("tool_name IS NOT NULL"),
         ),
+        Index("ix_usage_event_conversation", "conversation_id"),
+        Index("ix_usage_event_project_run", "project_id", "run_id"),
         {"schema": c.POSTGRES_SCHEMA, "postgresql_partition_by": "RANGE (ts)"},
     )

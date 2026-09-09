@@ -28,6 +28,9 @@ from tools import db, config as c  # pylint: disable=E0401
 class UsageCounter(db.Base):  # pylint: disable=R0903
     """Rolled-up spend the enforcement gate reads. Sentinels avoid a nullable PK:
     user_id 0 = project aggregate, model_name '' = all models. Only this plugin reads them.
+
+    Deliberate deviation from the issue text, which specifies NULL for both aggregate markers:
+    a NULL column cannot take part in a primary key, so sentinels are the only workable form.
     """
 
     __tablename__ = "usage_counter"

@@ -33,12 +33,17 @@ class TestMetadata:
         assert plugin_metadata["depends_on"] == ["shared"]
 
     def test_init_after_names_the_plugins_it_reads(self, plugin_metadata):
-        """costs prices events, scheduling carries the partition cron, litellm backs the facade."""
+        """costs prices events and scheduling carries the partition cron.
+
+        No runtime_interface_* is named on purpose: hooks resolve lazily at call time and pylon
+        inits every module before any ready() runs, so ordering against an interface buys nothing
+        while making an interface-neutral contract look litellm-specific.
+        """
         init_after = plugin_metadata["init_after"]
         #
         assert "costs" in init_after
         assert "scheduling" in init_after
-        assert "runtime_interface_litellm" in init_after
+        assert not [name for name in init_after if name.startswith("runtime_interface")]
 
     def test_does_not_depend_on_an_interface_plugin(self, plugin_metadata):
         """Hooks resolve lazily at call time, so there is no hard coupling in either direction."""
