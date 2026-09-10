@@ -30,7 +30,8 @@ class OllamaNativeDialect(ScannerDialect):
     keys = ("prompt_eval_count", "eval_count", "model")
     cache_convention = CACHE_EXCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if path.endswith(OLLAMA_PATHS):
@@ -39,11 +40,6 @@ class OllamaNativeDialect(ScannerDialect):
         return b'"prompt_eval_count"' in head or b'"eval_count"' in head
 
     def absorb(self, key, value):
-        if key == "model":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if key == "prompt_eval_count":
             set_if_unset(self._reading, "input_tokens", coerce_int(value))
             return

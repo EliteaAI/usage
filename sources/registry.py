@@ -39,10 +39,18 @@ def register(factory) -> None:
     log.info("usage.sources: registered %r", dialect_id)
 
 
-def get(dialect_id):
-    """A fresh instance of one dialect by id, or None."""
+def get(dialect_id, endpoint="", content_type=""):
+    """A fresh, bound instance of one dialect by id, or None.
+
+    Pass the request context: a dialect reading AWS binary frames installs its framer in
+    bind(), so an instance built without a content type would read an event stream as text
+    and report nothing.
+    """
     factory = _factories.get(dialect_id)
-    return factory() if factory is not None else None
+    if factory is None:
+        return None
+    #
+    return _bind(factory, endpoint or "", content_type or "")
 
 
 def all() -> dict:  # pylint: disable=W0622
@@ -55,23 +63,31 @@ def clear() -> None:
     del _order[:]
 
 
-def match(endpoint, content_type, head=b""):
+def match(endpoint, content_type, head=b"", dialect_hint=None):
     """The dialect that owns this response, or None (caller records it as unparsed).
 
-    Stage 1 asks on endpoint and content-type alone; stage 2 re-asks with head bytes so a
-    dialect can probe the body shape when the endpoint was not distinctive enough.
+    `dialect_hint` is authoritative when it names a registered dialect: the caller routed the
+    request and knows the provider, which beats sniffing a body. Stage 1 then asks on endpoint
+    and content-type alone; stage 2 re-asks with head bytes for bodies whose endpoint was not
+    distinctive enough.
     """
     endpoint = endpoint or ""
     content_type = content_type or ""
+    #
+    hinted = _hinted(dialect_hint)
+    if hinted is not None:
+        return _bind(hinted, endpoint, content_type)
     #
     probes = [b""] if not head else [b"", head]
     #
     for probe in probes:
         for dialect_id in _order:
-            candidate = _factories[dialect_id]()
+            factory = _factories[dialect_id]
             try:
-                if candidate.matches(endpoint, content_type, probe):
-                    return candidate
+                # Probed on the class: matches() is a predicate, so instantiating every
+                # candidate just to ask would allocate a scanner per dialect per response.
+                if factory.matches(endpoint, content_type, probe):
+                    return _bind(factory, endpoint, content_type)
             except Exception:  # pylint: disable=W0703
                 log.warning(
                     "usage.sources: %r matches() raised for endpoint=%r content_type=%r",
@@ -83,6 +99,27 @@ def match(endpoint, content_type, head=b""):
         endpoint, content_type,
     )
     return None
+
+
+def _hinted(dialect_hint):
+    """The hinted factory, or None to fall back to sniffing."""
+    if not dialect_hint:
+        return None
+    #
+    factory = _factories.get(dialect_hint)
+    if factory is None:
+        log.warning(
+            "usage.sources: dialect hint %r is not registered, sniffing instead", dialect_hint,
+        )
+    #
+    return factory
+
+
+def _bind(factory, endpoint, content_type):
+    """A fresh instance, given the request context it needs before any bytes arrive."""
+    dialect = factory()
+    dialect.bind(endpoint, content_type)
+    return dialect
 
 
 def register_defaults() -> None:

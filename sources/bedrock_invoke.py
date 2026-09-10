@@ -36,19 +36,26 @@ class BedrockInvokeDialect(EventStreamScannerDialect):
     keys = (METRICS_KEY, "usage")
     cache_convention = CACHE_EXCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if not (path.endswith("/invoke") or path.endswith("/invoke-with-response-stream")):
             return False
         #
+        return True
+
+    def bind(self, endpoint, content_type):
         self._use_event_stream(content_type)
         set_if_unset(self._reading, "model_name", model_id_from_path(endpoint))
-        return True
 
     def unwrap(self, payload):
         """Streamed chunks wrap the model's own JSON in a base64 `bytes` field."""
         yield payload
+        #
+        # Cheap reject first: every content-delta frame would otherwise be JSON-parsed twice.
+        if b'"bytes"' not in payload:
+            return
         #
         try:
             encoded = json.loads(payload).get("bytes")

@@ -57,7 +57,12 @@ class UsageDialect(typing.Protocol):
 
     id: str
 
-    def matches(self, endpoint: str, content_type: str, head: bytes) -> bool:
+    # Declared on the class: the registry probes candidates before instantiating the winner.
+    @classmethod
+    def matches(cls, endpoint: str, content_type: str, head: bytes) -> bool:
+        ...
+
+    def bind(self, endpoint: str, content_type: str) -> None:
         ...
 
     def feed(self, chunk: bytes) -> None:
@@ -68,7 +73,13 @@ class UsageDialect(typing.Protocol):
 
 
 def billable_input_tokens(reading):
-    """Collapse both cache conventions into the single number we bill on."""
+    """Full-price input tokens only, with either cache convention normalised away.
+
+    Cached tokens are deliberately NOT folded in: providers bill them at their own rates
+    (Anthropic reads ~0.1x, writes ~1.25x), so the caller must price
+    `cache_read_tokens` and `cache_creation_tokens` as separate line items in both
+    conventions, or cached traffic is under-billed.
+    """
     if reading.input_tokens is None:
         return None
     #

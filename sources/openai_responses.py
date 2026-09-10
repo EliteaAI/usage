@@ -30,7 +30,8 @@ class OpenAIResponsesDialect(ScannerDialect):
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if path.endswith("/responses") or "/responses/" in path:
@@ -40,11 +41,6 @@ class OpenAIResponsesDialect(ScannerDialect):
         return b'"input_tokens_details"' in head or b'"output_tokens_details"' in head
 
     def absorb(self, key, value):
-        if key == "model":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if not isinstance(value, dict):
             return
         #

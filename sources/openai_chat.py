@@ -32,7 +32,8 @@ class OpenAIChatDialect(ScannerDialect):
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if path.endswith(CHAT_PATHS):
@@ -41,11 +42,6 @@ class OpenAIChatDialect(ScannerDialect):
         return b'"prompt_tokens"' in head
 
     def absorb(self, key, value):
-        if key == "model":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if not isinstance(value, dict):
             return
         #

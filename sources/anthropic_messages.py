@@ -30,7 +30,8 @@ class AnthropicMessagesDialect(ScannerDialect):
     keys = ("usage", "model")
     cache_convention = CACHE_EXCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if path.endswith("/messages") or "/messages/" in path:
@@ -39,11 +40,6 @@ class AnthropicMessagesDialect(ScannerDialect):
         return b'"cache_read_input_tokens"' in head or b'"message_start"' in head
 
     def absorb(self, key, value):
-        if key == "model":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if not isinstance(value, dict):
             return
         #

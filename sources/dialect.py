@@ -17,7 +17,9 @@
 
 """ Shared skeleton and merge rules for the concrete dialects """
 
-from .base import CACHE_EXCLUSIVE, UsageReading, log
+from .base import (
+    CACHE_EXCLUSIVE, TOKEN_SOURCE_UNPARSED, UsageReading, log,
+)
 from .framing import EventStreamFramer, JSONValueScanner
 
 
@@ -59,6 +61,8 @@ class ScannerDialect:
     id = None
     keys = ()
     cache_convention = CACHE_EXCLUSIVE
+    # The key carrying the model name — Google spells it `modelVersion`.
+    model_key = "model"
 
     def __init__(self):
         self._scanner = JSONValueScanner(self.keys, label=self.id)
@@ -66,42 +70,93 @@ class ScannerDialect:
             cache_convention=self.cache_convention, dialect=self.id,
         )
         self._fed_bytes = 0
+        self._pushed_bytes = 0
         self._absorb_failures = 0
+        self._keys_seen = 0
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
+        """Predicate only — must not touch instance state, the registry probes the class."""
         raise NotImplementedError
+
+    def bind(self, endpoint, content_type):
+        """Per-response setup that needs the request context. Called once, before feed()."""
 
     def feed(self, chunk):
         self._fed_bytes += len(chunk) if chunk else 0
         for key, value in self._scanner.feed(chunk):
+            self._keys_seen += 1
             self._absorb(key, value)
 
     def result(self):
         for key, value in self._scanner.close():
+            self._keys_seen += 1
             self._absorb(key, value)
         #
-        self._warn_if_nothing_observed()
+        self._finalize_token_source()
         return self._reading
 
-    def _warn_if_nothing_observed(self):
-        """Bytes went in and no counts came out — the case that silently costs money."""
-        if not self._fed_bytes:
+    @property
+    def failures(self):
+        """Everything that went wrong while reading this response."""
+        return self._scanner.failures + self._absorb_failures + self._framer_failures()
+
+    def _framer_failures(self):
+        return 0
+
+    def _finalize_token_source(self):
+        """Mark the reading unparsed whenever we owe the caller a number we do not have.
+
+        The caller cannot otherwise tell a genuinely free call from one we failed to read,
+        which is the whole difference between a correct bill and a confidently wrong one.
+        """
+        if not (self._fed_bytes or self._pushed_bytes):
             return
-        if self._reading.input_tokens is not None or self._reading.output_tokens is not None:
+        #
+        missing = self._reading.input_tokens is None or self._reading.output_tokens is None
+        nothing = self._reading.input_tokens is None and self._reading.output_tokens is None
+        #
+        if not (nothing or (self.failures and missing)):
+            return
+        #
+        self._reading.token_source = TOKEN_SOURCE_UNPARSED
+        self._log_unparsed(nothing)
+
+    def _log_unparsed(self, nothing):
+        """A stream that never reported usage is routine; a broken read is not."""
+        detail = (
+            "bytes=%d/%d, keys=%d, scanner=%d, absorb=%d, framer=%d" % (
+                self._fed_bytes, self._pushed_bytes, self._keys_seen,
+                self._scanner.failures, self._absorb_failures, self._framer_failures(),
+            )
+        )
+        #
+        # No usage keys and nothing broken is the documented OpenAI-without-include_usage
+        # case — warning-level here would bury the reads that actually failed.
+        if nothing and not self._keys_seen and not self.failures:
+            log.info(
+                "usage.sources: %s response carried no usage keys (%s)", self.id, detail,
+            )
             return
         #
         log.warning(
-            "usage.sources: %s read no token counts from %d bytes "
-            "(scanner failures=%d, absorb failures=%d)",
-            self.id, self._fed_bytes, self._scanner.failures, self._absorb_failures,
+            "usage.sources: %s could not read complete token counts (%s)", self.id, detail,
         )
 
     def _absorb(self, key, value):
         try:
+            if key == self.model_key:
+                self._absorb_model(value)
+                return
+            #
             self.absorb(key, value)
         except Exception:  # pylint: disable=W0703
             self._absorb_failures += 1
             log.warning("usage.sources: %s could not absorb %r", self.id, key, exc_info=True)
+
+    def _absorb_model(self, value):
+        if isinstance(value, str) and value:
+            set_if_unset(self._reading, "model_name", value)
 
     def absorb(self, key, value):
         raise NotImplementedError
@@ -120,14 +175,20 @@ class EventStreamScannerDialect(ScannerDialect):
         self._framer = None
 
     def _use_event_stream(self, content_type):
-        """Called from matches() — the registry hands the matched instance to the caller."""
         if "eventstream" in (content_type or "").lower():
             self._framer = EventStreamFramer(label=self.id)
+
+    def _framer_failures(self):
+        return self._framer.failures if self._framer is not None else 0
 
     def feed(self, chunk):
         if self._framer is None:
             super().feed(chunk)
             return
+        #
+        # Raw frame bytes counted separately: an inert or wedged framer decodes nothing, and
+        # counting only decoded payloads would leave that case looking like an empty response.
+        self._pushed_bytes += len(chunk) if chunk else 0
         #
         for _, payload in self._framer.push(chunk):
             for inner in self.unwrap(payload):

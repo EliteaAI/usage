@@ -28,7 +28,8 @@ class AzureChatDialect(OpenAIChatDialect):
 
     id = "azure.chat"
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if DEPLOYMENT_MARKER not in path or not path.endswith(CHAT_PATHS):

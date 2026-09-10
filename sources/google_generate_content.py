@@ -29,8 +29,10 @@ class GoogleGenerateContentDialect(ScannerDialect):
     id = "google.generate_content"
     keys = ("usageMetadata", "modelVersion")
     cache_convention = CACHE_INCLUSIVE
+    model_key = "modelVersion"
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint)
         #
         if ":generateContent" in path or ":streamGenerateContent" in path:
@@ -39,11 +41,6 @@ class GoogleGenerateContentDialect(ScannerDialect):
         return b'"usageMetadata"' in head
 
     def absorb(self, key, value):
-        if key == "modelVersion":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if not isinstance(value, dict):
             return
         #

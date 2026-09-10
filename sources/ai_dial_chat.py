@@ -27,7 +27,8 @@ class AiDialChatDialect(OpenAIChatDialect):
 
     id = "ai_dial.chat"
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if not path.endswith(CHAT_PATHS):

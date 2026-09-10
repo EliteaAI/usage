@@ -58,6 +58,12 @@ class JSONValueScanner:
             (b'"' + key.encode("utf-8") + b'"', key)
             for key in keys if len(key) <= MAX_KEY_LENGTH
         ]
+        for key in keys:
+            if len(key) > MAX_KEY_LENGTH:
+                log.warning(
+                    "usage.sources: %s ignores key %r — longer than %d bytes, never matched",
+                    self._label, key, MAX_KEY_LENGTH,
+                )
         self._overlap = max((len(pattern) for pattern, _ in self._patterns), default=1) - 1
         self._buffer = bytearray()
         self._pos = 0

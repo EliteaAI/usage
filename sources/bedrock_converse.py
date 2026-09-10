@@ -41,15 +41,18 @@ class BedrockConverseDialect(EventStreamScannerDialect):
     keys = ("usage",)
     cache_convention = CACHE_EXCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         path = path_of(endpoint).rstrip("/")
         #
         if not (path.endswith("/converse") or path.endswith("/converse-stream")):
             return False
         #
+        return True
+
+    def bind(self, endpoint, content_type):
         self._use_event_stream(content_type)
         set_if_unset(self._reading, "model_name", model_id_from_path(endpoint))
-        return True
 
     def absorb(self, key, value):
         if not isinstance(value, dict):

@@ -28,15 +28,11 @@ class OpenAIEmbeddingsDialect(ScannerDialect):
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 
-    def matches(self, endpoint, content_type, head):
+    @classmethod
+    def matches(cls, endpoint, content_type, head):
         return path_of(endpoint).rstrip("/").endswith("/embeddings")
 
     def absorb(self, key, value):
-        if key == "model":
-            if isinstance(value, str) and value:
-                set_if_unset(self._reading, "model_name", value)
-            return
-        #
         if not isinstance(value, dict):
             return
         #

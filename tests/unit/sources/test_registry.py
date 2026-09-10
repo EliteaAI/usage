@@ -153,6 +153,52 @@ class TestInstanceIsolation:
         assert registry.get("nope.nothing") is None
 
 
+class TestDialectHint:
+    """The gateway routed the request, so it knows the provider — that beats sniffing a body.
+
+    Unused today by design: the param exists so #6571 can pass routing identity through without
+    a signature change, and so the endpoint-shape mislabels (Azure without an api-version reading
+    as ai_dial.chat) stop being guesses.
+    """
+
+    def test_a_hint_overrides_what_the_endpoint_would_say(self, registered_dialects):
+        matched = registry.match(
+            "/openai/deployments/gpt-4o/chat/completions", "application/json",
+            dialect_hint="azure.chat",
+        )
+        #
+        assert matched.id == "azure.chat"
+
+    def test_an_unregistered_hint_falls_back_to_sniffing(self, registered_dialects):
+        matched = registry.match(
+            "/v1/chat/completions", "application/json", dialect_hint="vendor_z.chat",
+        )
+        #
+        assert matched.id == "openai.chat"
+
+    def test_no_hint_behaves_exactly_as_before(self, registered_dialects):
+        assert registry.match("/v1/messages", "application/json").id == "anthropic.messages"
+
+
+class TestGetBindsTheInstance:
+    def test_get_installs_the_event_stream_framer(self, registered_dialects):
+        # Without the request context an AWS response would be read as text and report nothing.
+        bound = registry.get(
+            "bedrock.converse",
+            "/model/eu.amazon.nova-pro-v1:0/converse-stream",
+            "application/vnd.amazon.eventstream",
+        )
+        #
+        assert bound._framer is not None  # pylint: disable=W0212
+
+    def test_get_stamps_the_model_from_the_path(self, registered_dialects):
+        bound = registry.get(
+            "bedrock.converse", "/model/eu.amazon.nova-pro-v1:0/converse", "application/json",
+        )
+        #
+        assert bound.result().model_name == "eu.amazon.nova-pro-v1:0"
+
+
 class TestExtensibility:
     """Acceptance criterion: a new dialect needs no edit under usage/sources/."""
 
@@ -165,8 +211,13 @@ class TestExtensibility:
             def __init__(self):
                 self.reading = base.UsageReading(dialect=self.id)
 
-            def matches(self, endpoint, content_type, head):
+            # A predicate on the class: the registry probes candidates without building them.
+            @classmethod
+            def matches(cls, endpoint, content_type, head):
                 return "/vendor-x/" in (endpoint or "")
+
+            def bind(self, endpoint, content_type):
+                pass
 
             def feed(self, chunk):
                 self.reading.input_tokens = len(chunk)
