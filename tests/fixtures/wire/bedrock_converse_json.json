@@ -1,0 +1,36 @@
+{
+  "_provenance": "Hand-built to the Bedrock Converse (non-streaming) response schema. Same live-capture note as bedrock_converse_eventstream.",
+  "dialect": "bedrock.converse",
+  "endpoint": "/model/eu.amazon.nova-pro-v1:0/converse",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "output": {
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "text": "Done."
+          }
+        ]
+      }
+    },
+    "stopReason": "end_turn",
+    "usage": {
+      "inputTokens": 31,
+      "outputTokens": 9,
+      "totalTokens": 40
+    },
+    "metrics": {
+      "latencyMs": 412
+    }
+  },
+  "expected": {
+    "model_name": "eu.amazon.nova-pro-v1:0",
+    "input_tokens": 31,
+    "output_tokens": 9,
+    "cache_read_tokens": 0,
+    "cache_convention": "exclusive"
+  },
+  "expected_billable_input": 31
+}

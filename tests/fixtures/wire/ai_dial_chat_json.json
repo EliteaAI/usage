@@ -1,0 +1,38 @@
+{
+  "_provenance": "Derived from the openai_chat_json fixture: EPAM AI DIAL is an Azure-compatible facade and returns the same body. Only the route differs (deployment path, no api-version), which is what its matches() keys on.",
+  "dialect": "ai_dial.chat",
+  "endpoint": "/openai/deployments/gpt-4o/chat/completions",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "id": "chatcmpl-dial1",
+    "object": "chat.completion",
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 90,
+      "completion_tokens": 30,
+      "total_tokens": 120,
+      "prompt_tokens_details": {
+        "cached_tokens": 45
+      }
+    }
+  },
+  "expected": {
+    "model_name": "gpt-4o",
+    "input_tokens": 90,
+    "output_tokens": 30,
+    "cache_read_tokens": 45,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 45
+}

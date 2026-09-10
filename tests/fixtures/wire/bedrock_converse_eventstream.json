@@ -1,0 +1,69 @@
+{
+  "_provenance": "Hand-built to the Bedrock ConverseStream API schema (docs.aws.amazon.com/bedrock ConverseStreamOutput). Bedrock credentials DO exist on this project \u2014 replacing the payloads with a live capture is tracked in the PR checklist for #6570. The binary framing around them is synthesized by fixtures/eventstream_builder.py and needs no AWS access.",
+  "dialect": "bedrock.converse",
+  "endpoint": "/model/eu.anthropic.claude-sonnet-4-5-20250929-v1:0/converse-stream",
+  "content_type": "application/vnd.amazon.eventstream",
+  "envelope": "eventstream",
+  "events": [
+    [
+      "messageStart",
+      {
+        "role": "assistant"
+      }
+    ],
+    [
+      "contentBlockDelta",
+      {
+        "contentBlockIndex": 0,
+        "delta": {
+          "text": "Hello"
+        }
+      }
+    ],
+    [
+      "contentBlockDelta",
+      {
+        "contentBlockIndex": 0,
+        "delta": {
+          "text": " world"
+        }
+      }
+    ],
+    [
+      "contentBlockStop",
+      {
+        "contentBlockIndex": 0
+      }
+    ],
+    [
+      "messageStop",
+      {
+        "stopReason": "end_turn"
+      }
+    ],
+    [
+      "metadata",
+      {
+        "usage": {
+          "inputTokens": 220,
+          "outputTokens": 75,
+          "totalTokens": 295,
+          "cacheReadInputTokens": 1024,
+          "cacheWriteInputTokens": 512
+        },
+        "metrics": {
+          "latencyMs": 1873
+        }
+      }
+    ]
+  ],
+  "expected": {
+    "model_name": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "input_tokens": 220,
+    "output_tokens": 75,
+    "cache_read_tokens": 1024,
+    "cache_creation_tokens": 512,
+    "cache_convention": "exclusive"
+  },
+  "expected_billable_input": 220
+}

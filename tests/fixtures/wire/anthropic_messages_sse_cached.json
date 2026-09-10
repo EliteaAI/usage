@@ -1,0 +1,51 @@
+{
+  "_provenance": "The pinned litellm clone at /srv/extra_space/elitea/litellm, commit bdf4acc472 sequence above, extended with the two cache counters Anthropic adds on a cache hit (documented at docs.anthropic.com/en/docs/build-with-claude/prompt-caching). Extension is hand-built and labelled as such; it is the exclusive-convention case, so cached tokens must NOT be subtracted from input.",
+  "dialect": "anthropic.messages",
+  "endpoint": "/v1/messages",
+  "content_type": "text/event-stream",
+  "envelope": "sse",
+  "events": [
+    {
+      "type": "message_start",
+      "message": {
+        "id": "msg_124",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5",
+        "content": [],
+        "usage": {
+          "input_tokens": 12,
+          "cache_creation_input_tokens": 3200,
+          "cache_read_input_tokens": 8000,
+          "output_tokens": 1
+        }
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "text_delta",
+        "text": "hi"
+      }
+    },
+    {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "end_turn"
+      },
+      "usage": {
+        "output_tokens": 45
+      }
+    }
+  ],
+  "expected": {
+    "model_name": "claude-sonnet-4-5",
+    "input_tokens": 12,
+    "output_tokens": 45,
+    "cache_read_tokens": 8000,
+    "cache_creation_tokens": 3200,
+    "cache_convention": "exclusive"
+  },
+  "expected_billable_input": 12
+}

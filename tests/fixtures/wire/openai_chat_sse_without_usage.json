@@ -1,0 +1,38 @@
+{
+  "_provenance": "Same shape as openai_chat_sse with the usage chunk removed \u2014 the stream_options.include_usage-off case that must read as unobserved, not zero.",
+  "dialect": "openai.chat",
+  "endpoint": "/v1/chat/completions",
+  "content_type": "text/event-stream",
+  "envelope": "sse",
+  "events": [
+    {
+      "object": "chat.completion.chunk",
+      "model": "gpt-4o",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "Hi"
+          }
+        }
+      ]
+    },
+    {
+      "object": "chat.completion.chunk",
+      "model": "gpt-4o",
+      "choices": [
+        {
+          "index": 0,
+          "delta": {},
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "model_name": "gpt-4o",
+    "input_tokens": null,
+    "output_tokens": null
+  },
+  "expected_billable_input": null
+}

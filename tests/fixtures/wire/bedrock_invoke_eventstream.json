@@ -1,0 +1,67 @@
+{
+  "_provenance": "Hand-built: an Anthropic passthrough body (the same wire shape as the litellm-sourced anthropic fixture) wrapped in Bedrock's base64 `bytes` chunk envelope, with the amazon-bedrock-invocationMetrics block Bedrock appends to the final chunk (docs.aws.amazon.com/bedrock InvokeModelWithResponseStream). Metrics must win over the passthrough body's own placeholder output count.",
+  "dialect": "bedrock.invoke",
+  "endpoint": "/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke-with-response-stream",
+  "content_type": "application/vnd.amazon.eventstream",
+  "envelope": "eventstream_base64",
+  "events": [
+    [
+      "chunk",
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "usage": {
+            "input_tokens": 70,
+            "cache_read_input_tokens": 12,
+            "output_tokens": 1
+          }
+        }
+      }
+    ],
+    [
+      "chunk",
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "x"
+        }
+      }
+    ],
+    [
+      "chunk",
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": {
+          "output_tokens": 33
+        }
+      }
+    ],
+    [
+      "chunk",
+      {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 70,
+          "outputTokenCount": 41,
+          "invocationLatency": 903,
+          "firstByteLatency": 214
+        }
+      }
+    ]
+  ],
+  "expected": {
+    "model_name": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "input_tokens": 70,
+    "output_tokens": 41,
+    "cache_read_tokens": 12,
+    "cache_convention": "exclusive"
+  },
+  "expected_billable_input": 70
+}
