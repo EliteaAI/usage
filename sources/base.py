@@ -90,14 +90,20 @@ def billable_input_tokens(reading):
 
 
 def coerce_int(value):
-    """None for anything not usable as a count — provider junk must never raise."""
+    """None for anything not a whole, non-negative count — truncating 5.9 or keeping -5 bills a
+    number the provider never actually sent."""
     if value is None or isinstance(value, bool):
         return None
     #
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    #
     try:
-        return int(value)
+        parsed = int(value)
     except (TypeError, ValueError):
         return None
+    #
+    return parsed if parsed >= 0 else None
 
 
 def dig(payload, *keys):

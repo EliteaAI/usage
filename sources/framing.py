@@ -97,13 +97,17 @@ class JSONValueScanner:
         return emitted
 
     def close(self):
-        """Flush a trailing unterminated scalar (a body ending mid-number)."""
+        """A trailing unterminated scalar means the body was cut mid-value — never guess it."""
         if self._capture is None or self._capture_mode != "scalar":
             return []
         #
-        emitted = []
-        self._finish(emitted)
-        return emitted
+        self.failures += 1
+        log.warning(
+            "usage.sources: %s truncated mid-value (key=%r, held=%d bytes)",
+            self._label, self._capture_key, len(self._capture),
+        )
+        self._reset_capture()
+        return []
 
     def _scan(self, emitted):
         while True:

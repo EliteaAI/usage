@@ -127,10 +127,16 @@ class TestCoerceInt:
         ([], None),
         (True, None),
         (False, None),
+        (5.9, None),
+        (-5, None),
+        ("-5", None),
+        (-0.0, 0),
     ])
     def test_coercion(self, value, expected):
         # True/False are rejected deliberately: bool is an int subclass in Python, and a
         # stray `"prompt_tokens": true` silently becoming 1 token is worse than None.
+        # 5.9 and -5 are rejected too: truncating or keeping either bills a count the
+        # provider never actually sent.
         assert base.coerce_int(value) == expected
 
 

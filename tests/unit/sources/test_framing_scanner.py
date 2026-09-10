@@ -216,12 +216,13 @@ class TestMalformedInput:
         #
         assert drain(JSONValueScanner(("usage",)), body) == [("usage", {"prompt_tokens": 5})]
 
-    def test_trailing_scalar_is_flushed_on_close(self):
-        # A body that ends immediately after a number has no delimiter to terminate it,
-        # so close() is what makes the final count observable.
+    def test_trailing_scalar_is_never_flushed_on_close(self):
+        # A body that ends immediately after a number has no delimiter to terminate it —
+        # that is truncation, not completion, so close() must not guess the value.
         scanner = JSONValueScanner(("eval_count",))
         assert list(scanner.feed(b'{"eval_count": 50')) == []
-        assert list(scanner.close()) == [("eval_count", 50)]
+        assert list(scanner.close()) == []
+        assert scanner.failures >= 1
 
     def test_escaped_quotes_do_not_confuse_key_detection(self):
         body = b'{"content": "she said \\"usage\\": 9", "usage": {"prompt_tokens": 1}}'
