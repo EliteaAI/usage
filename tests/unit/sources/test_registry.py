@@ -21,6 +21,8 @@ import pytest
 
 from usage.sources import base, registry
 
+from corpus import json_body
+
 PROXY_ENDPOINTS = [
     ("/v1/chat/completions", "openai.chat"),
     ("/v1/completions", "openai.chat"),
@@ -153,31 +155,74 @@ class TestInstanceIsolation:
         assert registry.get("nope.nothing") is None
 
 
-class TestDialectHint:
-    """The gateway routed the request, so it knows the provider — that beats sniffing a body.
+class TestProviderNarrowing:
+    """The provider comes from the credential in use, so it is known where a URL is not.
 
-    Unused today by design: the param exists so #6571 can pass routing identity through without
-    a signature change, and so the endpoint-shape mislabels (Azure without an api-version reading
-    as ai_dial.chat) stop being guesses.
+    It narrows the candidate dialects; the endpoint and body still decide the shape. A provider
+    that matches nothing falls back to sniffing everything, so narrowing can never be the reason
+    a readable body goes unparsed.
     """
 
-    def test_a_hint_overrides_what_the_endpoint_would_say(self, registered_dialects):
+    def test_a_provider_picks_the_right_label_for_an_ambiguous_endpoint(self, registered_dialects):
+        # Azure and DIAL speak the same body over the same deployment path; only the credential
+        # tells them apart when the api-version marker is missing.
         matched = registry.match(
-            "/openai/deployments/gpt-4o/chat/completions", "application/json",
-            dialect_hint="azure.chat",
+            "/openai/deployments/gpt-4o/chat/completions", "application/json", provider="azure_open_ai",
         )
         #
         assert matched.id == "azure.chat"
 
-    def test_an_unregistered_hint_falls_back_to_sniffing(self, registered_dialects):
+    def test_a_dial_credential_on_a_marker_less_endpoint_reads_as_dial(self, registered_dialects):
+        # The live bug this change fixes: a DIAL api_base such as https://ai-proxy.lab.epam.com
+        # carries no `dial` marker and no deployment path, so sniffing can only ever say openai.
+        endpoint = "/v1/chat/completions"
+        #
+        assert registry.match(endpoint, "application/json").id == "openai.chat"
+        assert registry.match(endpoint, "application/json", provider="ai_dial").id == "ai_dial.chat"
+
+    def test_a_provider_without_a_dialect_for_this_shape_still_parses(self, registered_dialects):
+        # DIAL serves embeddings too, and there is no ai_dial.embeddings — narrowing must not
+        # turn a perfectly readable body into an unparsed one.
+        matched = registry.match("/v1/embeddings", "application/json", provider="ai_dial")
+        #
+        assert matched.id == "openai.embeddings"
+
+    def test_an_unregistered_provider_warns_and_sniffs(self, registered_dialects, monkeypatch):
+        calls = []
+        monkeypatch.setattr(registry.log, "warning", lambda msg, *a, **k: calls.append(msg % a))
+        #
         matched = registry.match(
-            "/v1/chat/completions", "application/json", dialect_hint="vendor_z.chat",
+            "/v1/chat/completions", "application/json", provider="vendor_z",
         )
         #
         assert matched.id == "openai.chat"
+        assert any("has no registered dialect" in call for call in calls)
 
-    def test_no_hint_behaves_exactly_as_before(self, registered_dialects):
+    def test_no_provider_behaves_exactly_as_before(self, registered_dialects):
         assert registry.match("/v1/messages", "application/json").id == "anthropic.messages"
+
+    def test_a_narrowed_match_still_binds_the_event_stream_framer(self, registered_dialects):
+        bound = registry.get(
+            "bedrock.converse",
+            "/model/eu.amazon.nova-pro-v1:0/converse-stream",
+            "application/vnd.amazon.eventstream",
+        )
+        matched = registry.match(
+            "/model/eu.amazon.nova-pro-v1:0/converse-stream",
+            "application/vnd.amazon.eventstream",
+            provider="amazon_bedrock",
+        )
+        #
+        assert matched.id == "bedrock.converse"
+        assert type(matched._framer) is type(bound._framer)  # pylint: disable=W0212
+
+    def test_the_reading_carries_the_narrowed_label(self, registered_dialects, fixtures):
+        # The provider is an input to matching, not a fact of its own: what survives onto the
+        # reading is the dialect it selected, whose prefix is that provider.
+        matched = registry.match("/v1/chat/completions", "application/json", provider="ai_dial")
+        matched.feed(json_body(fixtures("ai_dial_chat_json")["body"]))
+        #
+        assert matched.result().dialect == "ai_dial.chat"
 
 
 class TestGetBindsTheInstance:
@@ -207,6 +252,7 @@ class TestExtensibility:
             """Defined entirely inside this test file — nothing in the library knows it."""
 
             id = "vendor_x.chat"
+            provider = "vendor_x"
 
             def __init__(self):
                 self.reading = base.UsageReading(dialect=self.id)
@@ -264,27 +310,23 @@ class TestEmptyRegistry:
             registry.register_defaults()
 
 
-class TestDialectHintMismatch:
-    """The hint still wins, but a mismatch against sniffing must leave a trail."""
+class TestNarrowingLeavesATrail:
+    """Falling back from a narrowed set to sniffing must be visible in the log."""
 
-    def test_a_hint_disagreeing_with_sniffing_logs_debug(self, registered_dialects, monkeypatch):
+    def test_a_fallback_to_sniffing_logs_debug(self, registered_dialects, monkeypatch):
         calls = []
         monkeypatch.setattr(registry.log, "debug", lambda msg, *a, **k: calls.append(msg % a))
         #
-        matched = registry.match(
-            "/v1/chat/completions", "application/json", dialect_hint="anthropic.messages",
-        )
+        matched = registry.match("/v1/embeddings", "application/json", provider="ai_dial")
         #
-        assert matched.id == "anthropic.messages"
-        assert any("disagrees with sniffing" in call for call in calls)
+        assert matched.id == "openai.embeddings"
+        assert any("sniffing all" in call for call in calls)
 
-    def test_a_hint_agreeing_with_sniffing_logs_nothing(self, registered_dialects, monkeypatch):
+    def test_a_provider_that_matches_logs_nothing(self, registered_dialects, monkeypatch):
         calls = []
         monkeypatch.setattr(registry.log, "debug", lambda msg, *a, **k: calls.append(msg % a))
         #
-        registry.match(
-            "/v1/chat/completions", "application/json", dialect_hint="openai.chat",
-        )
+        registry.match("/v1/chat/completions", "application/json", provider="ai_dial")
         #
         assert calls == []
 

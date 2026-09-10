@@ -172,3 +172,21 @@ class TestProtocolConformance:
             #
             assert isinstance(instance, base.UsageDialect)
             assert instance.id == dialect_id
+
+    def test_every_provider_is_a_real_credential_type(self, registered_dialects):
+        # The narrowing key is whatever configurations reports as the credential's type, so a
+        # dialect inventing its own vocabulary would simply never be narrowed to.
+        for dialect_id in registered_dialects.all():
+            provider = registered_dialects.get(dialect_id).provider
+            #
+            assert provider is None or provider in base.CREDENTIAL_PROVIDERS
+
+    def test_every_credential_type_can_reach_a_dialect(self, registered_dialects):
+        # The other direction: a credential family with no dialect means every call made with it
+        # falls back to sniffing, which is the labelling hole this narrowing exists to close.
+        covered = {
+            registered_dialects.get(dialect_id).provider
+            for dialect_id in registered_dialects.all()
+        }
+        #
+        assert set(base.CREDENTIAL_PROVIDERS) <= covered

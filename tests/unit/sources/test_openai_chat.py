@@ -143,3 +143,47 @@ class TestStreaming:
         #
         for cut in range(0, len(body), 13):
             read("openai.chat", "/v1/chat/completions", "text/event-stream", body[:cut])
+
+
+class TestLiteLLMBedrockNormalisation:
+    """LiteLLM reshapes Bedrock/Anthropic replies to this dialect and emits *both* cache
+    conventions in one body: nested OpenAI-style `prompt_tokens_details` and top-level
+    Anthropic-style `cache_read_input_tokens`. Only the nested pair may be read, or the same
+    cached tokens get subtracted twice. Captured from a real relayed call.
+    """
+
+    CACHE_HIT = {
+        "usage": {
+            "completion_tokens": 4, "prompt_tokens": 2731, "total_tokens": 2735,
+            "completion_tokens_details": {"reasoning_tokens": 0, "text_tokens": 4},
+            "prompt_tokens_details": {
+                "cached_tokens": 2719, "text_tokens": 12, "cache_creation_tokens": 0,
+            },
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2719,
+        },
+    }
+    CACHE_WRITE = {
+        "usage": {
+            "completion_tokens": 4, "prompt_tokens": 2731, "total_tokens": 2735,
+            "prompt_tokens_details": {
+                "cached_tokens": 0, "text_tokens": 12, "cache_creation_tokens": 2719,
+            },
+            "cache_creation_input_tokens": 2719, "cache_read_input_tokens": 0,
+        },
+    }
+
+    def test_a_cache_read_is_subtracted_exactly_once(self, registered_dialects):
+        reading = read("openai.chat", "/v1/chat/completions", "application/json",
+                       json_body(self.CACHE_HIT))
+        #
+        assert reading.cache_read_tokens == 2719
+        assert billable_input_tokens(reading) == 12
+
+    def test_a_cache_write_is_full_price_input_and_still_reported(self, registered_dialects):
+        # Creation tokens are inside prompt_tokens and are billed, at a premium the catalog
+        # applies — so they must be visible on the reading without reducing billable input.
+        reading = read("openai.chat", "/v1/chat/completions", "application/json",
+                       json_body(self.CACHE_WRITE))
+        #
+        assert reading.cache_creation_tokens == 2719
+        assert billable_input_tokens(reading) == 2731

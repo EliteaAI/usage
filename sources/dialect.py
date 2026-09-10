@@ -59,6 +59,7 @@ class ScannerDialect:
     """A text dialect: a whitelisted key scanner plus dialect-specific merge rules."""
 
     id = None
+    provider = None
     keys = ()
     cache_convention = CACHE_EXCLUSIVE
     # The key carrying the model name — Google spells it `modelVersion`.
@@ -78,6 +79,14 @@ class ScannerDialect:
     def matches(cls, endpoint, content_type, head):
         """Predicate only — must not touch instance state, the registry probes the class."""
         raise NotImplementedError
+
+    @classmethod
+    def matches_shape(cls, endpoint, content_type, head):
+        """Same question minus provider identity, for when the caller already knows the provider.
+
+        Only differs where matches() leans on a URL marker to tell providers apart.
+        """
+        return cls.matches(endpoint, content_type, head)
 
     def bind(self, endpoint, content_type):
         """Per-response setup that needs the request context. Called once, before feed()."""

@@ -27,6 +27,7 @@ class OpenAIResponsesDialect(ScannerDialect):
     """`input_tokens`/`output_tokens` like Anthropic, but cached is a subset of input."""
 
     id = "openai.responses"
+    provider = "open_ai"
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 

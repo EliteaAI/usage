@@ -27,6 +27,7 @@ class GoogleGenerateContentDialect(ScannerDialect):
     """`thoughtsTokenCount` sits outside `candidatesTokenCount`, so output is their sum."""
 
     id = "google.generate_content"
+    provider = "vertex_ai"
     keys = ("usageMetadata", "modelVersion")
     cache_convention = CACHE_INCLUSIVE
     model_key = "modelVersion"

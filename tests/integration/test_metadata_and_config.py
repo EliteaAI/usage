@@ -3,7 +3,12 @@
 Drift between an admin flag's path and the config it claims to edit is invisible until an
 operator flips a switch that writes nowhere. Cheap to pin here.
 """
+import json
+import pathlib
+
 import pytest
+
+SIBLING_PLUGINS = pathlib.Path(__file__).resolve().parents[3]
 
 EXPECTED_PROPERTIES = {
     "usage_mode", "usage_spend_source", "usage_retention_months",
@@ -48,6 +53,25 @@ class TestMetadata:
     def test_does_not_depend_on_an_interface_plugin(self, plugin_metadata):
         """Hooks resolve lazily at call time, so there is no hard coupling in either direction."""
         assert "runtime_interface_litellm" not in plugin_metadata["depends_on"]
+
+
+class TestTheInterfaceDeclaresTheHooks:
+    """enforce mode refuses an interface that does not declare usage_hooks.
+
+    The flag is how usage knows an interface calls the hooks at all, so a sibling that meters
+    traffic while forgetting the flag would be refused in enforce and look unmetered in the
+    diagnostics. Skipped where the sibling is not installed.
+    """
+
+    def test_litellm_declares_usage_hooks(self):
+        metadata_path = SIBLING_PLUGINS / "runtime_interface_litellm" / "metadata.json"
+        #
+        if not metadata_path.exists():
+            pytest.skip("runtime_interface_litellm is not installed next to usage")
+        #
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        #
+        assert metadata.get("usage_hooks") is True
 
 
 class TestConfigDefaults:

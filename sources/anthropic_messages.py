@@ -27,6 +27,7 @@ class AnthropicMessagesDialect(ScannerDialect):
     """`message_start` reports a placeholder output count that only `message_delta` fixes."""
 
     id = "anthropic.messages"
+    provider = None
     keys = ("usage", "model")
     cache_convention = CACHE_EXCLUSIVE
 

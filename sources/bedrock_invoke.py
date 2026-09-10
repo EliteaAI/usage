@@ -33,6 +33,7 @@ class BedrockInvokeDialect(EventStreamScannerDialect):
     """Bedrock's own metrics win; the passthrough model body is the fallback."""
 
     id = "bedrock.invoke"
+    provider = "amazon_bedrock"
     keys = (METRICS_KEY, "usage")
     cache_convention = CACHE_EXCLUSIVE
 

@@ -27,6 +27,7 @@ class OllamaNativeDialect(ScannerDialect):
     """Counts are top-level scalars rather than a usage object."""
 
     id = "ollama.native"
+    provider = "ollama"
     keys = ("prompt_eval_count", "eval_count", "model")
     cache_convention = CACHE_EXCLUSIVE
 
