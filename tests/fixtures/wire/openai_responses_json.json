@@ -1,0 +1,44 @@
+{
+  "_provenance": "Hand-built to the published OpenAI Responses object schema. Deliberately uses input_tokens/output_tokens to pin the Anthropic-lookalike case.",
+  "dialect": "openai.responses",
+  "endpoint": "/v1/responses",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "id": "resp_1",
+    "object": "response",
+    "model": "gpt-5",
+    "output": [
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "done"
+          }
+        ]
+      }
+    ],
+    "usage": {
+      "input_tokens": 300,
+      "output_tokens": 120,
+      "total_tokens": 420,
+      "input_tokens_details": {
+        "cached_tokens": 200
+      },
+      "output_tokens_details": {
+        "reasoning_tokens": 90
+      }
+    }
+  },
+  "expected": {
+    "model_name": "gpt-5",
+    "input_tokens": 300,
+    "output_tokens": 120,
+    "cache_read_tokens": 200,
+    "reasoning_tokens": 90,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 100
+}

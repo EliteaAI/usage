@@ -1,0 +1,54 @@
+{
+  "_provenance": "usageMetadata lifted verbatim from the pinned litellm clone at /srv/extra_space/elitea/litellm, commit bdf4acc472, file tests/test_litellm/llms/vertex_ai/gemini/test_vertex_and_google_ai_studio_gemini.py lines 736-747 (test_vertex_ai_usage_metadata_with_image_tokens). That test is the oracle for the thoughts trap: it asserts completion_tokens == 1600 == candidatesTokenCount 1442 + thoughtsTokenCount 158, confirming candidates EXCLUDES thoughts. Surrounding candidates/modelVersion are hand-built.",
+  "dialect": "google.generate_content",
+  "endpoint": "/v1beta/models/gemini-2.5-pro:generateContent",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "modelVersion": "gemini-2.5-pro",
+    "candidates": [
+      {
+        "finishReason": "STOP",
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "An image was produced."
+            }
+          ]
+        }
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 14,
+      "candidatesTokenCount": 1442,
+      "totalTokenCount": 1614,
+      "promptTokensDetails": [
+        {
+          "modality": "TEXT",
+          "tokenCount": 14
+        }
+      ],
+      "candidatesTokensDetails": [
+        {
+          "modality": "IMAGE",
+          "tokenCount": 1120
+        },
+        {
+          "modality": "TEXT",
+          "tokenCount": 322
+        }
+      ],
+      "thoughtsTokenCount": 158
+    }
+  },
+  "expected": {
+    "model_name": "gemini-2.5-pro",
+    "input_tokens": 14,
+    "output_tokens": 1600,
+    "reasoning_tokens": 158,
+    "cache_read_tokens": 0,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 14
+}

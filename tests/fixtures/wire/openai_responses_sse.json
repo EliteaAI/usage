@@ -1,0 +1,45 @@
+{
+  "_provenance": "Hand-built to the published Responses streaming schema; usage arrives nested inside the response.completed event's response object.",
+  "dialect": "openai.responses",
+  "endpoint": "/v1/responses",
+  "content_type": "text/event-stream",
+  "envelope": "sse",
+  "events": [
+    {
+      "type": "response.created",
+      "response": {
+        "id": "resp_2",
+        "model": "gpt-5"
+      }
+    },
+    {
+      "type": "response.output_text.delta",
+      "delta": "par"
+    },
+    {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_2",
+        "model": "gpt-5",
+        "usage": {
+          "input_tokens": 25,
+          "output_tokens": 8,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "model_name": "gpt-5",
+    "input_tokens": 25,
+    "output_tokens": 8,
+    "cache_read_tokens": 0,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 25
+}

@@ -1,0 +1,62 @@
+{
+  "_provenance": "Hand-built to the Gemini streamGenerateContent?alt=sse schema, with cachedContentTokenCount added (ai.google.dev context caching). usageMetadata is cumulative per chunk, so the reading must track the last one; cached is part of promptTokenCount here, unlike Anthropic.",
+  "dialect": "google.generate_content",
+  "endpoint": "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+  "content_type": "text/event-stream",
+  "envelope": "sse",
+  "events": [
+    {
+      "modelVersion": "gemini-2.5-flash",
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Par"
+              }
+            ]
+          }
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 5000,
+        "candidatesTokenCount": 4,
+        "cachedContentTokenCount": 4096,
+        "totalTokenCount": 5004
+      }
+    },
+    {
+      "modelVersion": "gemini-2.5-flash",
+      "candidates": [
+        {
+          "finishReason": "STOP",
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "tial."
+              }
+            ]
+          }
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 5000,
+        "candidatesTokenCount": 11,
+        "cachedContentTokenCount": 4096,
+        "thoughtsTokenCount": 20,
+        "totalTokenCount": 5031
+      }
+    }
+  ],
+  "expected": {
+    "model_name": "gemini-2.5-flash",
+    "input_tokens": 5000,
+    "output_tokens": 31,
+    "reasoning_tokens": 20,
+    "cache_read_tokens": 4096,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 904
+}

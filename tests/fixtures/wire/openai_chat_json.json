@@ -1,0 +1,45 @@
+{
+  "_provenance": "Hand-built to the published OpenAI Chat Completions object schema (platform.openai.com/docs/api-reference/chat/object). No OpenAI credentials exist on this project, so this is a schema fixture, not a capture.",
+  "dialect": "openai.chat",
+  "endpoint": "/v1/chat/completions",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "model": "gpt-4o-2024-11-20",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "The usage block sits after the choices."
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1024,
+      "completion_tokens": 256,
+      "total_tokens": 1280,
+      "prompt_tokens_details": {
+        "cached_tokens": 896,
+        "audio_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 64,
+        "audio_tokens": 0
+      }
+    }
+  },
+  "expected": {
+    "model_name": "gpt-4o-2024-11-20",
+    "input_tokens": 1024,
+    "output_tokens": 256,
+    "cache_read_tokens": 896,
+    "cache_creation_tokens": 0,
+    "reasoning_tokens": 64,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 128
+}

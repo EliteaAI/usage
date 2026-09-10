@@ -1,0 +1,54 @@
+{
+  "_provenance": "Hand-built to the Azure OpenAI chat completions schema, including the content-filter blocks Azure adds and OpenAI does not. Azure credentials DO exist on this project \u2014 replacing this with a redacted live capture is tracked in the PR checklist for #6570.",
+  "dialect": "azure.chat",
+  "endpoint": "/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "id": "chatcmpl-az1",
+    "object": "chat.completion",
+    "model": "gpt-4o-mini",
+    "prompt_filter_results": [
+      {
+        "prompt_index": 0,
+        "content_filter_results": {
+          "hate": {
+            "filtered": false,
+            "severity": "safe"
+          }
+        }
+      }
+    ],
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "content_filter_results": {
+          "hate": {
+            "filtered": false,
+            "severity": "safe"
+          }
+        },
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 64,
+      "completion_tokens": 16,
+      "total_tokens": 80,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "expected": {
+    "model_name": "gpt-4o-mini",
+    "input_tokens": 64,
+    "output_tokens": 16,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 64
+}
