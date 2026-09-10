@@ -105,6 +105,17 @@ class TestProvenance:
         assert reading.output_tokens == 7
         assert reading.token_source == base.TOKEN_SOURCE_UNPARSED
 
+    def test_a_half_read_with_zero_failures_is_still_unparsed(self):
+        # A safety-blocked Gemini response: promptTokenCount arrives, candidatesTokenCount and
+        # thoughtsTokenCount never do. Nothing raises, so this must not stay "provider" just
+        # because the failures conjunct used to require a broken read on top of a missing field.
+        body = b'{"usageMetadata":{"promptTokenCount":9}}'
+        reading = read("/v1/models/gemini-pro:generateContent", "application/json", body)
+        #
+        assert reading.input_tokens == 9
+        assert reading.output_tokens is None
+        assert reading.token_source == base.TOKEN_SOURCE_UNPARSED
+
     def test_no_bytes_at_all_is_not_downgraded(self):
         # Nothing was fed, so nothing was misread — an empty reading is not a failed one.
         reading = registry.match("/v1/chat/completions", "application/json").result()
@@ -116,6 +127,19 @@ class TestSeverity:
     def test_the_benign_missing_usage_stream_logs_info(self, recorder):
         chunk = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         read("/v1/chat/completions", "text/event-stream", chunk)
+        #
+        assert "warning" not in recorder.levels()
+        assert "info" in recorder.levels()
+
+    def test_a_stream_with_repeated_model_keys_and_no_usage_still_logs_info(self, recorder):
+        # openai.chat scans for ("usage", "model"), and every SSE chunk of a real stream
+        # carries "model" — that must not be mistaken for a usage key that was "seen".
+        body = (
+            b'data: {"model":"gpt-4o","choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: {"model":"gpt-4o","choices":[{"delta":{"content":" there"}}]}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        read("/v1/chat/completions", "text/event-stream", body)
         #
         assert "warning" not in recorder.levels()
         assert "info" in recorder.levels()

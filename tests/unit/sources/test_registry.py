@@ -250,6 +250,45 @@ class TestExtensibility:
         }
 
 
+class TestEmptyRegistry:
+    """An importer that forgets register_defaults() must not read as 'unknown endpoint'."""
+
+    def test_match_on_an_empty_registry_returns_none_and_warns(self, monkeypatch):
+        registry.clear()
+        calls = []
+        monkeypatch.setattr(registry.log, "warning", lambda msg, *a, **k: calls.append(msg % a))
+        try:
+            assert registry.match("/v1/chat/completions", "application/json") is None
+            assert any("registry is empty" in call for call in calls)
+        finally:
+            registry.register_defaults()
+
+
+class TestDialectHintMismatch:
+    """The hint still wins, but a mismatch against sniffing must leave a trail."""
+
+    def test_a_hint_disagreeing_with_sniffing_logs_debug(self, registered_dialects, monkeypatch):
+        calls = []
+        monkeypatch.setattr(registry.log, "debug", lambda msg, *a, **k: calls.append(msg % a))
+        #
+        matched = registry.match(
+            "/v1/chat/completions", "application/json", dialect_hint="anthropic.messages",
+        )
+        #
+        assert matched.id == "anthropic.messages"
+        assert any("disagrees with sniffing" in call for call in calls)
+
+    def test_a_hint_agreeing_with_sniffing_logs_nothing(self, registered_dialects, monkeypatch):
+        calls = []
+        monkeypatch.setattr(registry.log, "debug", lambda msg, *a, **k: calls.append(msg % a))
+        #
+        registry.match(
+            "/v1/chat/completions", "application/json", dialect_hint="openai.chat",
+        )
+        #
+        assert calls == []
+
+
 class TestFaultTolerance:
     """One broken dialect must not take the whole dispatch down."""
 

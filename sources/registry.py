@@ -71,10 +71,14 @@ def match(endpoint, content_type, head=b"", dialect_hint=None):
     and content-type alone; stage 2 re-asks with head bytes for bodies whose endpoint was not
     distinctive enough.
     """
+    if not _order:
+        log.warning("usage.sources: registry is empty — register_defaults() was never called")
+        return None
+    #
     endpoint = endpoint or ""
     content_type = content_type or ""
     #
-    hinted = _hinted(dialect_hint)
+    hinted = _hinted(dialect_hint, endpoint, content_type)
     if hinted is not None:
         return _bind(hinted, endpoint, content_type)
     #
@@ -101,8 +105,9 @@ def match(endpoint, content_type, head=b"", dialect_hint=None):
     return None
 
 
-def _hinted(dialect_hint):
-    """The hinted factory, or None to fall back to sniffing."""
+def _hinted(dialect_hint, endpoint, content_type):
+    """The hinted factory, or None to fall back to sniffing. The hint is authoritative even
+    when it disagrees with sniffing — but a disagreement is worth a grep-able line."""
     if not dialect_hint:
         return None
     #
@@ -111,6 +116,16 @@ def _hinted(dialect_hint):
         log.warning(
             "usage.sources: dialect hint %r is not registered, sniffing instead", dialect_hint,
         )
+        return None
+    #
+    try:
+        if not factory.matches(endpoint, content_type, b""):
+            log.debug(
+                "usage.sources: dialect hint %r disagrees with sniffing for endpoint=%r",
+                dialect_hint, endpoint,
+            )
+    except Exception:  # pylint: disable=W0703
+        pass
     #
     return factory
 

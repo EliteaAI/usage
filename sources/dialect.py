@@ -85,12 +85,10 @@ class ScannerDialect:
     def feed(self, chunk):
         self._fed_bytes += len(chunk) if chunk else 0
         for key, value in self._scanner.feed(chunk):
-            self._keys_seen += 1
             self._absorb(key, value)
 
     def result(self):
         for key, value in self._scanner.close():
-            self._keys_seen += 1
             self._absorb(key, value)
         #
         self._finalize_token_source()
@@ -116,7 +114,10 @@ class ScannerDialect:
         missing = self._reading.input_tokens is None or self._reading.output_tokens is None
         nothing = self._reading.input_tokens is None and self._reading.output_tokens is None
         #
-        if not (nothing or (self.failures and missing)):
+        # `missing` alone is enough: a half-read (e.g. a safety-blocked Gemini response with
+        # promptTokenCount but no candidatesTokenCount) must not stay "provider" just because
+        # nothing technically raised.
+        if not missing:
             return
         #
         self._reading.token_source = TOKEN_SOURCE_UNPARSED
@@ -149,6 +150,9 @@ class ScannerDialect:
                 self._absorb_model(value)
                 return
             #
+            # Only usage-bearing keys count here — every OpenAI SSE chunk carries "model",
+            # so counting it too would make a stream-without-usage look like a broken read.
+            self._keys_seen += 1
             self.absorb(key, value)
         except Exception:  # pylint: disable=W0703
             self._absorb_failures += 1
