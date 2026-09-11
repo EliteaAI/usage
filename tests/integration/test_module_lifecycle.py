@@ -114,6 +114,21 @@ class TestInit:
         marker = iter(())
         assert instance.meter_llm_response(None, None, marker) is marker
 
+    def test_the_interface_surface_is_reachable_on_the_registered_tool(self):
+        """An interface plugin only ever sees this tool; a missing name is an AttributeError
+        on every LLM call, which no unit test binding off the module class would catch."""
+        instance, _ = build()
+        #
+        proxy_target = {"endpoint": "/v1/chat/completions", "headers": {}, "json": {}}
+        proxy_auth = {}
+        #
+        # mode defaults to off here, so this is also the zero-cost path
+        instance.prepare_llm_call(proxy_target, proxy_auth, "m", 1)
+        marker = iter(())
+        #
+        assert proxy_auth == {}
+        assert instance.meter_llm_call(proxy_target, proxy_auth, None, marker) is marker
+
 
 class TestReady:
     """ready() is diagnostics plus cron; neither may block startup."""
