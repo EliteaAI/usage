@@ -31,6 +31,12 @@ TOKEN_SOURCE_PROVIDER = "provider"
 TOKEN_SOURCE_ESTIMATED = "estimated"
 TOKEN_SOURCE_UNPARSED = "unparsed"
 
+# The closed set of credential types configurations reports; a dialect's provider is one of these
+# or None when no credential family reaches it directly.
+CREDENTIAL_PROVIDERS = (
+    "ai_dial", "amazon_bedrock", "azure_open_ai", "ollama", "open_ai", "vertex_ai",
+)
+
 # Whether a provider's cached-token count is part of its input count or additional to it.
 CACHE_INCLUSIVE = "inclusive"
 CACHE_EXCLUSIVE = "exclusive"
@@ -56,6 +62,8 @@ class UsageDialect(typing.Protocol):
     """One wire dialect. Fed incrementally so no full body is ever buffered."""
 
     id: str
+    # Credential type this dialect belongs to, or None when none reaches it directly.
+    provider: typing.Optional[str]
 
     # Declared on the class: the registry probes candidates before instantiating the winner.
     @classmethod

@@ -26,6 +26,7 @@ class AiDialChatDialect(OpenAIChatDialect):
     """Deployment path without Azure's mandatory `api-version`, or an explicit DIAL host."""
 
     id = "ai_dial.chat"
+    provider = "ai_dial"
 
     @classmethod
     def matches(cls, endpoint, content_type, head):
@@ -38,3 +39,9 @@ class AiDialChatDialect(OpenAIChatDialect):
             return True
         #
         return DEPLOYMENT_MARKER in path and "api-version" not in query_of(endpoint)
+
+    @classmethod
+    def matches_shape(cls, endpoint, content_type, head):
+        # Provider already known, so the DIAL/Azure URL marker it hangs on is redundant here —
+        # this is exactly the api_base that carries no marker at all.
+        return OpenAIChatDialect.matches(endpoint, content_type, head)

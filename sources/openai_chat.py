@@ -29,6 +29,7 @@ class OpenAIChatDialect(ScannerDialect):
     """`prompt_tokens` / `completion_tokens`, cached tokens inside the prompt count."""
 
     id = "openai.chat"
+    provider = "open_ai"
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 
@@ -50,6 +51,12 @@ class OpenAIChatDialect(ScannerDialect):
         set_if_zero(
             self._reading, "cache_read_tokens",
             first_int(value.get("prompt_tokens_details"), "cached_tokens"),
+        )
+        # LiteLLM's Bedrock/Anthropic normalisation reports cache writes here; priced at a
+        # premium, and not subtracted from input (they are full-price prompt tokens).
+        set_if_zero(
+            self._reading, "cache_creation_tokens",
+            first_int(value.get("prompt_tokens_details"), "cache_creation_tokens"),
         )
         set_if_zero(
             self._reading, "reasoning_tokens",

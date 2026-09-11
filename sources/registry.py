@@ -26,6 +26,7 @@ from .base import log
 
 _factories = {}
 _order = []
+_by_provider = {}
 
 
 def register(factory) -> None:
@@ -36,7 +37,14 @@ def register(factory) -> None:
         _order.append(dialect_id)
     #
     _factories[dialect_id] = factory
-    log.info("usage.sources: registered %r", dialect_id)
+    #
+    provider = getattr(factory, "provider", None)
+    if provider:
+        _by_provider.setdefault(provider, [])
+        if dialect_id not in _by_provider[provider]:
+            _by_provider[provider].append(dialect_id)
+    #
+    log.info("usage.sources: registered %r (provider=%r)", dialect_id, provider)
 
 
 def get(dialect_id, endpoint="", content_type=""):
@@ -61,15 +69,15 @@ def clear() -> None:
     """Test seam — the live process registers once at import and never unregisters."""
     _factories.clear()
     del _order[:]
+    _by_provider.clear()
 
 
-def match(endpoint, content_type, head=b"", dialect_hint=None):
+def match(endpoint, content_type, head=b"", provider=None):
     """The dialect that owns this response, or None (caller records it as unparsed).
 
-    `dialect_hint` is authoritative when it names a registered dialect: the caller routed the
-    request and knows the provider, which beats sniffing a body. Stage 1 then asks on endpoint
-    and content-type alone; stage 2 re-asks with head bytes for bodies whose endpoint was not
-    distinctive enough.
+    `provider` is the credential family actually in use, so it is reliable where a URL is not:
+    a DIAL credential on an api_base with no `dial` marker is unrecognisable by sniffing alone.
+    It narrows the candidates; the endpoint and body still decide the shape.
     """
     if not _order:
         log.warning("usage.sources: registry is empty — register_defaults() was never called")
@@ -78,19 +86,62 @@ def match(endpoint, content_type, head=b"", dialect_hint=None):
     endpoint = endpoint or ""
     content_type = content_type or ""
     #
-    hinted = _hinted(dialect_hint, endpoint, content_type)
-    if hinted is not None:
-        return _bind(hinted, endpoint, content_type)
+    candidates = _candidates(provider)
     #
+    # Shape-only while narrowed: the provider is already established, so a dialect must not be
+    # rejected for lacking the URL marker that would have identified its provider by sniffing.
+    dialect = _probe(
+        candidates, endpoint, content_type, head, shape_only=candidates is not _order,
+    )
+    if dialect is not None:
+        return dialect
+    #
+    # A provider has no dialect for every shape it can serve — DIAL on /v1/embeddings is read by
+    # openai.embeddings — so narrowing must never be the reason a readable body goes unparsed.
+    if candidates is not _order:
+        log.debug(
+            "usage.sources: provider %r owns no dialect for endpoint=%r, sniffing all",
+            provider, endpoint,
+        )
+        dialect = _probe(_order, endpoint, content_type, head)
+        if dialect is not None:
+            return dialect
+    #
+    log.warning(
+        "usage.sources: no dialect owns endpoint=%r content_type=%r provider=%r — usage unparsed",
+        endpoint, content_type, provider,
+    )
+    return None
+
+
+def _candidates(provider):
+    """The dialect ids to probe: the provider's own, or every registered one."""
+    if not provider:
+        return _order
+    #
+    narrowed = _by_provider.get(provider)
+    if not narrowed:
+        log.warning(
+            "usage.sources: provider %r has no registered dialect, sniffing instead", provider,
+        )
+        return _order
+    #
+    return narrowed
+
+
+def _probe(candidates, endpoint, content_type, head, shape_only=False):
+    """Stage 1 asks on endpoint and content-type alone; stage 2 re-asks with head bytes for
+    bodies whose endpoint was not distinctive enough."""
     probes = [b""] if not head else [b"", head]
     #
     for probe in probes:
-        for dialect_id in _order:
+        for dialect_id in candidates:
             factory = _factories[dialect_id]
+            predicate = factory.matches_shape if shape_only else factory.matches
             try:
                 # Probed on the class: matches() is a predicate, so instantiating every
                 # candidate just to ask would allocate a scanner per dialect per response.
-                if factory.matches(endpoint, content_type, probe):
+                if predicate(endpoint, content_type, probe):
                     return _bind(factory, endpoint, content_type)
             except Exception:  # pylint: disable=W0703
                 log.warning(
@@ -98,36 +149,7 @@ def match(endpoint, content_type, head=b"", dialect_hint=None):
                     dialect_id, endpoint, content_type, exc_info=True,
                 )
     #
-    log.warning(
-        "usage.sources: no dialect owns endpoint=%r content_type=%r — usage unparsed",
-        endpoint, content_type,
-    )
     return None
-
-
-def _hinted(dialect_hint, endpoint, content_type):
-    """The hinted factory, or None to fall back to sniffing. The hint is authoritative even
-    when it disagrees with sniffing — but a disagreement is worth a grep-able line."""
-    if not dialect_hint:
-        return None
-    #
-    factory = _factories.get(dialect_hint)
-    if factory is None:
-        log.warning(
-            "usage.sources: dialect hint %r is not registered, sniffing instead", dialect_hint,
-        )
-        return None
-    #
-    try:
-        if not factory.matches(endpoint, content_type, b""):
-            log.debug(
-                "usage.sources: dialect hint %r disagrees with sniffing for endpoint=%r",
-                dialect_hint, endpoint,
-            )
-    except Exception:  # pylint: disable=W0703
-        pass
-    #
-    return factory
 
 
 def _bind(factory, endpoint, content_type):

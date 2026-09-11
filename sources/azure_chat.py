@@ -27,6 +27,7 @@ class AzureChatDialect(OpenAIChatDialect):
     """Only the label differs from openai.chat; Azure's own paths carry `api-version`."""
 
     id = "azure.chat"
+    provider = "azure_open_ai"
 
     @classmethod
     def matches(cls, endpoint, content_type, head):
@@ -36,3 +37,9 @@ class AzureChatDialect(OpenAIChatDialect):
             return False
         #
         return "api-version" in query_of(endpoint)
+
+    @classmethod
+    def matches_shape(cls, endpoint, content_type, head):
+        # Provider already known, so the DIAL/Azure URL marker it hangs on is redundant here —
+        # this is exactly the api_base that carries no marker at all.
+        return OpenAIChatDialect.matches(endpoint, content_type, head)

@@ -38,6 +38,7 @@ class BedrockConverseDialect(EventStreamScannerDialect):
     """The `metadata` event carrying usage arrives last, after every content delta."""
 
     id = "bedrock.converse"
+    provider = "amazon_bedrock"
     keys = ("usage",)
     cache_convention = CACHE_EXCLUSIVE
 

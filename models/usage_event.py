@@ -79,7 +79,8 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
 
     # Integer micro-dollars, never float: money must not accumulate rounding error
     cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    cost_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # Wide enough for the costs catalog's own tags, e.g. 'estimated:costs-catalog'
+    cost_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     token_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
     tool_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)

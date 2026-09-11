@@ -25,7 +25,9 @@ from queue import Empty
 from pylon.core.tools import log, module  # pylint: disable=E0611,E0401
 
 from .hooks import begin_llm_call, meter_llm_response
-from .methods.mode import MODE_OFF
+from .interface import meter_llm_call, prepare_llm_call
+from .methods.mode import MODE_ENFORCE, MODE_OFF
+from .sources import registry
 
 
 class Module(module.ModuleModel):
@@ -42,6 +44,8 @@ class Module(module.ModuleModel):
         #
         # Registers both tables in the shared metadata; provisioning is shared's job
         from .models import usage_counter, usage_event  # pylint: disable=C0415,W0611
+        #
+        registry.register_defaults()
         #
         self.descriptor.register_tool("usage_hooks", self)
 
@@ -65,18 +69,23 @@ class Module(module.ModuleModel):
         """ De-initialize module """
         log.info("De-initializing usage plugin")
 
+    # What a runtime interface calls; the two below are the internals it does not need
+    prepare_llm_call = staticmethod(prepare_llm_call)
+    meter_llm_call = staticmethod(meter_llm_call)
     begin_llm_call = staticmethod(begin_llm_call)
     meter_llm_response = staticmethod(meter_llm_response)
 
     def _warn_if_metering_expected(self):
-        """An operator who flips the mode early must be told nothing is metered yet."""
+        """Enforcement is not wired yet, so an operator asking for it must be told."""
         mode = self.usage_get_mode()
         #
-        if mode != MODE_OFF:
+        if mode == MODE_ENFORCE:
             log.warning(
-                "usage: mode is %s but metering is not implemented yet; no usage is recorded "
-                "and nothing is enforced", mode,
+                "usage: mode is enforce but admission control is not implemented yet; calls are "
+                "metered and none are refused",
             )
+        elif mode != MODE_OFF:
+            log.info("usage: metering LLM calls, mode=%s", mode)
 
     def _register_cron(self):
         try:

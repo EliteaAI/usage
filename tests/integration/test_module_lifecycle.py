@@ -5,6 +5,7 @@ import types
 from fixtures.helpers import bind
 from usage import module as module_module
 from usage.methods import interfaces, mode as mode_module, partitions
+from usage.sources import registry
 
 
 def build(config=None, rpc=None, descriptors=None):
@@ -51,6 +52,17 @@ class TestInit:
         instance.init()
         #
         assert order == ["init_all", "register_tool:usage_hooks"]
+
+    def test_the_wire_dialects_are_registered(self):
+        # Nothing else calls register_defaults() in a live pylon, so without this init() the
+        # registry is empty at runtime and every single call is recorded as `unparsed`.
+        registry.clear()
+        instance, _ = build()
+        #
+        instance.init()
+        #
+        assert "openai.chat" in registry.all()
+        assert "ai_dial.chat" in registry.all()
 
     def test_models_are_registered_in_the_shared_metadata(self):
         """shared.ready() and the admin create_tables task both read that one metadata."""
@@ -101,6 +113,21 @@ class TestInit:
         ) is None
         marker = iter(())
         assert instance.meter_llm_response(None, None, marker) is marker
+
+    def test_the_interface_surface_is_reachable_on_the_registered_tool(self):
+        """An interface plugin only ever sees this tool; a missing name is an AttributeError
+        on every LLM call, which no unit test binding off the module class would catch."""
+        instance, _ = build()
+        #
+        proxy_target = {"endpoint": "/v1/chat/completions", "headers": {}, "json": {}}
+        proxy_auth = {}
+        #
+        # mode defaults to off here, so this is also the zero-cost path
+        instance.prepare_llm_call(proxy_target, proxy_auth, "m", 1)
+        marker = iter(())
+        #
+        assert proxy_auth == {}
+        assert instance.meter_llm_call(proxy_target, proxy_auth, None, marker) is marker
 
 
 class TestReady:
@@ -157,26 +184,39 @@ class TestReady:
             for message in recording_log.messages("warning")
         )
 
-    def test_warns_when_a_mode_is_set_but_nothing_is_metered_yet(self, recording_log):
-        """An operator who flips the flag before the drainer lands must be told plainly."""
+    def test_observe_says_it_is_metering_without_crying_wolf(self, recording_log):
+        """Metering works now, so observe is an ordinary operating mode, not a warning."""
         instance, _ = build(config={"mode": "observe"})
         #
         instance.ready()
         #
         assert any(
-            "metering is not implemented yet" in message
+            "metering LLM calls" in message for message in recording_log.messages("info")
+        )
+        assert not recording_log.messages("warning")
+
+    def test_enforce_warns_that_nothing_is_refused_yet(self, recording_log):
+        # An operator who asks for enforcement gets metering but no admission control, and
+        # must not be left believing budgets are being applied.
+        instance, _ = build(config={"mode": "enforce"})
+        #
+        instance.ready()
+        #
+        assert any(
+            "admission control is not implemented yet" in message
             for message in recording_log.messages("warning")
         )
 
-    def test_off_mode_emits_no_such_warning(self, recording_log):
+    def test_off_mode_says_nothing_at_all(self, recording_log):
         instance, _ = build(config={"mode": "off"})
         #
         instance.ready()
         #
         assert not any(
-            "metering is not implemented yet" in message
-            for message in recording_log.messages("warning")
+            "metering LLM calls" in message
+            for message in recording_log.messages("info")
         )
+        assert not recording_log.messages("warning")
 
 
 class TestReconfig:
@@ -191,27 +231,27 @@ class TestReconfig:
         assert instance.usage_get_mode() == "enforce"
         assert any("usage reconfigured" in message for message in recording_log.messages("info"))
 
-    def test_flipping_to_observe_at_runtime_warns_nothing_is_metered(self, recording_log):
+    def test_flipping_to_enforce_at_runtime_warns(self, recording_log):
         # The admin flag flips without a restart, so ready()'s one-shot warning would never
         # be seen by the operator who actually flipped it.
         instance, _ = build(config={"mode": "off"})
         #
-        instance.descriptor.config["usage"]["mode"] = "observe"
+        instance.descriptor.config["usage"]["mode"] = "enforce"
         instance.reconfig()
         #
         assert any(
-            "metering is not implemented yet" in message
+            "admission control is not implemented yet" in message
             for message in recording_log.messages("warning")
         )
 
     def test_flipping_back_to_off_does_not_warn(self, recording_log):
-        instance, _ = build(config={"mode": "observe"})
+        instance, _ = build(config={"mode": "enforce"})
         #
         instance.descriptor.config["usage"]["mode"] = "off"
         instance.reconfig()
         #
         assert not any(
-            "metering is not implemented yet" in message
+            "admission control is not implemented yet" in message
             for message in recording_log.messages("warning")
         )
 

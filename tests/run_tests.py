@@ -80,6 +80,9 @@ def install_pylon_stubs():
     )
     tools.config = types.SimpleNamespace(POSTGRES_SCHEMA='centry')
     tools.context = types.SimpleNamespace(rpc_manager=None)
+    tools.this = types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config={}), module=None,
+    )
     sys.modules.setdefault('tools', tools)
 
 

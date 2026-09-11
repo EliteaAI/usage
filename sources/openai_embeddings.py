@@ -25,6 +25,7 @@ class OpenAIEmbeddingsDialect(ScannerDialect):
     """No completion side at all, so output is recorded as an observed zero, not None."""
 
     id = "openai.embeddings"
+    provider = "open_ai"
     keys = ("usage", "model")
     cache_convention = CACHE_INCLUSIVE
 
