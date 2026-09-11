@@ -196,6 +196,8 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
 
 def _price(model_name, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens):
     """(cost_usd, cost_source); an unpriced model is marked, never silently zero."""
+    # Uncached on purpose: `costs` is in this pylon, so the RPC dispatches in-process, and it
+    # serves rates from its own in-memory catalog — caching here would copy money math out of it.
     try:
         priced = context.rpc_manager.timeout(10).costs_compute_llm_cost(
             model_name=model_name,
