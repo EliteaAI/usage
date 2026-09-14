@@ -195,11 +195,11 @@ class TestPriming:
         instance.usage_gate_acquire(42, 7, MILLION, MOMENT)
         instance.usage_gate_acquire(42, 7, MILLION, MOMENT)
         #
-        hsetnx_calls = [call for call in client.calls if call[0] == "hsetnx"]
-        assert len(hsetnx_calls) == 2  # once for the project hash, once for the member hash
+        primes = [call for call in client.calls if call[0] == "eval" and len(call[1]) == 1]
+        assert len(primes) == 2  # once for the project hash, once for the member hash
         assert client.counter(gate.project_hash_key(42, MOMENT)) == 7 * MILLION
 
-    def test_priming_never_overwrites_a_warm_counter(self):
+    def test_priming_never_lowers_a_counter_that_is_ahead(self):
         instance, client = build(enabled(project=100 * MILLION), persisted=7 * MILLION)
         client.hset(gate.project_hash_key(42, MOMENT), "counter", 9 * MILLION)
         #
@@ -207,17 +207,28 @@ class TestPriming:
         #
         assert client.counter(gate.project_hash_key(42, MOMENT)) == 9 * MILLION
 
+    def test_priming_raises_a_key_left_stale_while_budgets_were_disabled(self):
+        # A hash primed at 0 before limits were removed keeps existing, so the spend that
+        # accrued meanwhile lives only in Postgres — enforcement must resume from that figure
+        instance, client = build(enabled(project=100 * MILLION), persisted=7 * MILLION)
+        client.hset(gate.project_hash_key(42, MOMENT), "counter", 0)
+        #
+        instance.usage_gate_acquire(42, None, MILLION, MOMENT)
+        #
+        assert client.counter(gate.project_hash_key(42, MOMENT)) == 7 * MILLION
+
     def test_a_failed_prime_is_retried_on_the_next_call(self):
         instance, client = build(enabled(project=100 * MILLION))
         broken = {"first": True}
+        real_eval = client.eval
         #
-        def hsetnx(key, field, value):
-            if broken.pop("first", None):
+        def failing_eval(script, numkeys, *args):
+            if script == gate.PRIME_LUA and broken.pop("first", None):
                 raise RuntimeError("down")
             #
-            return RecordingRedis.hsetnx(client, key, field, value)
+            return real_eval(script, numkeys, *args)
         #
-        client.hsetnx = hsetnx
+        client.eval = failing_eval
         #
         assert instance.usage_gate_acquire(42, None, MILLION, MOMENT)["healthy"] is False
         assert instance.usage_gate_acquire(42, None, MILLION, MOMENT)["healthy"] is True

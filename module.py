@@ -59,10 +59,7 @@ class Module(module.ModuleModel):
 
     def reconfig(self):
         """ Re-config """
-        log.info(
-            "usage reconfigured: mode=%s spend_source=%s",
-            self.usage_get_mode(), self.usage_get_spend_source(),
-        )
+        log.info("usage reconfigured: mode=%s", self.usage_get_mode())
         self._report_interfaces()
 
     def deinit(self):

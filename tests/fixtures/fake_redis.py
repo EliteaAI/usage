@@ -148,7 +148,21 @@ class RecordingRedis:
         if script == gate.SETTLE_LUA:
             return self._settle(keys, argv)
         #
+        if script == gate.PRIME_LUA:
+            return self._prime(keys, argv)
+        #
         raise AssertionError("unknown script")
+
+    def _prime(self, keys, argv):
+        hash_key, persisted = keys[0], int(argv[0])
+        current = self.hashes.get(hash_key, {}).get("counter")
+        #
+        if current is None or int(current) < persisted:
+            self.hset(hash_key, "counter", persisted)
+            #
+            return 1
+        #
+        return 0
 
     def _gate(self, keys, argv):
         project_hash, member_hash, resv, index = keys

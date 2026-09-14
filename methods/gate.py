@@ -96,6 +96,20 @@ return removed
 """
 
 
+# KEYS: 1=counter hash · ARGV: 1=persisted counter
+# Raise-to-max, not HSETNX: a warm key left behind while budgets were disabled sits below
+# real spend, and skipping it would resume enforcement from a stale figure.
+PRIME_LUA = """
+local persisted = tonumber(ARGV[1])
+local current = redis.call('HGET', KEYS[1], 'counter')
+if current == false or tonumber(current) < persisted then
+    redis.call('HSET', KEYS[1], 'counter', persisted)
+    return 1
+end
+return 0
+"""
+
+
 def period_of(moment):
     """'YYYYMM' of the period a moment falls in."""
     return f"{period_start(moment, PERIOD_MONTH):%Y%m}"
@@ -310,7 +324,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_gate_prime(self, hash_key, counter_key):
-        """Seed a cold hash from Postgres. HSETNX, so racers are harmless and a warm key is kept.
+        """Seed a cold or stale hash from Postgres, never lowering a counter that is ahead.
 
         Without this an eviction silently resets the counter to zero and lets spend run away.
         """
@@ -320,8 +334,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         _primed[hash_key] = True
         #
         try:
-            self.usage_redis_client().hsetnx(
-                hash_key, "counter", self.usage_counter_of(counter_key),
+            self.usage_redis_client().eval(
+                PRIME_LUA, 1, hash_key, self.usage_counter_of(counter_key),
             )
         except:  # pylint: disable=W0702
             # Retry on the next call rather than leaving an unprimed key marked primed

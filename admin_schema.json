@@ -4,7 +4,7 @@
   "properties": {
     "usage_mode": {
       "type": "string",
-      "title": "Usage metering mode",
+      "title": "Cost Budgets Mode",
       "description": "off - nothing is metered or blocked. observe - meter and evaluate limits without blocking. enforce - reject calls once a limit is exceeded.",
       "enum": [
         "off",
@@ -12,22 +12,8 @@
         "enforce"
       ],
       "path": "usage.mode",
-      "section": "Usage",
+      "section": "cost_budgets",
       "default": "off",
-      "requires_restart": false
-    },
-    "usage_spend_source": {
-      "type": "string",
-      "title": "Spend data source",
-      "description": "Which backend the spend reports read. auto follows the metering mode.",
-      "enum": [
-        "auto",
-        "litellm",
-        "elitea"
-      ],
-      "path": "usage.spend_source",
-      "section": "Usage",
-      "default": "auto",
       "requires_restart": false
     },
     "usage_retention_months": {
@@ -168,6 +154,48 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 3600
+      }
+    },
+    "usage_project_warning_pct": {
+      "type": "integer",
+      "title": "Team Project Budget Warning Threshold (%)",
+      "description": "Show a usage alert when a team project's spend reaches this percentage of its budget limit.",
+      "path": "usage.warning_thresholds.project_pct",
+      "section": "cost_budgets",
+      "default": 80,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100
+      }
+    },
+    "usage_personal_project_warning_pct": {
+      "type": "integer",
+      "title": "Personal Project Budget Warning Threshold (%)",
+      "description": "Show a usage alert when a user's own project spend reaches this percentage of its budget limit.",
+      "path": "usage.warning_thresholds.personal_project_pct",
+      "section": "cost_budgets",
+      "default": 80,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100
+      }
+    },
+    "usage_user_warning_pct": {
+      "type": "integer",
+      "title": "Default Per-Member Budget Warning Threshold (%)",
+      "description": "Show a usage alert when a member's spend inside a team project reaches this percentage of their own budget limit.",
+      "path": "usage.warning_thresholds.user_pct",
+      "section": "cost_budgets",
+      "default": 80,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100
       }
     }
   }
