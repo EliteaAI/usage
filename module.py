@@ -25,7 +25,7 @@ from queue import Empty
 from pylon.core.tools import log, module  # pylint: disable=E0611,E0401
 
 from .hooks import begin_llm_call, meter_llm_response
-from .interface import meter_llm_call, prepare_llm_call
+from .interface import meter_llm_call, prepare_llm_call, request_usage_frame
 from .methods.mode import MODE_ENFORCE
 from .sources import registry
 
@@ -66,11 +66,13 @@ class Module(module.ModuleModel):
         """ De-initialize module """
         log.info("De-initializing usage plugin")
 
-    # What a runtime interface calls; the two below are the internals it does not need
+    # What a runtime interface calls; the three below are for an interface that knows its own
+    # provider and so drives the lower level directly (WAM), instead of having it resolved
     prepare_llm_call = staticmethod(prepare_llm_call)
     meter_llm_call = staticmethod(meter_llm_call)
     begin_llm_call = staticmethod(begin_llm_call)
     meter_llm_response = staticmethod(meter_llm_response)
+    request_usage_frame = staticmethod(request_usage_frame)
 
     def _report_interfaces(self):
         """An unmetered interface keeps serving, so enforcement gaps are only visible in the log."""

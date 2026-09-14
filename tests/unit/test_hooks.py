@@ -4,6 +4,7 @@ The hooks are the money path, so the assertions here are deliberately about the 
 lands rather than about internal state: an unmetered call must become a visible `unparsed` row
 instead of nothing, which is the defect this replaces.
 """
+import base64
 import inspect
 import json
 import types
@@ -16,13 +17,28 @@ from usage.sources import registry
 
 BEGIN_PARAMS = [
     "project_id", "user_id", "model_name", "endpoint", "headers", "provider", "run_id",
-    "max_output_tokens", "input_size_bytes",
+    "attribution", "max_output_tokens", "input_size_bytes",
 ]
 
-OPTIONAL_BEGIN_PARAMS = ("provider", "run_id", "max_output_tokens", "input_size_bytes")
+# Optional so a second interface can adopt the hooks before it can supply any of them
+BEGIN_OPTIONAL_PARAMS = (
+    "provider", "run_id", "attribution", "max_output_tokens", "input_size_bytes",
+)
 
 # Any uuid; what matters is that it survives canonicalisation and a malformed one does not
 RUN_ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
+
+# What pylon_indexer resolves for an agent run: usage_event column names, nothing to map
+ATTRIBUTION = {
+    "conversation_id": "a95c4c8d-d123-4f98-9841-5efd3ea8788e",
+    "entity_type": "application",
+    "entity_id": 1,
+    "entity_version_id": 2,
+    "entity_name": "Test Github Agent (base)",
+    "root_entity_type": "application",
+    "root_entity_id": 1,
+    "root_entity_version_id": 2,
+}
 
 OPENAI_JSON = (
     b'{"model": "gpt-4o", "usage": {"prompt_tokens": 100, "completion_tokens": 20}}'
@@ -116,6 +132,13 @@ def begin(provider=None, model_name="gpt-4o", endpoint="/v1/chat/completions", h
     )
 
 
+def packed(columns):
+    """The header exactly as pylon_indexer sends it: base64url'd compact JSON, padding stripped."""
+    blob = json.dumps(columns, separators=(",", ":"))
+    #
+    return base64.urlsafe_b64encode(blob.encode("utf-8")).decode("ascii").rstrip("=")
+
+
 def drain(ctx, chunks, status=200, content_type="application/json"):
     response = {"status_code": status, "headers": {"Content-Type": content_type}}
     #
@@ -131,13 +154,10 @@ class TestTheFrozenContract:
     def test_only_the_late_additions_are_optional(self):
         parameters = inspect.signature(hooks.begin_llm_call).parameters
         #
-        # Optional so a second interface can adopt the hooks before it can supply them all.
-        for name in OPTIONAL_BEGIN_PARAMS:
-            assert parameters[name].default is None
-        #
+        assert all(parameters[name].default is None for name in BEGIN_OPTIONAL_PARAMS)
         assert all(
             p.default is inspect.Parameter.empty
-            for name, p in parameters.items() if name not in OPTIONAL_BEGIN_PARAMS
+            for name, p in parameters.items() if name not in BEGIN_OPTIONAL_PARAMS
         )
 
     def test_no_var_kwargs_so_a_typo_is_caught(self):
@@ -302,6 +322,113 @@ class TestTheRowThatLands:
         row, = metering.rows
         assert row["token_source"] == "provider"
         assert row["input_tokens"] == 100
+
+
+class TestAttribution:
+    """Which conversation and which agent the call belongs to — a caller's header, so untrusted.
+
+    The columns are named as in usage_event so neither side maps anything; the tool rows of the
+    same run are written from pylon_indexer with identical values.
+    """
+
+    def attributed(self, headers=None, attribution=None):
+        return hooks.begin_llm_call(
+            project_id=7, user_id=42, model_name="gpt-4o", endpoint="/v1/chat/completions",
+            headers={} if headers is None else headers, attribution=attribution,
+        )
+
+    def test_the_header_is_decoded_onto_the_row(self, metering):
+        drain(self.attributed({hooks.ATTRIBUTION_HEADER: packed(ATTRIBUTION)}), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert {key: row[key] for key in ATTRIBUTION} == ATTRIBUTION
+
+    def test_an_explicitly_passed_attribution_is_used(self, metering):
+        # The interface must strip the header before the request leaves — these ids are ours,
+        # not the upstream's — so by metering time the parked value is all there is.
+        drain(self.attributed(attribution=dict(ATTRIBUTION)), [OPENAI_JSON])
+        #
+        assert metering.rows[0]["conversation_id"] == ATTRIBUTION["conversation_id"]
+
+    def test_a_packed_string_is_accepted_where_a_dict_is(self, metering):
+        # An interface may park the raw header value rather than decode it itself.
+        drain(self.attributed(attribution=packed(ATTRIBUTION)), [OPENAI_JSON])
+        #
+        assert metering.rows[0]["entity_id"] == 1
+
+    def test_no_attribution_leaves_the_columns_unset(self, metering):
+        # Absent rather than NULL: the row must not overwrite anything the table resolves itself.
+        drain(begin(), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_an_unknown_key_is_dropped(self, metering):
+        # A newer producer must not be able to insert into a column this reader has never heard
+        # of, and an older reader must not fail on one.
+        drain(
+            self.attributed(attribution={**ATTRIBUTION, "tenant_id": 3, "entity_kind": "x"}),
+            [OPENAI_JSON],
+        )
+        #
+        row = metering.rows[0]
+        assert "tenant_id" not in row and "entity_kind" not in row
+        assert row["entity_id"] == 1
+
+    def test_the_id_columns_are_coerced_to_int(self, metering):
+        # JSON from a header may carry them as text; these are integer columns.
+        drain(self.attributed(attribution={**ATTRIBUTION, "entity_id": "11"}), [OPENAI_JSON])
+        #
+        assert metering.rows[0]["entity_id"] == 11
+
+    def test_an_unparseable_id_is_dropped_rather_than_failing_the_insert(self, metering):
+        drain(self.attributed(attribution={**ATTRIBUTION, "entity_id": "nope"}), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert "entity_id" not in row
+        assert row["conversation_id"] == ATTRIBUTION["conversation_id"]
+
+    def test_text_is_truncated_to_the_column_width(self, metering):
+        drain(
+            self.attributed(attribution={
+                **ATTRIBUTION, "entity_name": "n" * 900, "entity_type": "t" * 90,
+            }),
+            [OPENAI_JSON],
+        )
+        #
+        row = metering.rows[0]
+        assert len(row["entity_name"]) == hooks.ATTRIBUTION_TEXT_LIMIT
+        assert len(row["entity_type"]) == hooks.ATTRIBUTION_TEXT_LIMITS["entity_type"]
+
+    def test_a_malformed_header_costs_the_labels_not_the_row(self, metering):
+        # Half a header: whatever breaks first, base64 or json, the call is still recorded.
+        mangled = packed(ATTRIBUTION)[:20]
+        #
+        drain(self.attributed({hooks.ATTRIBUTION_HEADER: mangled}), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert row["input_tokens"] == 100
+        assert not set(ATTRIBUTION) & set(row)
+
+    def test_an_oversized_header_is_ignored(self, metering):
+        oversized = packed({**ATTRIBUTION, "entity_name": "n" * hooks.ATTRIBUTION_HEADER_LIMIT})
+        #
+        drain(self.attributed({hooks.ATTRIBUTION_HEADER: oversized}), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_attribution_cannot_displace_a_billing_column(self, metering):
+        # The row spreads attribution first precisely so this is unreachable, and the key
+        # whitelist stops it a second time. Both matter: the header is caller-supplied.
+        drain(
+            self.attributed(attribution={
+                **ATTRIBUTION, "project_id": 999, "user_id": 999, "cost_micro_usd": 0,
+            }),
+            [OPENAI_JSON],
+        )
+        #
+        row = metering.rows[0]
+        assert (row["project_id"], row["user_id"]) == (7, 42)
+        assert row["cost_micro_usd"] == 500
 
 
 class TestProviderNarrowsTheDialect:

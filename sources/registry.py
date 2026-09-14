@@ -171,6 +171,7 @@ def register_defaults() -> None:
     from .bedrock_invoke import BedrockInvokeDialect
     from .google_generate_content import GoogleGenerateContentDialect
     from .ollama_native import OllamaNativeDialect
+    from .wam_chat import WamChatDialect
 
     # Ollama first: its paths are exact, and /api/embeddings would otherwise be taken by the
     # openai.embeddings suffix match.
@@ -185,5 +186,6 @@ def register_defaults() -> None:
             BedrockConverseDialect,
             BedrockInvokeDialect,
             GoogleGenerateContentDialect,
+            WamChatDialect,
     ):
         register(dialect_class)

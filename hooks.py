@@ -20,6 +20,7 @@
 Resolved lazily at call time (tools.usage_hooks), so neither side needs init_after.
 """
 
+import base64
 import dataclasses
 import datetime
 import json
@@ -56,6 +57,25 @@ GATE_UNHEALTHY_MESSAGE = (
     "Please retry shortly."
 )
 
+# What the run is: which conversation, which agent node, what the user launched. The producer
+# (pylon_indexer) resolves all of it once per task and sends it as base64url'd compact JSON, so
+# an LLM row and the tool rows of the same run carry identical attribution.
+ATTRIBUTION_HEADER = "X-Elitea-Attribution"
+
+#: usage_event column names, so neither side maps anything. Anything else in the header is dropped.
+ATTRIBUTION_KEYS = (
+    "conversation_id",
+    "entity_type", "entity_id", "entity_version_id", "entity_name",
+    "root_entity_type", "root_entity_id", "root_entity_version_id",
+)
+ATTRIBUTION_INT_KEYS = (
+    "entity_id", "entity_version_id", "root_entity_id", "root_entity_version_id",
+)
+#: Column widths, and a cap on the header itself: this arrives from a caller.
+ATTRIBUTION_HEADER_LIMIT = 4096
+ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32}
+ATTRIBUTION_TEXT_LIMIT = 512
+
 # Enough for any provider's first frame; the dialects are incremental, so nothing else is kept
 HEAD_LIMIT = 8192
 
@@ -77,16 +97,20 @@ class UsageContext:  # pylint: disable=R0902
     start_time_ns: int = None
     reservation: str = None
     estimate_micro: int = 0
+    # usage_event columns, already named as such; see ATTRIBUTION_KEYS
+    attribution: dict = None
 
 
 def begin_llm_call(  # pylint: disable=R0913,R0917
-        project_id, user_id, model_name, endpoint, headers, provider=None, run_id=None,
+        project_id, user_id, model_name, endpoint, headers,
+        provider=None, run_id=None, attribution=None,
         max_output_tokens=None, input_size_bytes=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
     model_name is RAW/pre-mapping: LiteLLM rewrites it, the costs catalog uses the raw name.
-    `provider` and `run_id` are keywords so an interface that knows neither still fits.
+    `provider`, `run_id` and `attribution` are keywords so an interface that knows none of
+    them still fits — run id and attribution are read off the headers when not passed.
     """
     mode = current_mode()
     #
@@ -100,6 +124,7 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         endpoint=endpoint,
         provider=provider,
         run_id=_run_id(run_id if run_id else (headers or {}).get(RUN_ID_HEADER)),
+        attribution=_attribution(attribution, headers),
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
     )
@@ -212,6 +237,62 @@ def _notify_limit_reached(ctx, scope):
         log.exception("usage: failed to notify that a budget is exhausted")
 
 
+def _attribution(attribution, headers):
+    """The run's conversation and entity columns.
+
+    An interface that strips the header before metering (as it must: these ids are ours, not the
+    upstream's) parks the value and passes it here; one that does not need not pass anything.
+    """
+    if attribution is None:
+        attribution = (headers or {}).get(ATTRIBUTION_HEADER)
+    #
+    if isinstance(attribution, str):
+        attribution = _decode_attribution(attribution)
+    #
+    return _clean_attribution(attribution)
+
+
+def _decode_attribution(value):
+    """base64url'd compact JSON, or None. Never raises: a bad header costs the labels only."""
+    if not value or len(value) > ATTRIBUTION_HEADER_LIMIT:
+        return None
+    #
+    try:
+        # No padding assumptions: the producer may or may not strip '='
+        padded = value + "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except Exception:  # pylint: disable=W0703
+        log.warning("usage: unreadable %s header; call recorded without attribution",
+                    ATTRIBUTION_HEADER)
+        return None
+    #
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _clean_attribution(attribution):
+    """Known keys only, typed and bounded — this arrives from a caller, like the run id."""
+    if not isinstance(attribution, dict):
+        return {}
+    #
+    cleaned = {}
+    #
+    for key in ATTRIBUTION_KEYS:
+        value = attribution.get(key)
+        #
+        if value is None or value == "":
+            continue
+        #
+        if key in ATTRIBUTION_INT_KEYS:
+            try:
+                cleaned[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            cleaned[key] = str(value)[:ATTRIBUTION_TEXT_LIMITS.get(key, ATTRIBUTION_TEXT_LIMIT)]
+    #
+    return cleaned
+
+
 def meter_llm_response(ctx, response, iterator):
     """Returns the iterator to serve. Identity while there is nothing to meter."""
     if ctx is None:
@@ -315,6 +396,8 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
     now = datetime.datetime.now(datetime.timezone.utc)
     #
     return {
+        # First, so nothing a caller sent can displace a column resolved here
+        **(ctx.attribution or {}),
         "ts": now,
         "idempotency_key": ctx.idempotency_key,
         "project_id": ctx.project_id,

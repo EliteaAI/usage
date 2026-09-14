@@ -45,6 +45,9 @@ RUN_ID_AUTH_KEY = "platform_run_id"
 # The context is built before the call, not after: only here can it still be refused
 CONTEXT_AUTH_KEY = "usage_context"
 
+# Raw X-Elitea-Attribution value, parked by the interface that stripped it; decoded in hooks
+ATTRIBUTION_AUTH_KEY = "platform_attribution"
+
 # Chat/legacy completions alone gate streamed usage behind include_usage. Responses, messages,
 # converse and the rest always report it, and do not accept the field — sending it risks a 400.
 STREAM_USAGE_PATHS = ("/chat/completions", "/completions")
@@ -72,6 +75,7 @@ def prepare_llm_call(proxy_target, proxy_auth, raw_model_name=None, model_projec
             headers=proxy_target.get("headers"),
             provider=proxy_auth.get(PROVIDER_AUTH_KEY),
             run_id=proxy_auth.get(RUN_ID_AUTH_KEY),
+            attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
             max_output_tokens=requested_output_tokens(proxy_target),
             input_size_bytes=request_size_of(proxy_target),
         )

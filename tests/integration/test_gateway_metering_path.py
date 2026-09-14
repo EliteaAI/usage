@@ -6,6 +6,8 @@ that lands, because that row is the billing record. It is also the regression gu
 defects that mattered most: a caller header used to skip the ledger, and an ordinary platform
 predict used to be excluded from it.
 """
+import base64
+import json
 import types
 
 import pytest
@@ -15,6 +17,21 @@ from usage.sources import registry
 
 
 RUN_ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
+
+# What pylon_indexer resolves for an agent run, packed the way it sends it
+ATTRIBUTION = {
+    "conversation_id": "a95c4c8d-d123-4f98-9841-5efd3ea8788e",
+    "entity_type": "application",
+    "entity_id": 1,
+    "entity_version_id": 2,
+    "entity_name": "Test Github Agent (base)",
+    "root_entity_type": "application",
+    "root_entity_id": 1,
+    "root_entity_version_id": 2,
+}
+ATTRIBUTION_BLOB = base64.urlsafe_b64encode(
+    json.dumps(ATTRIBUTION, separators=(",", ":")).encode("utf-8"),
+).decode("ascii").rstrip("=")
 
 # A DIAL body is indistinguishable from an OpenAI one; only the credential says otherwise
 DIAL_JSON = (
@@ -97,7 +114,10 @@ def gateway_off(monkeypatch):
     return _gateway(monkeypatch, "off")
 
 
-def relay(headers=None, body=None, chunks=(DIAL_JSON,), stream=False, run_id=RUN_ID):
+def relay(  # pylint: disable=R0913,R0917
+        headers=None, body=None, chunks=(DIAL_JSON,), stream=False,
+        run_id=RUN_ID, attribution=None,
+):
     """One LLM call through the gateway, exactly as the interface plugin drives it."""
     proxy_target = {
         "endpoint": "/v1/chat/completions",
@@ -110,6 +130,8 @@ def relay(headers=None, body=None, chunks=(DIAL_JSON,), stream=False, run_id=RUN
     proxy_auth = {"project_id": 7, "user": {"id": 42, "name": "admin"}}
     if run_id is not None:
         proxy_auth["platform_run_id"] = run_id
+    if attribution is not None:
+        proxy_auth["platform_attribution"] = attribution
     #
     interface.prepare_llm_call(proxy_target, proxy_auth, "gpt-4o", 1)
     #
@@ -144,6 +166,22 @@ class TestTheRowThatLands:
         #
         row, = gateway.rows
         assert row["run_id"] is None
+        assert row["token_source"] == "provider"
+
+    def test_the_attribution_parked_by_the_interface_reaches_the_row(self, gateway):
+        # The tool rows of the same run are written from pylon_indexer with these same values,
+        # from the same producer — so a run's llm and tool spend group together.
+        relay(attribution=ATTRIBUTION_BLOB)
+        #
+        row = gateway.rows[0]
+        assert {key: row[key] for key in ATTRIBUTION} == ATTRIBUTION
+
+    def test_a_call_with_no_attribution_is_still_billed(self, gateway):
+        # A PAT client calling /llm/v1 directly belongs to no conversation and no agent.
+        relay()
+        #
+        row, = gateway.rows
+        assert not set(ATTRIBUTION) & set(row)
         assert row["token_source"] == "provider"
 
     def test_the_body_reaches_the_client_unchanged(self, gateway):
