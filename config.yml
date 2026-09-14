@@ -5,7 +5,7 @@ usage:
   # observe - meter and evaluate limits, but never block.
   # enforce - meter and reject calls once a limit is exceeded.
   # Quoted because unquoted `off` is boolean false in YAML.
-  mode: "off"
+  mode: "observe"
   #
   # How long fact rows are kept. Declared now, acted on when retention lands.
   retention_months: 13
