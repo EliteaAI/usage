@@ -112,11 +112,16 @@ def feed_in_chunks(dialect, body, size):
     return dialect.result()
 
 
-def read(dialect_id, endpoint, content_type, body, chunk_size=0, head_bytes=512):
-    """Dispatch through the registry the way the drainer will, then read the usage."""
+def read(dialect_id, endpoint, content_type, body, chunk_size=0, head_bytes=512, provider=None):
+    """Dispatch through the registry the way the drainer will, then read the usage.
+
+    `provider` stays None for everything that is sniffable, so the corpus keeps proving that the
+    URL and the bytes are enough. A fixture only declares one when its dialect is reachable by
+    credential family alone.
+    """
     from usage.sources import registry  # pylint: disable=C0415
 
-    dialect = registry.match(endpoint, content_type, body[:head_bytes])
+    dialect = registry.match(endpoint, content_type, body[:head_bytes], provider=provider)
     assert dialect is not None, f"no dialect matched {endpoint!r}"
     assert dialect.id == dialect_id, f"expected {dialect_id!r}, matched {dialect.id!r}"
     #

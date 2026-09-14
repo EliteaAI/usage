@@ -1,0 +1,36 @@
+{
+  "_provenance": "Copied from the response the WAM interface's own dummy upstream returns (runtime_interface_wam/tests/fixtures/dummy_wam_server.py): WAM fronts an Azure-OpenAI-compatible endpoint, so the body is an openai.chat body. The endpoint is the client-facing path the interface meters, which is why this fixture declares a provider — nothing in the URL or the bytes says WAM.",
+  "dialect": "wam.chat",
+  "provider": "wam",
+  "endpoint": "/v1/chat/completions",
+  "content_type": "application/json",
+  "envelope": "json",
+  "body": {
+    "id": "chatcmpl-wam1",
+    "object": "chat.completion",
+    "model": "gpt-4o-mini",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 7,
+      "total_tokens": 19
+    }
+  },
+  "expected": {
+    "model_name": "gpt-4o-mini",
+    "input_tokens": 12,
+    "output_tokens": 7,
+    "cache_read_tokens": 0,
+    "cache_convention": "inclusive"
+  },
+  "expected_billable_input": 12
+}
