@@ -41,6 +41,9 @@ RAW_MODEL_AUTH_KEY = "usage_raw_model"
 # Already canonicalised by the interface that parked it (#6569); re-validated in hooks anyway
 RUN_ID_AUTH_KEY = "platform_run_id"
 
+# Raw X-Elitea-Attribution value, parked by the interface that stripped it; decoded in hooks
+ATTRIBUTION_AUTH_KEY = "platform_attribution"
+
 # Chat/legacy completions alone gate streamed usage behind include_usage. Responses, messages,
 # converse and the rest always report it, and do not accept the field — sending it risks a 400.
 STREAM_USAGE_PATHS = ("/chat/completions", "/completions")
@@ -77,6 +80,7 @@ def meter_llm_call(proxy_target, proxy_auth, response, iterator):
             headers=proxy_target.get("headers"),
             provider=proxy_auth.get(PROVIDER_AUTH_KEY),
             run_id=proxy_auth.get(RUN_ID_AUTH_KEY),
+            attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
         )
         #
         return hooks.meter_llm_response(usage_context, response, iterator)

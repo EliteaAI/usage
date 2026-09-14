@@ -53,7 +53,7 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     root_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     root_entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
-    # Which node inside the run made this call; tool rows only
+    # Which node inside the run made this call
     entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
