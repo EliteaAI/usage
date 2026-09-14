@@ -30,6 +30,19 @@ def test_token_source_fits_every_value():
     assert max(len(value) for value in values) <= width("token_source")
 
 
+def test_attribution_is_truncated_to_something_the_columns_accept():
+    # Attribution arrives in a caller's header: an agent name is free text of any length, and
+    # the hooks' own limits are the only thing between it and the same truncation error.
+    for column_name in hooks.ATTRIBUTION_KEYS:
+        if column_name in hooks.ATTRIBUTION_INT_KEYS:
+            continue
+        #
+        limit = hooks.ATTRIBUTION_TEXT_LIMITS.get(column_name, hooks.ATTRIBUTION_TEXT_LIMIT)
+        column_width = width(column_name)
+        #
+        assert column_width is None or limit <= column_width, column_name
+
+
 def test_dialect_fits_every_registered_id():
     registry.clear()
     registry.register_defaults()

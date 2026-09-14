@@ -16,6 +16,11 @@ from usage import hooks, interface
 
 PROVIDER = "ai_dial"
 
+RUN_ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
+
+# Opaque on this side: the header is decoded and validated in hooks, not here
+ATTRIBUTION_BLOB = "eyJlbnRpdHlfaWQiOjF9"
+
 OPENAI_JSON = (
     b'{"model": "gpt-4o", "usage": {"prompt_tokens": 100, "completion_tokens": 20}}'
 )
@@ -134,6 +139,41 @@ class TestOnlyTheModeDecides:
         )
         #
         assert interface.RAW_MODEL_AUTH_KEY in proxy_auth
+
+
+class TestTheParkedRunFacts:
+    """Which run, which conversation: parked on proxy_auth by the interface, read back here.
+
+    The interface strips X-Elitea-Run-Id and X-Elitea-Attribution before the request leaves —
+    those ids are ours, not the upstream's — so the parked values are metering's only source.
+    """
+
+    @pytest.fixture()
+    def began(self, monkeypatch, mode_observe):  # pylint: disable=W0613
+        """The kwargs each metered call hands to the hook."""
+        recorded = []
+        monkeypatch.setattr(hooks, "begin_llm_call", lambda **kwargs: recorded.append(kwargs))
+        #
+        return recorded
+
+    def meter(self, proxy_auth):
+        interface.prepare_llm_call(target(), proxy_auth, "gpt-4o", 7)
+        interface.meter_llm_call(target(), proxy_auth, object(), iter([OPENAI_JSON]))
+
+    def test_both_reach_the_hook(self, rpc, began):
+        self.meter(auth(**{
+            interface.RUN_ID_AUTH_KEY: RUN_ID,
+            interface.ATTRIBUTION_AUTH_KEY: ATTRIBUTION_BLOB,
+        }))
+        #
+        assert began[0]["run_id"] == RUN_ID
+        assert began[0]["attribution"] == ATTRIBUTION_BLOB
+
+    def test_an_interface_that_parks_neither_still_meters(self, rpc, began):
+        # Both are optional: an interface can adopt metering before it can supply either.
+        self.meter(auth())
+        #
+        assert (began[0]["run_id"], began[0]["attribution"]) == (None, None)
 
 
 class TestTheUsageFrame:
