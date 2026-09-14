@@ -22,6 +22,7 @@ Resolved lazily at call time (tools.usage_hooks), so neither side needs init_aft
 
 import dataclasses
 import datetime
+import json
 import time
 import typing
 import uuid
@@ -30,12 +31,30 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from tools import context, this  # pylint: disable=E0401
 
-from .methods.mode import MODE_OFF, normalize_mode
+from .methods.gate import SCOPE_MEMBER, SCOPE_PROJECT
+from .methods.mode import MODE_ENFORCE, MODE_OFF, normalize_mode
 from .sources import base, registry
 
 EVENT_TYPE_LLM = "llm"
 COST_SOURCE_UNPRICED = "unpriced"
 RUN_ID_HEADER = "X-Elitea-Run-Id"
+
+# Period-neutral on purpose, and byte-identical to what the LiteLLM path used to return:
+# the SDK and the UI both match on this body, never on the status code
+BUDGET_ERROR_MESSAGE = (
+    "The budget for shared models has been reached. Requests are unavailable "
+    "until the budget resets or an administrator raises the limit."
+)
+
+BUDGET_ERROR_CODES = {
+    SCOPE_PROJECT: "project_budget_exceeded",
+    SCOPE_MEMBER: "member_budget_exceeded",
+}
+
+GATE_UNHEALTHY_MESSAGE = (
+    "Usage accounting is temporarily unavailable, so requests cannot be authorized. "
+    "Please retry shortly."
+)
 
 # Enough for any provider's first frame; the dialects are incremental, so nothing else is kept
 HEAD_LIMIT = 8192
@@ -56,20 +75,25 @@ class UsageContext:  # pylint: disable=R0902
     user_email: str = None
     idempotency_key: str = None
     start_time_ns: int = None
+    reservation: str = None
+    estimate_micro: int = 0
 
 
 def begin_llm_call(  # pylint: disable=R0913,R0917
         project_id, user_id, model_name, endpoint, headers, provider=None, run_id=None,
+        max_output_tokens=None, input_size_bytes=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
     model_name is RAW/pre-mapping: LiteLLM rewrites it, the costs catalog uses the raw name.
     `provider` and `run_id` are keywords so an interface that knows neither still fits.
     """
-    if current_mode() == MODE_OFF:
+    mode = current_mode()
+    #
+    if mode == MODE_OFF:
         return None
     #
-    return UsageContext(
+    ctx = UsageContext(
         project_id=project_id if project_id else _resolve_project_id(user_id, headers),
         user_id=user_id,
         model_name=model_name,
@@ -79,6 +103,113 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
     )
+    #
+    _admit(ctx, mode, max_output_tokens, input_size_bytes)
+    #
+    return ctx
+
+
+def _admit(ctx, mode, max_output_tokens, input_size_bytes):
+    """Reserve this call's estimated cost. Only enforce mode turns a refusal into a response."""
+    if ctx.project_id is None:
+        return
+    #
+    ctx.estimate_micro = _estimate_micro(ctx, max_output_tokens, input_size_bytes)
+    verdict = _acquire(ctx)
+    #
+    if not verdict.get("healthy"):
+        # A broken gate is not a budget breach, so it never wears the budget error
+        if mode == MODE_ENFORCE:
+            _deny(ctx, _unhealthy_response())
+        #
+        return
+    #
+    if verdict.get("allowed"):
+        ctx.reservation = verdict.get("reservation")
+        return
+    #
+    scope = verdict.get("scope") or SCOPE_PROJECT
+    _notify_limit_reached(ctx, scope)
+    #
+    if mode == MODE_ENFORCE:
+        _deny(ctx, _denial_response(scope))
+    else:
+        log.info(
+            "usage: project %s is over its %s budget; observe mode serves the call anyway",
+            ctx.project_id, scope,
+        )
+
+
+def _deny(ctx, response):
+    ctx.denied = True
+    ctx.response = response
+
+
+def _acquire(ctx):
+    """{"allowed", "scope", "reservation", "healthy"}; unhealthy when the gate cannot answer."""
+    try:
+        return this.module.usage_gate_acquire(
+            ctx.project_id, ctx.user_id, ctx.estimate_micro,
+            datetime.datetime.now(datetime.timezone.utc),
+        ) or {}
+    except:  # pylint: disable=W0702
+        log.exception("usage: admission gate failed for project %s", ctx.project_id)
+        return {"healthy": False}
+
+
+def _estimate_micro(ctx, max_output_tokens, input_size_bytes):
+    """0 whenever the call cannot be priced, which never refuses anything."""
+    try:
+        return int(this.module.usage_estimate_micro(
+            ctx.model_name, max_output_tokens, input_size_bytes,
+        ) or 0)
+    except:  # pylint: disable=W0702
+        log.exception("usage: failed to estimate a reservation for %s", ctx.model_name)
+        return 0
+
+
+def _denial_response(scope):
+    """The refusal both the SDK and the UI recognise. Key order matches the legacy payload."""
+    body = json.dumps({
+        "error": {
+            "message": BUDGET_ERROR_MESSAGE,
+            "type": "budget_exceeded",
+            "code": BUDGET_ERROR_CODES.get(scope, BUDGET_ERROR_CODES[SCOPE_PROJECT]),
+        },
+    }).encode("utf-8")
+    #
+    # A Flask response tuple, so metering never has to import the web framework
+    return body, 429, {"Content-Type": "application/json"}
+
+
+def _unhealthy_response():
+    body = json.dumps({
+        "error": {"message": GATE_UNHEALTHY_MESSAGE, "type": "usage_unavailable"},
+    }).encode("utf-8")
+    #
+    return body, 503, {"Content-Type": "application/json"}
+
+
+def _notify_limit_reached(ctx, scope):
+    """Claim-once alert, so a blocked call is itself the event nothing has to poll for."""
+    try:
+        user_id = ctx.user_id if scope == SCOPE_MEMBER else None
+        #
+        claimed = context.rpc_manager.timeout(10).elitea_core_claim_budget_alert(
+            project_id=ctx.project_id,
+            period=f"{datetime.datetime.now(datetime.timezone.utc):%Y%m}",
+            pct=100,
+            user_id=user_id,
+        )
+        #
+        if not claimed:
+            return
+        #
+        context.rpc_manager.timeout(15).elitea_core_notify_budget_event(
+            project_id=ctx.project_id, kind="limit", user_id=user_id,
+        )
+    except:  # pylint: disable=W0702
+        log.exception("usage: failed to notify that a budget is exhausted")
 
 
 def meter_llm_response(ctx, response, iterator):
@@ -114,7 +245,19 @@ def _metered(ctx, response, iterator):
     finally:
         # In finally so a client disconnect mid-stream is still billed, and after the last
         # byte so the insert never sits in the user-visible latency path
-        _record(ctx, dialect, status)
+        row = _record(ctx, dialect, status)
+        _settle(ctx, row)
+
+
+def _settle(ctx, row):
+    """Release the reservation and accrue what the call really cost, in that one round trip."""
+    if not ctx.reservation:
+        return
+    #
+    try:
+        this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_micro_usd") or 0)
+    except:  # pylint: disable=W0702
+        log.exception("usage: failed to settle a reservation; the reaper will reclaim it")
 
 
 def _feed(dialect, chunk):
@@ -126,15 +269,21 @@ def _feed(dialect, chunk):
 
 
 def _record(ctx, dialect, status):
-    """One row per call — provider tokens, an upstream error, or an explicit unparsed."""
+    """The row written, or None. Queued when possible; a direct insert when the queue is down."""
     try:
         if ctx.project_id is None:
             log.warning("usage: no project resolved for user %s; call not recorded", ctx.user_id)
-            return
+            return None
         #
-        this.module.usage_write_event(_row(ctx, _reading_of(dialect), status))
+        row = _row(ctx, _reading_of(dialect), status)
+        #
+        if not this.module.usage_enqueue_event(row):
+            this.module.usage_write_event(row)
+        #
+        return row
     except:  # pylint: disable=W0702
         log.exception("usage: failed to record a metered call")
+        return None
 
 
 def _reading_of(dialect):

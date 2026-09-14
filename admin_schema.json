@@ -6,7 +6,11 @@
       "type": "string",
       "title": "Usage metering mode",
       "description": "off - nothing is metered or blocked. observe - meter and evaluate limits without blocking. enforce - reject calls once a limit is exceeded.",
-      "enum": ["off", "observe", "enforce"],
+      "enum": [
+        "off",
+        "observe",
+        "enforce"
+      ],
       "path": "usage.mode",
       "section": "Usage",
       "default": "off",
@@ -16,7 +20,11 @@
       "type": "string",
       "title": "Spend data source",
       "description": "Which backend the spend reports read. auto follows the metering mode.",
-      "enum": ["auto", "litellm", "elitea"],
+      "enum": [
+        "auto",
+        "litellm",
+        "elitea"
+      ],
       "path": "usage.spend_source",
       "section": "Usage",
       "default": "auto",
@@ -30,7 +38,11 @@
       "section": "Usage",
       "default": 13,
       "requires_restart": false,
-      "value_schema": {"type": "integer", "minimum": 1, "maximum": 120}
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 120
+      }
     },
     "usage_partition_ahead_months": {
       "type": "integer",
@@ -40,7 +52,123 @@
       "section": "Usage",
       "default": 1,
       "requires_restart": false,
-      "value_schema": {"type": "integer", "minimum": 0, "maximum": 12}
+      "value_schema": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 12
+      }
+    },
+    "usage_max_call_cost_usd": {
+      "type": "number",
+      "title": "Max reserved cost per call (USD)",
+      "description": "Ceiling on one call's pre-flight cost estimate. Bounds how far spend can pass a limit.",
+      "path": "usage.reservation.max_call_cost_usd",
+      "section": "Usage",
+      "default": 2.0,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "number",
+        "minimum": 0.01,
+        "maximum": 1000
+      }
+    },
+    "usage_default_output_tokens": {
+      "type": "integer",
+      "title": "Assumed output tokens",
+      "description": "Output length assumed when a request does not declare max_tokens.",
+      "path": "usage.reservation.default_output_tokens",
+      "section": "Usage",
+      "default": 4096,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000
+      }
+    },
+    "usage_reservation_ttl_seconds": {
+      "type": "integer",
+      "title": "Reservation lifetime (seconds)",
+      "description": "After this a reservation is reclaimed. Must exceed the LLM proxy's consumer timeout.",
+      "path": "usage.reservation.ttl_seconds",
+      "section": "Usage",
+      "default": 900,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 30,
+        "maximum": 86400
+      }
+    },
+    "usage_queue_flush_batch_size": {
+      "type": "integer",
+      "title": "Queue flush batch size",
+      "description": "Events written to the database per drainer tick.",
+      "path": "usage.redis.queue_flush_batch_size",
+      "section": "Usage",
+      "default": 500,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      }
+    },
+    "usage_queue_flush_interval_seconds": {
+      "type": "integer",
+      "title": "Queue flush interval (seconds)",
+      "description": "How often queued usage events are written out. Also the counter lag.",
+      "path": "usage.redis.queue_flush_interval_seconds",
+      "section": "Usage",
+      "default": 5,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3600
+      }
+    },
+    "usage_reaper_interval_seconds": {
+      "type": "integer",
+      "title": "Reservation reaper interval (seconds)",
+      "description": "How often expired reservations are reclaimed.",
+      "path": "usage.redis.reaper_interval_seconds",
+      "section": "Usage",
+      "default": 30,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 3600
+      }
+    },
+    "usage_lease_seconds": {
+      "type": "integer",
+      "title": "Worker lease (seconds)",
+      "description": "How long one replica holds the right to drain and reap before another may take over.",
+      "path": "usage.redis.lease_seconds",
+      "section": "Usage",
+      "default": 20,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 600
+      }
+    },
+    "usage_limits_cache_ttl_seconds": {
+      "type": "integer",
+      "title": "Limit cache TTL (seconds)",
+      "description": "How long effective budget limits are cached in each pylon before being re-read.",
+      "path": "usage.limits.cache_ttl_seconds",
+      "section": "Usage",
+      "default": 30,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3600
+      }
     }
   }
 }

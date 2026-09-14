@@ -108,7 +108,8 @@ class TestHookDeclaration:
         )
         #
         assert instance.usage_report_interfaces() == ["runtime_interface_custom"]
-        assert any("refused service" in message for message in recording_log.messages("error"))
+        assert any("unmetered and ungated" in message
+                   for message in recording_log.messages("error"))
 
     def test_off_mode_is_informational_only(self, recording_log):
         instance = build(

@@ -18,3 +18,24 @@ usage:
   # litellm - always the legacy LiteLLM tag aggregates
   # elitea  - always the platform's own tables
   spend_source: auto
+  #
+  # Admission control. A reservation holds an estimate of a call's cost while it runs.
+  reservation:
+    # Upper bound on one call's estimate, so overspend stays (concurrency x this) + flush lag.
+    max_call_cost_usd: 2.0
+    # Assumed output length when the request does not declare max_tokens.
+    default_output_tokens: 4096
+    # Must exceed the proxy's own consumer timeout or a long stream is reaped mid-flight.
+    ttl_seconds: 900
+  #
+  # Write-behind queue and the two background workers.
+  redis:
+    queue_flush_batch_size: 500
+    queue_flush_interval_seconds: 5
+    reaper_interval_seconds: 30
+    # Lease held by the one replica that drains and reaps; refreshed each tick.
+    lease_seconds: 20
+  #
+  limits:
+    # How long an effective limit is cached in-process; the gate reads it per call.
+    cache_ttl_seconds: 30

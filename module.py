@@ -26,7 +26,7 @@ from pylon.core.tools import log, module  # pylint: disable=E0611,E0401
 
 from .hooks import begin_llm_call, meter_llm_response
 from .interface import meter_llm_call, prepare_llm_call
-from .methods.mode import MODE_ENFORCE, MODE_OFF
+from .methods.mode import MODE_ENFORCE
 from .sources import registry
 
 
@@ -43,7 +43,7 @@ class Module(module.ModuleModel):
         self.descriptor.init_all()
         #
         # Registers both tables in the shared metadata; provisioning is shared's job
-        from .models import usage_counter, usage_event  # pylint: disable=C0415,W0611
+        from .models import usage_counter, usage_event, usage_ingest_watermark  # pylint: disable=C0415,W0611
         #
         registry.register_defaults()
         #
@@ -53,9 +53,9 @@ class Module(module.ModuleModel):
         """ Ready callback """
         # After shared.ready() created the parent table — usage depends_on shared
         self.usage_ensure_partitions()
-        self.usage_report_interfaces()
-        self._warn_if_metering_expected()
+        self._report_interfaces()
         self._register_cron()
+        self.usage_start_workers()
 
     def reconfig(self):
         """ Re-config """
@@ -63,7 +63,7 @@ class Module(module.ModuleModel):
             "usage reconfigured: mode=%s spend_source=%s",
             self.usage_get_mode(), self.usage_get_spend_source(),
         )
-        self._warn_if_metering_expected()
+        self._report_interfaces()
 
     def deinit(self):
         """ De-initialize module """
@@ -75,17 +75,15 @@ class Module(module.ModuleModel):
     begin_llm_call = staticmethod(begin_llm_call)
     meter_llm_response = staticmethod(meter_llm_response)
 
-    def _warn_if_metering_expected(self):
-        """Enforcement is not wired yet, so an operator asking for it must be told."""
-        mode = self.usage_get_mode()
+    def _report_interfaces(self):
+        """An unmetered interface keeps serving, so enforcement gaps are only visible in the log."""
+        refused = self.usage_report_interfaces() or []
         #
-        if mode == MODE_ENFORCE:
-            log.warning(
-                "usage: mode is enforce but admission control is not implemented yet; calls are "
-                "metered and none are refused",
+        if refused and self.usage_get_mode() == MODE_ENFORCE:
+            log.error(
+                "usage: mode is enforce but %s interface(s) are unmetered and ungated: %s",
+                len(refused), ", ".join(refused),
             )
-        elif mode != MODE_OFF:
-            log.info("usage: metering LLM calls, mode=%s", mode)
 
     def _register_cron(self):
         try:
@@ -96,7 +94,14 @@ class Module(module.ModuleModel):
                 "cron": "0 3 * * *",
                 "active": True,
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                "rpc_func": "usage_reconcile_counters",
+                "rpc_kwargs": {},
+                "name": "usage_reconcile_counters",
+                "cron": "17 * * * *",
+                "active": True,
+            })
         except Empty:
-            log.warning("usage: no scheduling plugin found; partition cron not registered")
+            log.warning("usage: no scheduling plugin found; crons not registered")
         except Exception as exc:  # pylint: disable=W0703
-            log.warning("usage: failed to register partition cron: %s", exc)
+            log.warning("usage: failed to register crons: %s", exc)

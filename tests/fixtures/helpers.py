@@ -21,10 +21,15 @@ def fake_module(config=None, **attrs):
 
 
 def bind(instance, *resource_classes):
-    """Bind every public callable of the given Method/RPC classes onto instance."""
+    """Bind every public callable of the given Method/RPC classes onto instance.
+
+    Underscore-prefixed attributes are skipped on purpose: Pylon binds only what @web.method
+    and @web.rpc declare, so a private helper reached through self fails at runtime. Binding
+    it here would hide exactly that bug.
+    """
     for resource in resource_classes:
         for name in dir(resource):
-            if name.startswith("__"):
+            if name.startswith("_"):
                 continue
             #
             attribute = getattr(resource, name)

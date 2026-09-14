@@ -13,6 +13,9 @@ SIBLING_PLUGINS = pathlib.Path(__file__).resolve().parents[3]
 EXPECTED_PROPERTIES = {
     "usage_mode", "usage_spend_source", "usage_retention_months",
     "usage_partition_ahead_months",
+    "usage_max_call_cost_usd", "usage_default_output_tokens", "usage_reservation_ttl_seconds",
+    "usage_queue_flush_batch_size", "usage_queue_flush_interval_seconds",
+    "usage_reaper_interval_seconds", "usage_lease_seconds", "usage_limits_cache_ttl_seconds",
 }
 
 

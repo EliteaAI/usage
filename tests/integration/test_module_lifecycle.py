@@ -31,6 +31,7 @@ def build(config=None, rpc=None, descriptors=None):
     bind(instance, mode_module.Method, partitions.Method, interfaces.Method)
     #
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
+    instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
     #
     return instance, calls
 
@@ -148,17 +149,19 @@ class TestReady:
         instance.ready()
         #
         assert reported == ["reported"]
-        assert [name for name, _ in calls if name == "cron"] == ["cron"]
+        assert [name for name, _ in calls if name == "cron"] == ["cron", "cron"]
 
     def test_cron_targets_the_registered_rpc_name(self):
         instance, calls = build()
         #
         instance.ready()
         #
-        payload = [args for name, args in calls if name == "cron"][0]
+        payloads = [args for name, args in calls if name == "cron"]
         #
-        assert payload["rpc_func"] == "usage_ensure_partitions"
-        assert payload["active"] is True
+        assert [payload["rpc_func"] for payload in payloads] == [
+            "usage_ensure_partitions", "usage_reconcile_counters",
+        ]
+        assert all(payload["active"] is True for payload in payloads)
 
     def test_missing_scheduler_does_not_block_startup(self, recording_log):
         """A pylon without the scheduling plugin is a valid deployment."""
@@ -169,7 +172,7 @@ class TestReady:
         #
         instance.ready()
         #
-        assert any("cron not registered" in message for message in recording_log.messages("warning"))
+        assert any("crons not registered" in message for message in recording_log.messages("warning"))
 
     def test_broken_scheduler_does_not_block_startup(self, recording_log):
         def raiser(_timeout):
@@ -180,43 +183,51 @@ class TestReady:
         instance.ready()
         #
         assert any(
-            "failed to register partition cron" in message
+            "failed to register crons" in message
             for message in recording_log.messages("warning")
         )
 
-    def test_observe_says_it_is_metering_without_crying_wolf(self, recording_log):
-        """Metering works now, so observe is an ordinary operating mode, not a warning."""
+    def test_observe_says_nothing_when_every_interface_is_metered(self, recording_log):
+        """Metering and gating both work now, so a healthy mode is a quiet mode."""
         instance, _ = build(config={"mode": "observe"})
         #
         instance.ready()
         #
-        assert any(
-            "metering LLM calls" in message for message in recording_log.messages("info")
-        )
         assert not recording_log.messages("warning")
+        assert not recording_log.messages("error")
 
-    def test_enforce_warns_that_nothing_is_refused_yet(self, recording_log):
-        # An operator who asks for enforcement gets metering but no admission control, and
-        # must not be left believing budgets are being applied.
+    def test_enforce_errors_when_an_interface_is_unmetered(self, recording_log):
+        # Decision 5: the interface keeps serving, so the enforcement gap is only ever
+        # visible in the log. Silence here would mean silently ungated traffic.
         instance, _ = build(config={"mode": "enforce"})
+        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.ready()
         #
         assert any(
-            "admission control is not implemented yet" in message
-            for message in recording_log.messages("warning")
+            "unmetered and ungated" in message
+            for message in recording_log.messages("error")
         )
+        assert any(
+            "runtime_interface_legacy" in record[2] for record in recording_log.records
+        )
+
+    def test_enforce_is_quiet_when_every_interface_declares_hooks(self, recording_log):
+        instance, _ = build(config={"mode": "enforce"})
+        instance.usage_report_interfaces = lambda: []
+        #
+        instance.ready()
+        #
+        assert not recording_log.messages("error")
 
     def test_off_mode_says_nothing_at_all(self, recording_log):
         instance, _ = build(config={"mode": "off"})
+        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.ready()
         #
-        assert not any(
-            "metering LLM calls" in message
-            for message in recording_log.messages("info")
-        )
         assert not recording_log.messages("warning")
+        assert not recording_log.messages("error")
 
 
 class TestReconfig:
@@ -231,29 +242,28 @@ class TestReconfig:
         assert instance.usage_get_mode() == "enforce"
         assert any("usage reconfigured" in message for message in recording_log.messages("info"))
 
-    def test_flipping_to_enforce_at_runtime_warns(self, recording_log):
-        # The admin flag flips without a restart, so ready()'s one-shot warning would never
+    def test_flipping_to_enforce_at_runtime_reports_unmetered_interfaces(self, recording_log):
+        # The admin flag flips without a restart, so ready()'s one-shot report would never
         # be seen by the operator who actually flipped it.
         instance, _ = build(config={"mode": "off"})
+        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.descriptor.config["usage"]["mode"] = "enforce"
         instance.reconfig()
         #
         assert any(
-            "admission control is not implemented yet" in message
-            for message in recording_log.messages("warning")
+            "unmetered and ungated" in message
+            for message in recording_log.messages("error")
         )
 
-    def test_flipping_back_to_off_does_not_warn(self, recording_log):
+    def test_flipping_back_to_off_is_quiet(self, recording_log):
         instance, _ = build(config={"mode": "enforce"})
+        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.descriptor.config["usage"]["mode"] = "off"
         instance.reconfig()
         #
-        assert not any(
-            "admission control is not implemented yet" in message
-            for message in recording_log.messages("warning")
-        )
+        assert not recording_log.messages("error")
 
     def test_does_not_raise_on_an_empty_config(self):
         instance, _ = build(config=None)
