@@ -41,7 +41,7 @@ CHUNK_SIZES = [1, 7, 64, 4096]
 EXPECTED_DIALECTS = {
     "openai.chat", "openai.embeddings", "openai.responses", "azure.chat",
     "ai_dial.chat", "anthropic.messages", "bedrock.converse", "bedrock.invoke",
-    "google.generate_content", "ollama.native",
+    "google.generate_content", "ollama.native", "wam.chat",
 }
 
 
