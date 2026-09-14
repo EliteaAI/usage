@@ -13,7 +13,12 @@ from usage import hooks
 from usage.sources import registry
 
 
-BEGIN_PARAMS = ["project_id", "user_id", "model_name", "endpoint", "headers", "provider"]
+BEGIN_PARAMS = [
+    "project_id", "user_id", "model_name", "endpoint", "headers", "provider", "run_id",
+]
+
+# Any uuid; what matters is that it survives canonicalisation and a malformed one does not
+RUN_ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
 
 OPENAI_JSON = (
     b'{"model": "gpt-4o", "usage": {"prompt_tokens": 100, "completion_tokens": 20}}'
@@ -106,14 +111,15 @@ class TestTheFrozenContract:
         # break here rather than at runtime in someone else's route.
         assert list(inspect.signature(hooks.begin_llm_call).parameters) == BEGIN_PARAMS
 
-    def test_provider_is_the_only_optional_parameter(self):
+    def test_only_the_late_additions_are_optional(self):
         parameters = inspect.signature(hooks.begin_llm_call).parameters
         #
-        # Optional so a second interface can adopt the hooks before it can resolve a provider.
+        # Optional so a second interface can adopt the hooks before it can supply either.
         assert parameters["provider"].default is None
+        assert parameters["run_id"].default is None
         assert all(
             p.default is inspect.Parameter.empty
-            for name, p in parameters.items() if name != "provider"
+            for name, p in parameters.items() if name not in ("provider", "run_id")
         )
 
     def test_no_var_kwargs_so_a_typo_is_caught(self):
@@ -201,6 +207,21 @@ class TestTheRowThatLands:
         assert row["is_error"] is True
         assert row["token_source"] == "unparsed"
 
+    def test_tokens_reported_alongside_an_error_are_still_billed(self, metering):
+        # A provider that rejects late has already charged for the prompt; skipping the body
+        # on status alone turns that spend into a silent zero.
+        body = [
+            b'{"error": {"message": "context length"},'
+            b' "usage": {"prompt_tokens": 11, "completion_tokens": 0}}'
+        ]
+        #
+        drain(begin(), body, status=400)
+        #
+        row, = metering.rows
+        assert row["is_error"] is True
+        assert row["token_source"] == "provider"
+        assert row["input_tokens"] == 11
+
     def test_no_dialect_still_writes_a_row(self, metering):
         # The defect this replaces returned early here, so the call vanished from billing.
         drain(begin(endpoint="/v1/audio/speech"), [b"\x00\x01"], content_type="audio/mpeg")
@@ -227,9 +248,31 @@ class TestTheRowThatLands:
         assert (row["input_tokens"], row["output_tokens"]) == (7, 3)
 
     def test_the_run_id_header_is_carried_onto_the_row(self, metering):
+        drain(begin(headers={"X-Elitea-Run-Id": RUN_ID}), [OPENAI_JSON])
+        #
+        assert metering.rows[0]["run_id"] == RUN_ID
+
+    def test_an_explicitly_passed_run_id_wins_over_the_header(self, metering):
+        # The interface canonicalises and parks the id; by metering time the header is gone
+        # from the outbound request, so the parked value is the one that must be believed.
+        ctx = hooks.begin_llm_call(
+            project_id=7, user_id=42, model_name="gpt-4o", endpoint="/v1/chat/completions",
+            headers={"X-Elitea-Run-Id": "0dc0d1e6-0000-4000-8000-000000000000"}, run_id=RUN_ID,
+        )
+        drain(ctx, [OPENAI_JSON])
+        #
+        assert metering.rows[0]["run_id"] == RUN_ID
+
+    def test_a_malformed_run_id_is_dropped_rather_than_failing_the_insert(self, metering):
+        # run_id is a Postgres uuid column: an unparseable value would abort the row.
         drain(begin(headers={"X-Elitea-Run-Id": "run-9"}), [OPENAI_JSON])
         #
-        assert metering.rows[0]["run_id"] == "run-9"
+        assert metering.rows[0]["run_id"] is None
+
+    def test_an_unhyphenated_run_id_is_canonicalised(self, metering):
+        drain(begin(headers={"X-Elitea-Run-Id": RUN_ID.replace("-", "")}), [OPENAI_JSON])
+        #
+        assert metering.rows[0]["run_id"] == RUN_ID
 
     def test_a_client_disconnect_mid_stream_is_still_billed(self, metering):
         served = hooks.meter_llm_response(

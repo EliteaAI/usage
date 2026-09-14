@@ -59,14 +59,14 @@ class UsageContext:  # pylint: disable=R0902
 
 
 def begin_llm_call(  # pylint: disable=R0913,R0917
-        project_id, user_id, model_name, endpoint, headers, provider=None,
+        project_id, user_id, model_name, endpoint, headers, provider=None, run_id=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
     model_name is RAW/pre-mapping: LiteLLM rewrites it, the costs catalog uses the raw name.
-    `provider` is a keyword so an interface that cannot resolve it still fits the contract.
+    `provider` and `run_id` are keywords so an interface that knows neither still fits.
     """
-    if _mode() == MODE_OFF:
+    if current_mode() == MODE_OFF:
         return None
     #
     return UsageContext(
@@ -75,7 +75,7 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         model_name=model_name,
         endpoint=endpoint,
         provider=provider,
-        run_id=(headers or {}).get(RUN_ID_HEADER),
+        run_id=_run_id(run_id if run_id else (headers or {}).get(RUN_ID_HEADER)),
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
     )
@@ -97,11 +97,8 @@ def _metered(ctx, response, iterator):
     #
     try:
         for chunk in iterator:
-            # An error body is relayed untouched: there is nothing to read and the client needs it
-            if status >= 400:
-                yield chunk
-                continue
-            #
+            # Error bodies are read too: a provider that reports tokens alongside a 4xx has
+            # still charged for them, and the row would otherwise be a silent zero
             if not probed:
                 probed = True
                 dialect = registry.match(
@@ -218,6 +215,18 @@ def _price(model_name, input_tokens, output_tokens, cache_read_tokens, cache_cre
     return cost, priced.get("cost_source") or COST_SOURCE_UNPRICED
 
 
+def _run_id(value):
+    """Canonical uuid or None: the value reaches us from a caller-supplied header."""
+    if not value:
+        return None
+    #
+    try:
+        return str(uuid.UUID(str(value)))
+    except (AttributeError, TypeError, ValueError):
+        log.warning("usage: ignoring a malformed run id")
+        return None
+
+
 def _elapsed_ms(ctx):
     if ctx.start_time_ns is None:
         return None
@@ -260,7 +269,8 @@ def _headers_of(response):
     return [pair for pair in headers if isinstance(pair, (list, tuple)) and len(pair) == 2]
 
 
-def _mode():
+def current_mode():
+    """The configured mode, or "off" whenever it cannot be read."""
     try:
         return normalize_mode((this.descriptor.config.get("usage") or {}).get("mode"))
     except:  # pylint: disable=W0702

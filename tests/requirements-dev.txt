@@ -1,5 +1,6 @@
 pytest>=7.0.0
 sqlalchemy>=2.0.0
 pyyaml>=6.0
+cachetools>=5.3.1
 # Test-only: the real AWS event-stream decoder the bedrock dialects are fed against.
 botocore>=1.34.0
