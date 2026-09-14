@@ -45,6 +45,12 @@ EXPECTED_DIALECTS = {
 }
 
 
+def read_spec(spec, body, chunk_size=0):
+    """Dispatch a fixture the way its traffic really arrives, credential family included."""
+    return read(spec["dialect"], spec["endpoint"], spec["content_type"], body, chunk_size,
+                provider=spec.get("provider"))
+
+
 def assert_matches_expected(reading, spec, context):
     """Every field the fixture names must match; the rest keeps its documented default."""
     for field, value in spec["expected"].items():
@@ -94,8 +100,7 @@ class TestCorpusReadings:
     def test_expected_reading(self, registered_dialects, name):
         spec = load_fixture(name)
         #
-        reading = read(spec["dialect"], spec["endpoint"], spec["content_type"],
-                       build_body(spec))
+        reading = read_spec(spec, build_body(spec))
         #
         assert_matches_expected(reading, spec, name)
         assert reading.dialect == spec["dialect"]
@@ -104,8 +109,7 @@ class TestCorpusReadings:
     def test_expected_billable_input(self, registered_dialects, name):
         spec = load_fixture(name)
         #
-        reading = read(spec["dialect"], spec["endpoint"], spec["content_type"],
-                       build_body(spec))
+        reading = read_spec(spec, build_body(spec))
         #
         assert billable_input_tokens(reading) == spec["expected_billable_input"]
 
@@ -117,8 +121,7 @@ class TestCorpusReadings:
         spec = load_fixture(name)
         body = build_body(spec)
         #
-        reading = read(spec["dialect"], spec["endpoint"], spec["content_type"],
-                       body, chunk_size)
+        reading = read_spec(spec, body, chunk_size)
         #
         assert_matches_expected(reading, spec, f"{name}@{chunk_size}")
 
@@ -131,7 +134,7 @@ class TestCorpusReadings:
         #
         for fraction in (0.25, 0.5, 0.75, 0.99):
             cut = int(len(body) * fraction)
-            reading = read(spec["dialect"], spec["endpoint"], spec["content_type"], body[:cut])
+            reading = read_spec(spec, body[:cut])
             assert reading.dialect == spec["dialect"]
 
 
@@ -143,8 +146,7 @@ class TestConventionSanity:
         # Recomputed here from the reading's own fields, so a fixture that states a
         # convention its numbers contradict fails even if the dialect agrees with it.
         spec = load_fixture(name)
-        reading = read(spec["dialect"], spec["endpoint"], spec["content_type"],
-                       build_body(spec))
+        reading = read_spec(spec, build_body(spec))
         #
         if reading.input_tokens is None:
             assert billable_input_tokens(reading) is None
@@ -160,8 +162,7 @@ class TestConventionSanity:
     @pytest.mark.parametrize("name", fixture_names())
     def test_counts_are_never_negative(self, registered_dialects, name):
         spec = load_fixture(name)
-        reading = read(spec["dialect"], spec["endpoint"], spec["content_type"],
-                       build_body(spec))
+        reading = read_spec(spec, build_body(spec))
         #
         for field in ("input_tokens", "output_tokens", "cache_read_tokens",
                       "cache_creation_tokens", "reasoning_tokens"):

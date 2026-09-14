@@ -34,7 +34,7 @@ TOKEN_SOURCE_UNPARSED = "unparsed"
 # The closed set of credential types configurations reports; a dialect's provider is one of these
 # or None when no credential family reaches it directly.
 CREDENTIAL_PROVIDERS = (
-    "ai_dial", "amazon_bedrock", "azure_open_ai", "ollama", "open_ai", "vertex_ai",
+    "ai_dial", "amazon_bedrock", "azure_open_ai", "ollama", "open_ai", "vertex_ai", "wam",
 )
 
 # Whether a provider's cached-token count is part of its input count or additional to it.

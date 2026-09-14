@@ -38,6 +38,7 @@ MODULES = [
     "base", "framing", "registry", "dialect", "openai_chat", "openai_embeddings",
     "openai_responses", "azure_chat", "ai_dial_chat", "anthropic_messages",
     "bedrock_converse", "bedrock_invoke", "google_generate_content", "ollama_native",
+    "wam_chat",
 ]
 
 BANNED = ("pylon", "flask", "sqlalchemy", "tools")
