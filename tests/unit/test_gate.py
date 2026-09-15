@@ -220,6 +220,34 @@ class TestPriming:
         assert instance.usage_gate_check(42, None, MOMENT)["healthy"] is True
 
 
+    def test_an_eviction_inside_the_primed_window_is_re_primed(self):
+        # _primed remembers only the key name, so without noticing the hash is gone the gate
+        # would enforce against zero for the rest of the hour while the spend lives in Postgres
+        instance, client = build(enabled(project=100 * MILLION), persisted=7 * MILLION)
+        instance.usage_gate_check(42, None, MOMENT)
+        client.hashes.pop(gate.project_hash_key(42, MOMENT))
+        #
+        instance.usage_gate_check(42, None, MOMENT)
+        #
+        assert client.counter(gate.project_hash_key(42, MOMENT)) == 7 * MILLION
+
+    def test_an_evicted_key_re_primed_above_its_limit_closes_the_gate(self):
+        instance, client = build(enabled(project=5 * MILLION), persisted=7 * MILLION)
+        instance.usage_gate_check(42, None, MOMENT)
+        client.hashes.pop(gate.project_hash_key(42, MOMENT))
+        #
+        assert instance.usage_gate_check(42, None, MOMENT)["closed"] is True
+
+    def test_a_zero_spend_project_is_not_re_primed_on_every_call(self):
+        # Priming a persisted 0 leaves the field absent, which must not be read as an eviction
+        instance, client = build(enabled(project=100 * MILLION), persisted=0)
+        #
+        for _ in range(3):
+            instance.usage_gate_check(42, None, MOMENT)
+        #
+        assert len([call for call in client.calls if call[0] == "eval"]) == 1
+
+
 class TestKeys:
     """The key schema is a wire contract with the drainer and the reconcile."""
 

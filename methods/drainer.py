@@ -119,11 +119,28 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 self.usage_fold_foreign_events(connection)
                 connection.commit()
         except:  # pylint: disable=W0702
-            # The facts are already out of Redis, so a failed tick loses counter accuracy only
-            # until the next reconcile; re-queueing them would risk double-inserting instead
             log.exception("usage: drain tick failed")
+            # Safe to retry because the insert is idempotent on (idempotency_key, ts); dropping
+            # the batch instead would lose the facts for good, reconcile included
+            self.usage_requeue_events(rows)
+            #
+            return 0
         #
         return drained
+
+    @web.method()
+    def usage_requeue_events(self, rows):
+        """Put a failed batch back at the head of the queue, oldest first."""
+        if not rows:
+            return
+        #
+        try:
+            client = self.usage_redis_client()
+            #
+            for row in reversed(rows):
+                client.lpush(QUEUE_KEY, json.dumps(row, default=str))
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to requeue %s drained event(s)", len(rows))
 
     @web.method()
     def usage_dequeue_events(self):

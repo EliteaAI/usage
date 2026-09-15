@@ -155,9 +155,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if limit is None:
                     continue
                 #
+                # A key already marked primed but no longer there was evicted since: re-prime
+                # now rather than enforce against a zero for the rest of the _primed window
+                was_primed = hash_key in _primed
                 self.usage_gate_prime(hash_key, counter_key)
+                counter = client.hget(hash_key, "counter")
                 #
-                if int(client.hget(hash_key, "counter") or 0) >= max(0, int(limit)):
+                if counter is None and was_primed:
+                    _primed.pop(hash_key, None)
+                    self.usage_gate_prime(hash_key, counter_key)
+                    counter = client.hget(hash_key, "counter")
+                #
+                if int(counter or 0) >= max(0, int(limit)):
                     return {"closed": True, "scope": scope, "healthy": True}
         except:  # pylint: disable=W0702
             log.exception("usage: cannot read counters for project %s", project_id)

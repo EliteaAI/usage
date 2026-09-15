@@ -107,8 +107,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         drift = []
         #
-        for key, fact in facts.items():
-            counter = counters.get(key) or {measure: 0 for measure in MEASURES}
+        # Union of both sides: a counter row with no facts behind it is drift too, and
+        # iterating the facts alone would leave it inflated forever
+        for key in set(facts) | set(counters):
+            zero = {measure: 0 for measure in MEASURES}
+            fact = facts.get(key) or zero
+            counter = counters.get(key) or zero
             #
             if any(fact[measure] != counter[measure] for measure in MEASURES):
                 drift.append({

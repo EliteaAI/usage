@@ -69,3 +69,47 @@ class TestRepairRow:
         assert repair["cost_micro_usd"] == 600
         assert repair["call_count"] == 2
         assert repair["model_name"] == reconcile.ALL_MODELS_SENTINEL
+
+
+class TestDrift:
+    """Both sides are scanned, because a counter can be wrong in either direction."""
+
+    def _instance(self, facts, counters):
+        instance = build()
+        instance.usage_fact_totals = lambda *_a, **_k: facts
+        instance.usage_counter_totals = lambda *_a, **_k: counters
+        #
+        return instance
+
+    def _totals(self, cost):
+        return {"input_tokens": 0, "output_tokens": 0, "cost_micro_usd": cost, "call_count": 1}
+
+    def test_agreement_is_not_drift(self):
+        totals = {(42, 7): self._totals(1000)}
+        #
+        assert self._instance(totals, dict(totals)).usage_counter_drift(None, START, END) == []
+
+    def test_a_counter_row_with_no_facts_behind_it_is_drift(self):
+        # Left out of the scan this row stays inflated forever: iterating the facts alone
+        # never visits a key that only the counters have
+        instance = self._instance({}, {(42, 7): self._totals(1000)})
+        #
+        drift = instance.usage_counter_drift(None, START, END)
+        #
+        assert len(drift) == 1
+        assert drift[0]["expected"]["cost_micro_usd"] == 0
+        assert drift[0]["actual"]["cost_micro_usd"] == 1000
+
+    def test_an_inflated_counter_repairs_by_a_negative_delta(self):
+        instance = self._instance({(42, 7): self._totals(400)}, {(42, 7): self._totals(1000)})
+        #
+        repair = reconcile._repair_row(  # pylint: disable=W0212
+            instance.usage_counter_drift(None, START, END)[0],
+        )
+        #
+        assert repair["cost_micro_usd"] == -600
+
+    def test_a_missing_counter_row_is_still_drift(self):
+        instance = self._instance({(42, 7): self._totals(1000)}, {})
+        #
+        assert instance.usage_counter_drift(None, START, END)[0]["actual"]["cost_micro_usd"] == 0

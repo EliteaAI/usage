@@ -1,5 +1,7 @@
 """Write-behind drainer — the reason a flushed-twice batch cannot double-count."""
 import datetime
+import json
+import types
 
 import pytest
 
@@ -265,3 +267,62 @@ class TestPartitionKey:
         insert(build(connection), connection, rows)
         #
         assert rows[0]["period"] == "202512"
+
+
+class TestRequeueOnFailure:
+    """A dequeued batch is already out of Redis, so a failed tick must put it back."""
+
+    def _instance(self, client, fail=True, monkeypatch=None):
+        instance = build(Landing())
+        instance.usage_redis_client = lambda: client
+        instance.usage_fold_foreign_events = lambda *_a, **_k: 0
+        #
+        if fail:
+            instance.usage_insert_events = \
+                lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("postgres is down"))
+        else:
+            instance.usage_insert_events = lambda _conn, rows: rows
+        #
+        monkeypatch.setattr(
+            drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
+        )
+        #
+        return instance
+
+    def test_a_failed_tick_puts_the_batch_back(self, monkeypatch):
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch=monkeypatch)
+        instance.usage_enqueue_event(event("a"))
+        instance.usage_enqueue_event(event("b"))
+        #
+        assert instance.usage_drain_batch() == 0
+        #
+        queued = [json.loads(item)["idempotency_key"] for item in client.lists[drainer.QUEUE_KEY]]
+        assert queued == ["a", "b"]
+
+    def test_the_requeued_batch_drains_on_the_next_tick(self, monkeypatch):
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch=monkeypatch)
+        instance.usage_enqueue_event(event("a"))
+        instance.usage_drain_batch()
+        #
+        recovered = self._instance(client, fail=False, monkeypatch=monkeypatch)
+        #
+        assert recovered.usage_drain_batch() == 1
+
+    def test_an_empty_batch_needs_no_requeue(self, monkeypatch):
+        client = RecordingRedis()
+        #
+        assert self._instance(client, monkeypatch=monkeypatch).usage_drain_batch() == 0
+        assert client.lists.get(drainer.QUEUE_KEY, []) == []
+
+    def test_a_redis_that_cannot_take_the_batch_back_is_logged_not_raised(self, monkeypatch):
+        class Broken(RecordingRedis):
+            def lpush(self, key, value):
+                raise RuntimeError("down")
+        #
+        client = Broken()
+        instance = self._instance(client, monkeypatch=monkeypatch)
+        instance.usage_enqueue_event(event("a"))
+        #
+        assert instance.usage_drain_batch() == 0

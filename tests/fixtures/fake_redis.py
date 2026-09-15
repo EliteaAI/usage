@@ -43,6 +43,11 @@ class RecordingRedis:
         #
         return len(self.lists[key])
 
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+        #
+        return len(self.lists[key])
+
     def lpop(self, key, count=None):
         queue = self.lists.setdefault(key, [])
         #
