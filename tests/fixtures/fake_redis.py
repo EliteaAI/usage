@@ -65,6 +65,9 @@ class RecordingRedis:
     def zrem(self, key, member):
         return 1 if self.zsets.get(key, {}).pop(member, None) is not None else 0
 
+    def zcard(self, key):
+        return len(self.zsets.get(key, {}))
+
     def zrangebyscore(self, key, minimum, maximum, start=0, num=None):
         members = [
             member for member, score in sorted(
@@ -82,6 +85,16 @@ class RecordingRedis:
 
     def smembers(self, key):
         return set(self.sets.get(key, set()))
+
+    def srem(self, key, member):
+        bucket = self.sets.setdefault(key, set())
+        #
+        if member not in bucket:
+            return 0
+        #
+        bucket.discard(member)
+        #
+        return 1
 
     # -- lists
 
@@ -160,6 +173,7 @@ class RecordingRedis:
 
     def _prime(self, keys, argv):
         hash_key, persisted = keys[0], int(argv[0])
+        self.expire(hash_key, int(argv[1]))
         current = self.hashes.get(hash_key, {}).get("counter")
         #
         if current is None or int(current) < persisted:
@@ -193,17 +207,30 @@ class RecordingRedis:
         self.zadd(resv, {argv[5]: int(argv[3])})
         self.sadd(index, argv[4])
         #
+        ttl = int(argv[6])
+        self.expire(project_hash, ttl)
+        #
+        if member_hash:
+            self.expire(member_hash, ttl)
+        #
+        self.expire(resv, ttl)
+        #
         return [1, argv[5]]
+
+    def _release(self, key, estimate):
+        """Mirrors the Lua floor: an evicted key must not leave negative reserved behind."""
+        if self.hincrby(key, "reserved", -estimate) < 0:
+            self.hset(key, "reserved", 0)
 
     def _settle(self, keys, argv):
         resv, project_hash, member_hash = keys
         removed = self.zrem(resv, argv[0])
         #
         if removed == 1:
-            self.hincrby(project_hash, "reserved", -int(argv[1]))
+            self._release(project_hash, int(argv[1]))
             #
             if member_hash:
-                self.hincrby(member_hash, "reserved", -int(argv[1]))
+                self._release(member_hash, int(argv[1]))
         #
         actual = int(argv[2])
         #

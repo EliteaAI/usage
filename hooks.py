@@ -41,7 +41,8 @@ COST_SOURCE_UNPRICED = "unpriced"
 RUN_ID_HEADER = "X-Elitea-Run-Id"
 
 # Period-neutral on purpose, and byte-identical to what the LiteLLM path used to return:
-# the SDK and the UI both match on this body, never on the status code
+# the SDK and the UI both match on this body, never on the status code.
+# Twinned with elitea_core/utils/exceptions.py's BudgetDoorClosedError — edit both together.
 BUDGET_ERROR_MESSAGE = (
     "The budget for shared models has been reached. Requests are unavailable "
     "until the budget resets or an administrator raises the limit."
@@ -335,6 +336,15 @@ def _settle(ctx, row):
     if not ctx.reservation:
         return
     #
+    # A missing row means the fact was never persisted, so this call is about to release its
+    # reservation and bill nothing: say so loudly, the ledger cannot repair what it never saw
+    if row is None:
+        log.error(
+            "usage: settling with no recorded row for project %s user %s model %s; "
+            "this call is released unbilled",
+            ctx.project_id, ctx.user_id, ctx.model_name,
+        )
+    #
     try:
         this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_micro_usd") or 0)
     except:  # pylint: disable=W0702
@@ -442,6 +452,12 @@ def _price(model_name, input_tokens, output_tokens, cache_read_tokens, cache_cre
     cost = priced.get("cost")
     #
     if cost is None:
+        # Unpriced is free in both directions: it reserves nothing and bills nothing, so it
+        # passes an exhausted budget untouched
+        log.warning(
+            "usage: model %s is unpriced; the call is not counted against budgets", model_name,
+        )
+        #
         return None, COST_SOURCE_UNPRICED
     #
     return cost, priced.get("cost_source") or COST_SOURCE_UNPRICED

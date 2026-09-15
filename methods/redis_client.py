@@ -23,6 +23,9 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import config as c  # pylint: disable=E0401
 
+DEFAULT_SOCKET_TIMEOUT = 2
+DEFAULT_SOCKET_CONNECT_TIMEOUT = 2
+
 
 class Method:  # pylint: disable=R0903
     """ Method resource (self is the Module instance) """
@@ -49,6 +52,14 @@ class Method:  # pylint: disable=R0903
             }
         #
         redis_config = redis_config.copy()
+        #
+        # Forced, not defaulted: the gate parses keys and lease ids out of replies, and bytes
+        # would build literal b'...' key names instead of raising
+        redis_config["decode_responses"] = True
+        # This client is on the request path of every LLM call, so a half-open socket must not
+        # park a greenlet without a deadline
+        redis_config.setdefault("socket_timeout", DEFAULT_SOCKET_TIMEOUT)
+        redis_config.setdefault("socket_connect_timeout", DEFAULT_SOCKET_CONNECT_TIMEOUT)
         #
         if redis_config.pop("use_managed_identity", False):
             redis_config.pop("password", None)

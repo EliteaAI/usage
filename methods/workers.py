@@ -38,7 +38,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_start_workers(self):
-        """Daemon threads, not gevent: these do blocking DB work and must not sit on the hub."""
+        """Daemon workers — greenlets under pylon's gevent patching, so ticks stay small."""
         if getattr(self, "_usage_workers_started", False):
             return
         #

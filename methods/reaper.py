@@ -51,10 +51,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """ Method """
         now_ms = int(time.time() * 1000)
         released = 0
+        resv_key = resv_key_of_index_member(index_member)
         #
         try:
-            expired = self.usage_redis_client().zrangebyscore(
-                resv_key_of_index_member(index_member), 0, now_ms, start=0, num=REAP_LIMIT,
+            client = self.usage_redis_client()
+            expired = client.zrangebyscore(
+                resv_key, 0, now_ms, start=0, num=REAP_LIMIT,
             ) or []
         except:  # pylint: disable=W0702
             log.exception("usage: failed to scan reservations for %s", index_member)
@@ -68,4 +70,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         if released:
             log.warning("usage: released %s expired reservation(s) for %s", released, index_member)
         #
+        self.usage_forget_drained_bucket(index_member, resv_key)
+        #
         return released
+
+    @web.method()
+    def usage_forget_drained_bucket(self, index_member, resv_key):
+        """Drop an emptied bucket from the index, or the reaper scans every month ever gated."""
+        try:
+            client = self.usage_redis_client()
+            #
+            if client.zcard(resv_key) == 0:
+                client.srem(RESV_INDEX_KEY, index_member)
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to prune the reservation index for %s", index_member)

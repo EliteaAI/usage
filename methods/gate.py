@@ -51,13 +51,17 @@ REAP_LEASE_KEY = f"{KEY_PREFIX}:reap:lease"
 
 DEFAULT_LIMITS_CACHE_TTL = 30
 
+# Counter and reservation keys are per-month; without an expiry every month ever gated stays in
+# Redis forever, and eviction under maxmemory is what corrupts a ledger
+KEY_TTL_SECONDS = 90 * 24 * 3600
+
 # One resolve per (project, user) per window; the ladder is an RPC, the gate is per call
 _limits_cache = None
 _primed = cachetools.TTLCache(maxsize=16384, ttl=3600)
 
 # KEYS: 1=project hash, 2=member hash or '', 3=resv zset, 4=resv index
 # ARGV: 1=estimate, 2=project limit (-1 unlimited), 3=member limit, 4=deadline ms,
-#       5=index member, 6=reservation member json
+#       5=index member, 6=reservation member json, 7=key ttl seconds
 GATE_LUA = """
 local est = tonumber(ARGV[1])
 local pc = tonumber(redis.call('HGET', KEYS[1], 'counter') or '0')
@@ -74,18 +78,28 @@ redis.call('HINCRBY', KEYS[1], 'reserved', est)
 if KEYS[2] ~= '' then redis.call('HINCRBY', KEYS[2], 'reserved', est) end
 redis.call('ZADD', KEYS[3], ARGV[4], ARGV[6])
 redis.call('SADD', KEYS[4], ARGV[5])
+local ttl = tonumber(ARGV[7])
+redis.call('EXPIRE', KEYS[1], ttl)
+if KEYS[2] ~= '' then redis.call('EXPIRE', KEYS[2], ttl) end
+redis.call('EXPIRE', KEYS[3], ttl)
 return {1, ARGV[6]}
 """
 
 # KEYS: 1=resv zset, 2=project hash, 3=member hash or ''
 # ARGV: 1=reservation member json, 2=estimate, 3=actual
 # Release is once-only (ZREM guards it). Accrual is not: a reservation reaped early still
-# has to bill what the call actually cost.
+# has to bill what the call actually cost. Release floors at zero, or an eviction with calls in
+# flight would leave negative reserved, i.e. free headroom for the rest of the month.
 SETTLE_LUA = """
+local function release(key, est)
+    if redis.call('HINCRBY', key, 'reserved', -est) < 0 then
+        redis.call('HSET', key, 'reserved', 0)
+    end
+end
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 1 then
-    redis.call('HINCRBY', KEYS[2], 'reserved', -tonumber(ARGV[2]))
-    if KEYS[3] ~= '' then redis.call('HINCRBY', KEYS[3], 'reserved', -tonumber(ARGV[2])) end
+    release(KEYS[2], tonumber(ARGV[2]))
+    if KEYS[3] ~= '' then release(KEYS[3], tonumber(ARGV[2])) end
 end
 local actual = tonumber(ARGV[3])
 if actual > 0 then
@@ -96,12 +110,13 @@ return removed
 """
 
 
-# KEYS: 1=counter hash · ARGV: 1=persisted counter
+# KEYS: 1=counter hash · ARGV: 1=persisted counter, 2=key ttl seconds
 # Raise-to-max, not HSETNX: a warm key left behind while budgets were disabled sits below
 # real spend, and skipping it would resume enforcement from a stale figure.
 PRIME_LUA = """
 local persisted = tonumber(ARGV[1])
 local current = redis.call('HGET', KEYS[1], 'counter')
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 if current == false or tonumber(current) < persisted then
     redis.call('HSET', KEYS[1], 'counter', persisted)
     return 1
@@ -235,6 +250,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 self.usage_reservation_deadline_ms(),
                 resv_index_member(project_id, moment),
                 reservation,
+                KEY_TTL_SECONDS,
             )
         except:  # pylint: disable=W0702
             log.exception("usage: admission gate is unreachable for project %s", project_id)
@@ -283,10 +299,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if limit is None:
                     continue
                 #
-                spent = sum(
-                    int(value or 0)
-                    for value in client.hmget(hash_key, "counter", "reserved")
-                )
+                # Spend only, not reservations: this door must refuse on money actually spent,
+                # never on in-flight traffic that has not been billed yet
+                spent = int(client.hget(hash_key, "counter") or 0)
                 #
                 if spent >= max(0, int(limit)):
                     return {"closed": True, "scope": scope, "healthy": True}
@@ -335,7 +350,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         try:
             self.usage_redis_client().eval(
-                PRIME_LUA, 1, hash_key, self.usage_counter_of(counter_key),
+                PRIME_LUA, 1, hash_key, self.usage_counter_of(counter_key), KEY_TTL_SECONDS,
             )
         except:  # pylint: disable=W0702
             # Retry on the next call rather than leaving an unprimed key marked primed

@@ -299,14 +299,15 @@ class TestDoorCheck:
         #
         assert instance.usage_gate_check(42, 7, MOMENT)["closed"] is False
 
-    def test_outstanding_reservations_count_towards_the_limit(self):
+    def test_outstanding_reservations_do_not_close_the_door(self):
+        # This door must refuse on money already spent, never on traffic still in flight
         instance, client = build(enabled(project=10 * MILLION))
         self._spend(
             client, gate.project_hash_key(42, MOMENT),
             counter=6 * MILLION, reserved=4 * MILLION,
         )
         #
-        assert instance.usage_gate_check(42, 7, MOMENT)["closed"] is True
+        assert instance.usage_gate_check(42, 7, MOMENT)["closed"] is False
 
     def test_a_full_member_slice_closes_on_member_scope(self):
         instance, client = build(enabled(project=100 * MILLION, member=MILLION))
@@ -345,7 +346,7 @@ class TestDoorCheck:
 
     def test_an_unreachable_redis_is_unknown_not_closed(self):
         class Broken:
-            def hmget(self, *args):
+            def hget(self, *args):
                 raise RuntimeError("redis is down")
         #
         instance, _ = build(enabled(project=MILLION), redis=Broken())
