@@ -80,6 +80,13 @@ ATTRIBUTION_TEXT_LIMIT = 512
 # Enough for any provider's first frame; the dialects are incremental, so nothing else is kept
 HEAD_LIMIT = 8192
 
+# The actor's email is denormalised onto the row so a leaderboard still names someone whose
+# account was later removed. Resolved from the directory rather than read off the attribution
+# header: a caller must not be able to label its calls with another person's identity.
+# Bounded and process-local — a restart re-resolves, and a rename shows up then.
+_EMAIL_CACHE = {}
+_EMAIL_CACHE_LIMIT = 2048
+
 
 @dataclasses.dataclass
 class UsageContext:  # pylint: disable=R0902
@@ -104,14 +111,15 @@ class UsageContext:  # pylint: disable=R0902
 
 def begin_llm_call(  # pylint: disable=R0913,R0917
         project_id, user_id, model_name, endpoint, headers,
-        provider=None, run_id=None, attribution=None,
+        provider=None, run_id=None, attribution=None, user_email=None,
         max_output_tokens=None, input_size_bytes=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
     model_name is RAW/pre-mapping: LiteLLM rewrites it, the costs catalog uses the raw name.
-    `provider`, `run_id` and `attribution` are keywords so an interface that knows none of
-    them still fits — run id and attribution are read off the headers when not passed.
+    `provider`, `run_id`, `attribution` and `user_email` are keywords so an interface that
+    knows none of them still fits — run id and attribution are read off the headers when not
+    passed, and the email is resolved from the directory.
     """
     mode = current_mode()
     #
@@ -126,6 +134,7 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         provider=provider,
         run_id=_run_id(run_id if run_id else (headers or {}).get(RUN_ID_HEADER)),
         attribution=_attribution(attribution, headers),
+        user_email=_user_email(user_email, user_id),
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
     )
@@ -292,6 +301,40 @@ def _clean_attribution(attribution):
             cleaned[key] = str(value)[:ATTRIBUTION_TEXT_LIMITS.get(key, ATTRIBUTION_TEXT_LIMIT)]
     #
     return cleaned
+
+
+def _user_email(user_email, user_id):
+    """The actor's email, looked up once per user per process.
+
+    Never fails a call: an unresolvable actor leaves the column null, and the read side
+    resolves ids through the directory anyway, so the row is still attributable.
+    """
+    if user_email:
+        return str(user_email)[:ATTRIBUTION_TEXT_LIMIT]
+    #
+    # 0 is the synthetic actor and has no directory entry
+    if not user_id:
+        return None
+    #
+    key = int(user_id)
+    #
+    if key in _EMAIL_CACHE:
+        return _EMAIL_CACHE[key]
+    #
+    try:
+        from tools import auth  # pylint: disable=C0415,E0401
+        #
+        resolved = (auth.get_user(user_id=key) or {}).get("email")
+    except:  # pylint: disable=W0702
+        log.warning("usage: cannot resolve the email of user %s", key)
+        return None
+    #
+    if len(_EMAIL_CACHE) >= _EMAIL_CACHE_LIMIT:
+        _EMAIL_CACHE.clear()
+    #
+    _EMAIL_CACHE[key] = resolved
+    #
+    return resolved
 
 
 def meter_llm_response(ctx, response, iterator):
