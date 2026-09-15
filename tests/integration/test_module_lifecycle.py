@@ -15,6 +15,7 @@ def build(config=None, rpc=None, descriptors=None):
     descriptor = types.SimpleNamespace(
         config={"usage": config if config is not None else {}},
         name="usage",
+        metadata={"name": "usage", "version": "0.9"},
         init_all=lambda: calls.append(("init_all", None)),
         register_tool=lambda name, tool: calls.append(("register_tool", name)),
     )
