@@ -262,6 +262,36 @@ class TestPriming:
         assert len(primes) == 1
 
 
+class TestKeyExpiry:
+    """Per-month keys with no TTL accumulate forever, and eviction is what corrupts a ledger."""
+
+    def test_a_primed_key_that_is_never_gated_still_expires(self):
+        # EXPIRE has to follow the HSET that creates the hash, or it silently no-ops
+        instance, client = build(enabled(project=100 * MILLION), persisted=7 * MILLION)
+        #
+        instance.usage_gate_prime(
+            gate.project_hash_key(42, MOMENT), {"project_id": 42},
+        )
+        #
+        assert client.expiries.get(gate.project_hash_key(42, MOMENT)) is not None
+
+    def test_a_denied_call_still_refreshes_the_counter_hash_ttl(self):
+        # A permanently over-limit project never reaches the admit path, so a TTL applied only
+        # after admission would leave exactly the longest-lived keys unexpiring
+        instance, client = build(enabled(project=MILLION), persisted=MILLION)
+        #
+        assert instance.usage_gate_acquire(42, 7, MILLION, MOMENT)["allowed"] is False
+        assert client.expiries.get(gate.project_hash_key(42, MOMENT)) is not None
+        assert client.expiries.get(gate.member_hash_key(42, 7, MOMENT)) is not None
+
+    def test_an_admitted_call_expires_the_reservation_zset_too(self):
+        instance, client = build(enabled(project=100 * MILLION))
+        #
+        instance.usage_gate_acquire(42, 7, MILLION, MOMENT)
+        #
+        assert client.expiries.get(gate.resv_key(42, MOMENT)) is not None
+
+
 class TestKeys:
     """The key schema is a wire contract with the reaper and the reconcile."""
 

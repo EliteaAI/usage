@@ -169,24 +169,39 @@ class RecordingRedis:
         if script == gate.PRIME_LUA:
             return self._prime(keys, argv)
         #
+        if script == gate.PRUNE_LUA:
+            return self._prune(keys, argv)
+        #
         raise AssertionError("unknown script")
 
     def _prime(self, keys, argv):
         hash_key, persisted = keys[0], int(argv[0])
-        self.expire(hash_key, int(argv[1]))
         current = self.hashes.get(hash_key, {}).get("counter")
+        raised = 0
         #
         if current is None or int(current) < persisted:
             self.hset(hash_key, "counter", persisted)
-            #
-            return 1
+            raised = 1
         #
-        return 0
+        self.expire(hash_key, int(argv[1]))
+        #
+        return raised
+
+    def _prune(self, keys, argv):
+        resv, index = keys
+        #
+        return self.srem(index, argv[0]) if self.zcard(resv) == 0 else 0
 
     def _gate(self, keys, argv):
         project_hash, member_hash, resv, index = keys
         estimate = int(argv[0])
         project_limit, member_limit = int(argv[1]), int(argv[2])
+        #
+        ttl = int(argv[6])
+        self.expire(project_hash, ttl)
+        #
+        if member_hash:
+            self.expire(member_hash, ttl)
         #
         outstanding = self.counter(project_hash) + self.reserved(project_hash)
         #
@@ -206,13 +221,6 @@ class RecordingRedis:
         #
         self.zadd(resv, {argv[5]: int(argv[3])})
         self.sadd(index, argv[4])
-        #
-        ttl = int(argv[6])
-        self.expire(project_hash, ttl)
-        #
-        if member_hash:
-            self.expire(member_hash, ttl)
-        #
         self.expire(resv, ttl)
         #
         return [1, argv[5]]

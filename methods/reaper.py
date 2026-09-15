@@ -22,7 +22,7 @@ import time
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
-from .gate import RESV_INDEX_KEY, resv_key_of_index_member
+from .gate import PRUNE_LUA, RESV_INDEX_KEY, resv_key_of_index_member
 
 REAP_LIMIT = 500
 
@@ -78,9 +78,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_forget_drained_bucket(self, index_member, resv_key):
         """Drop an emptied bucket from the index, or the reaper scans every month ever gated."""
         try:
-            client = self.usage_redis_client()
-            #
-            if client.zcard(resv_key) == 0:
-                client.srem(RESV_INDEX_KEY, index_member)
+            # One script: a check-then-SREM would drop a bucket a concurrent acquire just
+            # reserved into, hiding that reservation from the reaper for the rest of the month
+            self.usage_redis_client().eval(
+                PRUNE_LUA, 2, resv_key, RESV_INDEX_KEY, index_member,
+            )
         except:  # pylint: disable=W0702
             log.exception("usage: failed to prune the reservation index for %s", index_member)

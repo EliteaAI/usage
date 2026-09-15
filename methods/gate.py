@@ -64,8 +64,13 @@ _primed = cachetools.TTLCache(maxsize=16384, ttl=3600)
 #       5=index member, 6=reservation member json, 7=key ttl seconds
 GATE_LUA = """
 local est = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[7])
 local pc = tonumber(redis.call('HGET', KEYS[1], 'counter') or '0')
 local pr = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
+-- Refreshed before the limit checks: a permanently-denied hash is exactly the one that would
+-- otherwise never reach the EXPIREs below and sit in Redis forever
+redis.call('EXPIRE', KEYS[1], ttl)
+if KEYS[2] ~= '' then redis.call('EXPIRE', KEYS[2], ttl) end
 local plim = tonumber(ARGV[2])
 if plim >= 0 and (pc + pr + est) > plim then return {0, 'project'} end
 local mlim = tonumber(ARGV[3])
@@ -78,9 +83,6 @@ redis.call('HINCRBY', KEYS[1], 'reserved', est)
 if KEYS[2] ~= '' then redis.call('HINCRBY', KEYS[2], 'reserved', est) end
 redis.call('ZADD', KEYS[3], ARGV[4], ARGV[6])
 redis.call('SADD', KEYS[4], ARGV[5])
-local ttl = tonumber(ARGV[7])
-redis.call('EXPIRE', KEYS[1], ttl)
-if KEYS[2] ~= '' then redis.call('EXPIRE', KEYS[2], ttl) end
 redis.call('EXPIRE', KEYS[3], ttl)
 return {1, ARGV[6]}
 """
@@ -116,10 +118,22 @@ return removed
 PRIME_LUA = """
 local persisted = tonumber(ARGV[1])
 local current = redis.call('HGET', KEYS[1], 'counter')
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+local raised = 0
 if current == false or tonumber(current) < persisted then
     redis.call('HSET', KEYS[1], 'counter', persisted)
-    return 1
+    raised = 1
+end
+-- After the HSET, never before: EXPIRE no-ops on a key that does not exist yet
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return raised
+"""
+
+# KEYS: 1=resv zset, 2=resv index · ARGV: 1=index member
+# One script, or a racing GATE_LUA slips its ZADD+SADD between the ZCARD and the SREM and the
+# reservation it just took becomes invisible to the reaper — headroom nothing can reclaim
+PRUNE_LUA = """
+if redis.call('ZCARD', KEYS[1]) == 0 then
+    return redis.call('SREM', KEYS[2], ARGV[1])
 end
 return 0
 """
