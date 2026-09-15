@@ -68,16 +68,6 @@ class TestLease:
         assert second.usage_hold_lease(gate.DRAIN_LEASE_KEY) is True
         assert client.get(gate.DRAIN_LEASE_KEY) == second_id
 
-    def test_the_drainer_and_the_reaper_hold_separate_leases(self, replicas, monkeypatch):
-        """Otherwise one replica could take both and the other would idle uselessly."""
-        _, first, second, first_id, second_id = replicas
-        monkeypatch.setattr(workers, "REPLICA_ID", first_id)
-        first.usage_hold_lease(gate.DRAIN_LEASE_KEY)
-        #
-        monkeypatch.setattr(workers, "REPLICA_ID", second_id)
-        #
-        assert second.usage_hold_lease(gate.REAP_LEASE_KEY) is True
-
     def test_an_unreachable_redis_never_grants_the_lease(self, replicas):
         _, first, _, _, _ = replicas
         first.usage_redis_client = lambda: (_ for _ in ()).throw(RuntimeError("down"))
@@ -102,10 +92,9 @@ class TestStartWorkers:
         instance.usage_config = lambda: {}
         instance.usage_redis_client = lambda: RecordingRedis()
         instance.usage_drain_batch = lambda: None
-        instance.usage_reap_expired = lambda: None
         instance.usage_worker_loop = lambda *a, **k: started.append(a[0])
         #
         instance.usage_start_workers()
         instance.usage_start_workers()
         #
-        assert sorted(started) == ["usage-drainer", "usage-reaper"]
+        assert started == ["usage-drainer"]

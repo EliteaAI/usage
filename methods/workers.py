@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Background workers — one leaseholder drains, one reaps; the other replicas idle """
+""" Background worker — one leaseholder drains the queue; the other replicas idle """
 
 import threading
 import time
@@ -24,10 +24,9 @@ import uuid
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
-from .gate import DRAIN_LEASE_KEY, REAP_LEASE_KEY
+from .gate import DRAIN_LEASE_KEY
 
 DEFAULT_FLUSH_INTERVAL = 5
-DEFAULT_REAP_INTERVAL = 30
 DEFAULT_LEASE_SECONDS = 20
 
 REPLICA_ID = uuid.uuid4().hex
@@ -44,19 +43,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         self._usage_workers_started = True
         #
-        for name, tick, interval_key, default in (
-                ("usage-drainer", self.usage_drain_batch,
-                 "queue_flush_interval_seconds", DEFAULT_FLUSH_INTERVAL),
-                ("usage-reaper", self.usage_reap_expired,
-                 "reaper_interval_seconds", DEFAULT_REAP_INTERVAL),
-        ):
-            lease_key = DRAIN_LEASE_KEY if name == "usage-drainer" else REAP_LEASE_KEY
-            #
-            threading.Thread(
-                target=self.usage_worker_loop,
-                args=(name, tick, lease_key, interval_key, default),
-                name=name, daemon=True,
-            ).start()
+        threading.Thread(
+            target=self.usage_worker_loop,
+            args=(
+                "usage-drainer", self.usage_drain_batch, DRAIN_LEASE_KEY,
+                "queue_flush_interval_seconds", DEFAULT_FLUSH_INTERVAL,
+            ),
+            name="usage-drainer", daemon=True,
+        ).start()
 
     @web.method()
     def usage_worker_loop(self, name, tick, lease_key, interval_key, default_interval):  # pylint: disable=R0913,R0917

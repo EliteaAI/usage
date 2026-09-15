@@ -12,14 +12,13 @@ from fixtures.helpers import bind, fake_module
 
 
 class FakeRedis:
-    """Only hmget is exercised — the warning path reads, never writes."""
+    """Only hget is exercised — the warning path reads, never writes."""
 
     def __init__(self, hashes=None):
         self.hashes = hashes or {}
 
-    def hmget(self, key, *fields):
-        row = self.hashes.get(key, {})
-        return [row.get(field) for field in fields]
+    def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
 
 
 def module_with(config, limits=None, hashes=None):
@@ -112,14 +111,6 @@ class TestResolveWarning:
         assert state["should_warn"] is True
         assert state["scope"] == "project"
         assert state["percent_used"] == 85
-
-    def test_reserved_counts_towards_the_percentage(self, monkeypatch):
-        monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
-        instance = module_with(
-            {"mode": "enforce"}, self.LIMITS, {"P": {"counter": "400", "reserved": "450"}},
-        )
-        #
-        assert instance.usage_resolve_budget_warning(7)["percent_used"] == 85
 
     def test_member_scope_wins_over_project_scope(self, monkeypatch):
         monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")

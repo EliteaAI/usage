@@ -27,10 +27,9 @@ import cachetools  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
-from tools import context, this  # pylint: disable=E0401
+from tools import context  # pylint: disable=E0401
 
 from . import hooks
-from .methods.estimate import output_tokens_of
 from .methods.mode import MODE_OFF
 from .sources.dialect import path_of
 
@@ -76,8 +75,6 @@ def prepare_llm_call(proxy_target, proxy_auth, raw_model_name=None, model_projec
             provider=proxy_auth.get(PROVIDER_AUTH_KEY),
             run_id=proxy_auth.get(RUN_ID_AUTH_KEY),
             attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
-            max_output_tokens=requested_output_tokens(proxy_target),
-            input_size_bytes=request_size_of(proxy_target),
         )
         #
         proxy_auth[CONTEXT_AUTH_KEY] = usage_context
@@ -89,24 +86,6 @@ def prepare_llm_call(proxy_target, proxy_auth, raw_model_name=None, model_projec
     except:  # pylint: disable=W0702
         log.exception("usage: failed to prepare an LLM call")
         return None
-
-
-def requested_output_tokens(proxy_target):
-    """The output ceiling this request asked for, else the configured default."""
-    return output_tokens_of(
-        proxy_target.get("json"),
-        this.module.usage_default_output_tokens(),
-    )
-
-
-def request_size_of(proxy_target):
-    """Content-Length only — re-serializing a body to measure it is a known outage class."""
-    headers = proxy_target.get("headers") or {}
-    #
-    try:
-        return int(headers.get("Content-Length") or headers.get("content-length") or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def meter_llm_call(proxy_target, proxy_auth, response, iterator):

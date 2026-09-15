@@ -44,48 +44,6 @@
         "maximum": 12
       }
     },
-    "usage_max_call_cost_usd": {
-      "type": "number",
-      "title": "Max reserved cost per call (USD)",
-      "description": "Ceiling on one call's pre-flight cost estimate. Bounds how far spend can pass a limit.",
-      "path": "usage.reservation.max_call_cost_usd",
-      "section": "Usage",
-      "default": 2.0,
-      "requires_restart": false,
-      "value_schema": {
-        "type": "number",
-        "minimum": 0.01,
-        "maximum": 1000
-      }
-    },
-    "usage_default_output_tokens": {
-      "type": "integer",
-      "title": "Assumed output tokens",
-      "description": "Output length assumed when a request does not declare max_tokens.",
-      "path": "usage.reservation.default_output_tokens",
-      "section": "Usage",
-      "default": 4096,
-      "requires_restart": false,
-      "value_schema": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000000
-      }
-    },
-    "usage_reservation_ttl_seconds": {
-      "type": "integer",
-      "title": "Reservation lifetime (seconds)",
-      "description": "After this a reservation is reclaimed. Must exceed the LLM proxy's consumer timeout.",
-      "path": "usage.reservation.ttl_seconds",
-      "section": "Usage",
-      "default": 900,
-      "requires_restart": false,
-      "value_schema": {
-        "type": "integer",
-        "minimum": 30,
-        "maximum": 86400
-      }
-    },
     "usage_queue_flush_batch_size": {
       "type": "integer",
       "title": "Queue flush batch size",
@@ -114,24 +72,10 @@
         "maximum": 3600
       }
     },
-    "usage_reaper_interval_seconds": {
-      "type": "integer",
-      "title": "Reservation reaper interval (seconds)",
-      "description": "How often expired reservations are reclaimed.",
-      "path": "usage.redis.reaper_interval_seconds",
-      "section": "Usage",
-      "default": 30,
-      "requires_restart": false,
-      "value_schema": {
-        "type": "integer",
-        "minimum": 5,
-        "maximum": 3600
-      }
-    },
     "usage_lease_seconds": {
       "type": "integer",
       "title": "Worker lease (seconds)",
-      "description": "How long one replica holds the right to drain and reap before another may take over.",
+      "description": "How long one replica holds the right to drain the queue before another may take over.",
       "path": "usage.redis.lease_seconds",
       "section": "Usage",
       "default": 20,

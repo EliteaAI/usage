@@ -58,12 +58,9 @@ def rpc(monkeypatch):
 
 @pytest.fixture()
 def mode_observe(monkeypatch):
-    # interface has its own `this`, and prepare_llm_call reads the reservation default off it
-    module = types.SimpleNamespace(usage_default_output_tokens=lambda: 4096)
     monkeypatch.setattr(hooks, "this", types.SimpleNamespace(
-        descriptor=types.SimpleNamespace(config={"usage": {"mode": "observe"}}), module=module,
+        descriptor=types.SimpleNamespace(config={"usage": {"mode": "observe"}}), module=None,
     ))
-    monkeypatch.setattr(interface, "this", types.SimpleNamespace(module=module))
 
 
 @pytest.fixture()

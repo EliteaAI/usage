@@ -129,10 +129,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if limit is None or int(limit) <= 0:
                     continue
                 #
-                spent = sum(
-                    int(value or 0)
-                    for value in client.hmget(hash_key, "counter", "reserved")
-                )
+                spent = int(client.hget(hash_key, "counter") or 0)
                 #
                 state = self.usage_warning_for_scope(
                     scope, spent, int(limit), self.usage_get_warning_threshold(threshold_scope),

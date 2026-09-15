@@ -51,16 +51,10 @@ class Recorder:
         # False on purpose: these tests assert on the synchronous fallback path
         return False
 
-    def usage_estimate_micro(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
-        return 0
+    def usage_gate_check(self, project_id, user_id=None):  # pylint: disable=W0613
+        return {"closed": False, "scope": None, "healthy": True}
 
-    def usage_default_output_tokens(self):
-        return 4096
-
-    def usage_gate_acquire(self, project_id, user_id, estimate_micro, moment):  # pylint: disable=W0613
-        return {"allowed": True, "scope": None, "reservation": None, "healthy": True}
-
-    def usage_gate_settle(self, reservation, actual_micro):  # pylint: disable=W0613
+    def usage_gate_accrue(self, project_id, user_id, actual_micro):  # pylint: disable=W0613
         return True
 
     def usage_resolve_project_id(self, user_id, user_name, headers):  # pylint: disable=W0613
@@ -99,7 +93,6 @@ def _gateway(monkeypatch, mode):
     monkeypatch.setattr(
         interface, "context", types.SimpleNamespace(rpc_manager=ProviderLookup()),
     )
-    monkeypatch.setattr(interface, "this", types.SimpleNamespace(module=recorder))
     #
     return recorder
 
