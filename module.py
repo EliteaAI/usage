@@ -43,7 +43,7 @@ class Module(module.ModuleModel):
         self.descriptor.init_all()
         #
         # Registers both tables in the shared metadata; provisioning is shared's job
-        from .models import usage_counter, usage_event, usage_ingest_watermark  # pylint: disable=C0415,W0611
+        from .models import usage_counter, usage_event  # pylint: disable=C0415,W0611
         #
         registry.register_defaults()
         #

@@ -46,8 +46,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         try:
             with db.engine.connect() as connection:
                 landed = [dict(row) for row in connection.execute(statement).mappings()]
-                # LLM rows off the queue are invisible to the drainer's RETURNING, so this is
-                # their only count; other types are folded by the watermark scan instead
+                # Only LLM rows feed the counters, and off the queue the drainer's RETURNING
+                # never sees them, so this is their only count
                 if payload.get("event_type") == "llm":
                     self.usage_apply_counter_deltas(connection, counter_deltas(landed))
                 connection.commit()

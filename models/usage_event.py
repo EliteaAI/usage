@@ -105,11 +105,6 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
             postgresql_where=text("tool_name IS NOT NULL"),
         ),
         Index("ix_usage_event_conversation", "conversation_id"),
-        # The drainer folds non-LLM rows into the counters by ascending id
-        Index(
-            "ix_usage_event_nonllm_id", "id",
-            postgresql_where=text("event_type <> 'llm'"),
-        ),
         Index("ix_usage_event_project_run", "project_id", "run_id"),
         {"schema": c.POSTGRES_SCHEMA, "postgresql_partition_by": "RANGE (ts)"},
     )

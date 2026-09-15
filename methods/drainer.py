@@ -19,7 +19,7 @@
 
 import json
 
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -31,10 +31,8 @@ from ._counters import member_key, project_key
 from .gate import QUEUE_KEY
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
-from ..models.usage_ingest_watermark import UsageIngestWatermark
 
 DEFAULT_BATCH_SIZE = 500
-WATERMARK_TOOL_EVENTS = "tool_events"
 
 
 def period_of(ts):
@@ -116,7 +114,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if rows:
                     drained = len(self.usage_insert_events(connection, rows))
                 #
-                self.usage_fold_foreign_events(connection)
                 connection.commit()
         except:  # pylint: disable=W0702
             log.exception("usage: drain tick failed")
@@ -186,43 +183,3 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """ Method """
         for delta in deltas:
             connection.execute(counter_upsert(delta))
-
-    @web.method()
-    def usage_fold_foreign_events(self, connection):
-        """Count rows that bypass the queue — tool events today, any future non-LLM type."""
-        redis_config = self.usage_config().get("redis") or {}
-        batch = max(1, int(redis_config.get("queue_flush_batch_size", DEFAULT_BATCH_SIZE)))
-        #
-        last_id = self.usage_watermark_of(connection, WATERMARK_TOOL_EVENTS)
-        #
-        statement = select(UsageEvent.id, *RETURNING_COLUMNS).where(
-            UsageEvent.event_type != "llm", UsageEvent.id > last_id,
-        ).order_by(UsageEvent.id).limit(batch)
-        #
-        rows = [dict(row) for row in connection.execute(statement).mappings()]
-        #
-        if not rows:
-            return 0
-        #
-        self.usage_apply_counter_deltas(connection, counter_deltas(rows))
-        self.usage_watermark_set(connection, WATERMARK_TOOL_EVENTS, rows[-1]["id"])
-        #
-        return len(rows)
-
-    @web.method()
-    def usage_watermark_of(self, connection, source):
-        """ Method """
-        statement = select(UsageIngestWatermark.last_id).where(
-            UsageIngestWatermark.source == source,
-        )
-        #
-        return int(connection.execute(statement).scalar() or 0)
-
-    @web.method()
-    def usage_watermark_set(self, connection, source, last_id):
-        """Advanced in the same transaction as the upsert it belongs to, so a rollback un-counts."""
-        statement = insert(UsageIngestWatermark).values(source=source, last_id=last_id)
-        #
-        connection.execute(statement.on_conflict_do_update(
-            index_elements=["source"], set_={"last_id": last_id},
-        ))

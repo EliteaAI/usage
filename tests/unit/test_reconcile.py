@@ -18,8 +18,11 @@ class Rows:
 
     def __init__(self, rows):
         self.rows = rows
+        self.statements = []
 
-    def execute(self, *_args, **_kwargs):
+    def execute(self, statement=None, *_args, **_kwargs):
+        self.statements.append(statement)
+        #
         return iter(self.rows)
 
 
@@ -45,6 +48,15 @@ class TestFactTotals:
         project = totals[(42, reconcile.PROJECT_USER_SENTINEL)]
         assert project["cost_micro_usd"] == 1250
         assert project["call_count"] == 3
+
+    def test_only_llm_facts_are_summed(self):
+        # Nothing counts other event types into usage_counter, so summing them here would
+        # report drift the drainer can never close
+        connection = Rows([])
+        #
+        build().usage_fact_totals(connection, START, END)
+        #
+        assert "event_type" in str(connection.statements[0])
 
     def test_a_row_without_a_user_counts_only_towards_the_project(self):
         connection = Rows([(42, None, 10, 20, 1000, 1)])

@@ -124,12 +124,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_fact_totals(self, connection, start, end):
-        """Per-project and per-member sums straight off usage_event."""
+        """Per-project and per-member sums straight off usage_event.
+
+        LLM rows only: nothing counts other event types into usage_counter, so including them
+        here would report drift that is by design.
+        """
         statement = select(
             UsageEvent.project_id, UsageEvent.user_id,
             func.sum(UsageEvent.input_tokens), func.sum(UsageEvent.output_tokens),
             func.sum(UsageEvent.cost_micro_usd), func.count(),
-        ).where(UsageEvent.ts >= start, UsageEvent.ts < end).group_by(
+        ).where(
+            UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.event_type == "llm",
+        ).group_by(
             UsageEvent.project_id, UsageEvent.user_id,
         )
         #

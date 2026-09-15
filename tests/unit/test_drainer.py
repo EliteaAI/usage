@@ -13,16 +13,13 @@ from usage.methods._counters import member_key, project_key
 TS = datetime.datetime(2026, 9, 11, 12, 0, tzinfo=datetime.timezone.utc)
 
 
-def event(key, project_id=42, user_id=7, cost=1000, event_type="llm", row_id=None):
+def event(key, project_id=42, user_id=7, cost=1000, event_type="llm"):
     """One usage_event row as the queue carries it."""
     row = {
         "idempotency_key": key, "ts": TS, "project_id": project_id, "user_id": user_id,
         "input_tokens": 10, "output_tokens": 20, "cost_micro_usd": cost,
         "event_type": event_type,
     }
-    #
-    if row_id is not None:
-        row["id"] = row_id
     #
     return row
 
@@ -34,10 +31,8 @@ class Landing:
     fake has to model exactly the thing the real index does: a repeat returns nothing.
     """
 
-    def __init__(self, existing=(), foreign=(), watermark=0):
+    def __init__(self, existing=()):
         self.landed = set(existing)
-        self.foreign = list(foreign)
-        self.watermark = watermark
         self.upserts = []
         self.commits = 0
 
@@ -60,11 +55,7 @@ class _Result:
         self.statement = statement
 
     def mappings(self):
-        rows = getattr(self.statement, "_usage_rows", None)
-        #
-        if rows is None:
-            return iter(self.connection.foreign)
-        #
+        rows = getattr(self.statement, "_usage_rows", None) or []
         fresh = []
         #
         for row in rows:
@@ -77,9 +68,6 @@ class _Result:
             fresh.append(row)
         #
         return iter(fresh)
-
-    def scalar(self):
-        return self.connection.watermark
 
 
 def build(connection, batch=500):
@@ -180,24 +168,6 @@ class TestInsertEvents:
         assert {delta["cost_micro_usd"] for delta in connection.upserts} == {5000}
 
 
-class TestFoldForeignEvents:
-    """Tool rows bypass the queue, so the RETURNING path never sees them."""
-
-    def test_folds_non_llm_rows_and_advances_the_watermark(self):
-        connection = Landing(foreign=[event("t1", event_type="tool", row_id=11)])
-        instance = build(connection)
-        #
-        assert instance.usage_fold_foreign_events(connection) == 1
-        assert connection.upserts
-
-    def test_nothing_new_leaves_the_watermark_alone(self):
-        connection = Landing(foreign=[])
-        instance = build(connection)
-        #
-        assert instance.usage_fold_foreign_events(connection) == 0
-        assert connection.upserts == []
-
-
 class TestQueue:
     def test_enqueue_reports_success(self):
         client = RecordingRedis()
@@ -275,7 +245,6 @@ class TestRequeueOnFailure:
     def _instance(self, client, fail=True, monkeypatch=None):
         instance = build(Landing())
         instance.usage_redis_client = lambda: client
-        instance.usage_fold_foreign_events = lambda *_a, **_k: 0
         #
         if fail:
             instance.usage_insert_events = \
