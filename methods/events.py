@@ -15,10 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" usage_event writer — one direct insert per metered call
-
-Direct insert now; the Redis append plus batching drainer arrives with the counter ledger.
-"""
+""" usage_event writer — the direct-insert fallback for when the queue is unavailable """
 
 from sqlalchemy.dialects.postgresql import insert
 
@@ -27,12 +24,8 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
+from .drainer import counter_deltas, period_of
 from ..models.usage_event import UsageEvent
-
-
-def period_of(ts):
-    """Denormalised 'YYYYMM' of the row timestamp."""
-    return f"{ts:%Y%m}"
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -47,14 +40,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         statement = insert(UsageEvent).values(**payload).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],
-        )
+        ).returning(UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
+                    UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd)
         #
         try:
             with db.engine.connect() as connection:
-                result = connection.execute(statement)
+                landed = [dict(row) for row in connection.execute(statement).mappings()]
+                # Only LLM rows feed the counters, and off the queue the drainer's RETURNING
+                # never sees them, so this is their only count
+                if payload.get("event_type") == "llm":
+                    self.usage_apply_counter_deltas(connection, counter_deltas(landed))
                 connection.commit()
             #
-            return bool(result.rowcount)
+            return bool(landed)
         except:  # pylint: disable=W0702
             # Losing a row must never break the response the user is already reading
             log.exception("usage: failed to write usage_event")

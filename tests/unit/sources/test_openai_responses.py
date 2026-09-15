@@ -115,3 +115,40 @@ class TestReading:
         #
         for cut in range(0, len(body), 17):
             read("openai.responses", "/v1/responses", "text/event-stream", body[:cut])
+
+
+class TestImageGeneration:
+    """Image responses carry this exact token shape, but `usage` sits after the base64 payload.
+
+    Head sniffing can therefore never reach the `*_tokens_details` tell, so the endpoint has to
+    be the thing that claims the body — otherwise every image generation bills as zero.
+    """
+
+    IMAGE_BODY = {
+        "created": 1, "background": "opaque", "size": "1024x1024",
+        "data": [{"b64_json": "A" * 4096}],
+        "usage": {
+            "total_tokens": 206, "input_tokens": 10, "output_tokens": 196,
+            "input_tokens_details": {"image_tokens": 0, "text_tokens": 10},
+            "output_tokens_details": {"image_tokens": 196, "text_tokens": 0},
+        },
+    }
+
+    @pytest.mark.parametrize("endpoint", [
+        "/v1/images/generations", "/v1/images/edits", "/v1/images/variations",
+    ])
+    def test_the_endpoint_claims_the_body(self, registered_dialects, endpoint):
+        assert registry.match(endpoint, "application/json", b"").id == "openai.responses"
+
+    def test_image_tokens_are_read(self, registered_dialects):
+        reading = read("openai.responses", "/v1/images/generations", "application/json",
+                       json_body(self.IMAGE_BODY))
+        #
+        assert (reading.input_tokens, reading.output_tokens) == (10, 196)
+
+    def test_a_leading_payload_does_not_hide_the_usage_from_sniffing(self, registered_dialects):
+        # The tell the head probe would have used is genuinely absent from the first bytes
+        head = json_body(self.IMAGE_BODY)[:512]
+        #
+        assert b'"input_tokens_details"' not in head
+        assert registry.match("/v1/images/generations", "application/json", head) is not None

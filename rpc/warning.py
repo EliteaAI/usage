@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Mode RPC """
+""" Budget warning RPC """
 
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
@@ -23,12 +23,12 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 class RPC:  # pylint: disable=E1101,R0903,W0201
     """ RPC Resource """
 
-    @web.rpc("usage_mode", "usage_mode")
-    def usage_mode_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Current usage mode, so the UI can hide the feature when it is off."""
-        return self.usage_get_mode()
+    @web.rpc("usage_get_budget_warning_state", "usage_budget_warning_state_now")
+    def usage_get_budget_warning_state_rpc(self, project_id, user_id=None, **kwargs):  # pylint: disable=W0613
+        """Whether a budget is nearing its limit for this user, and which scope."""
+        return self.usage_get_budget_warning_state(project_id, user_id)
 
-    @web.rpc("usage_ensure_partitions", "usage_ensure_partitions_now")
-    def usage_ensure_partitions_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Create the current and upcoming usage_event partitions. Called by the daily cron."""
-        return self.usage_ensure_partitions()
+    @web.rpc("usage_get_warning_threshold", "usage_warning_threshold_now")
+    def usage_get_warning_threshold_rpc(self, scope, **kwargs):  # pylint: disable=W0613
+        """Configured warning percentage for a budget scope."""
+        return self.usage_get_warning_threshold(scope)

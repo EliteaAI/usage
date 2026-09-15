@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Mode RPC """
+""" Reconcile RPC """
 
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
@@ -23,12 +23,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 class RPC:  # pylint: disable=E1101,R0903,W0201
     """ RPC Resource """
 
-    @web.rpc("usage_mode", "usage_mode")
-    def usage_mode_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Current usage mode, so the UI can hide the feature when it is off."""
-        return self.usage_get_mode()
-
-    @web.rpc("usage_ensure_partitions", "usage_ensure_partitions_now")
-    def usage_ensure_partitions_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Create the current and upcoming usage_event partitions. Called by the daily cron."""
-        return self.usage_ensure_partitions()
+    @web.rpc("usage_reconcile_counters", "usage_reconcile_counters_now")
+    def usage_reconcile_counters_rpc(self, period=None, apply=False, **kwargs):  # pylint: disable=W0613
+        """Counter drift for a period. Reports only unless apply is set. Called by the hourly cron."""
+        return self.usage_reconcile_counters(period=period, apply=apply)

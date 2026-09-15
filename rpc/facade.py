@@ -18,19 +18,14 @@
 """ Spend RPC facade — named RPCs returning already-aggregated, server-side-paged rows
 
 Not a generic aggregate(dims, metrics, filters) DSL — arbitrary dims cannot be index-proven.
+
+Every reader here answers with the zero shape until #6574 wires it to usage_event/usage_counter.
+The shapes are the contract the Usage page already consumes, so they are kept rather than removed.
 """
 
 import datetime
-from queue import Empty
 
-from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
-
-from tools import context  # pylint: disable=E0401
-
-from ..methods.mode import SOURCE_LITELLM
-
-DELEGATE_TIMEOUT = 30
 
 
 def current_period():
@@ -39,7 +34,7 @@ def current_period():
 
 
 def empty_spend(tag=""):
-    """The zero shape read_tag_spend returns when its source is unreachable."""
+    """The zero spend shape the Usage page reads while no data is available."""
     return {
         "tag": tag,
         "period": current_period(),
@@ -52,7 +47,7 @@ def empty_spend(tag=""):
 
 
 def empty_usage_detail(tag=""):
-    """The zero shape read_tag_usage_detail returns when its source is unreachable."""
+    """The zero usage-detail shape the Usage page reads while no data is available."""
     return {
         "tag": tag,
         "period": current_period(),
@@ -72,62 +67,25 @@ def empty_usage_detail(tag=""):
 class RPC:  # pylint: disable=E1101,R0903,W0201
     """ RPC Resource """
 
-    @web.method()
-    def usage_delegate(self, name, fallback, **kwargs):
-        """Call a legacy litellm_* RPC. A broken spend read degrades the Usage page, never 500s it."""
-        try:
-            return getattr(context.rpc_manager.timeout(DELEGATE_TIMEOUT), name)(**kwargs)
-        except Empty:
-            log.warning("usage: %s is not registered; returning empty spend", name)
-        except:  # pylint: disable=W0702
-            log.exception("usage: %s failed; returning empty spend", name)
-        #
-        return fallback
-
     @web.rpc("usage_get_project_spend", "usage_get_project_spend")
     def usage_get_project_spend(self, project_id, **kwargs):  # pylint: disable=W0613
         """Current-month spend for a project."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return empty_spend()
-        #
-        return self.usage_delegate(
-            "litellm_get_project_spend", empty_spend(), project_id=project_id,
-        )
+        return empty_spend()
 
     @web.rpc("usage_get_projects_spend", "usage_get_projects_spend")
     def usage_get_projects_spend(self, project_ids, **kwargs):  # pylint: disable=W0613
         """Current-month spend for many projects, keyed by project id."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return {project_id: 0.0 for project_id in project_ids}
-        #
-        return self.usage_delegate(
-            "litellm_get_projects_spend",
-            {project_id: 0.0 for project_id in project_ids},
-            project_ids=project_ids,
-        )
+        return {project_id: 0.0 for project_id in project_ids}
 
     @web.rpc("usage_get_user_spend", "usage_get_user_spend")
     def usage_get_user_spend(self, project_id, user_id, **kwargs):  # pylint: disable=W0613
         """Current-month spend for one member of a project."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return empty_spend()
-        #
-        return self.usage_delegate(
-            "litellm_get_user_spend", empty_spend(),
-            project_id=project_id, user_id=user_id,
-        )
+        return empty_spend()
 
     @web.rpc("usage_get_users_spend", "usage_get_users_spend")
     def usage_get_users_spend(self, project_id, user_ids, **kwargs):  # pylint: disable=W0613
         """Current-month spend for many members of a project, keyed by user id."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return {user_id: 0.0 for user_id in user_ids}
-        #
-        return self.usage_delegate(
-            "litellm_get_users_spend",
-            {user_id: 0.0 for user_id in user_ids},
-            project_id=project_id, user_ids=user_ids,
-        )
+        return {user_id: 0.0 for user_id in user_ids}
 
     @web.rpc("usage_list_member_spend", "usage_list_member_spend")
     def usage_list_member_spend(self, project_id, period=None, **kwargs):  # pylint: disable=W0613
@@ -135,30 +93,14 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
 
         None means unreachable — callers already have a degraded branch for it.
         """
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return None
-        #
-        return self.usage_delegate(
-            "litellm_list_member_spend", None, project_id=project_id, period=period,
-        )
+        return None
 
     @web.rpc("usage_get_project_usage_detail", "usage_get_project_usage_detail")
     def usage_get_project_usage_detail(self, project_id, **kwargs):  # pylint: disable=W0613
         """Per-model and per-day current-month usage for a project."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return empty_usage_detail()
-        #
-        return self.usage_delegate(
-            "litellm_get_project_usage_detail", empty_usage_detail(), project_id=project_id,
-        )
+        return empty_usage_detail()
 
     @web.rpc("usage_get_user_usage_detail", "usage_get_user_usage_detail")
     def usage_get_user_usage_detail(self, project_id, user_id, **kwargs):  # pylint: disable=W0613
         """Per-model and per-day current-month usage for one member of a project."""
-        if self.usage_get_spend_source() != SOURCE_LITELLM:
-            return empty_usage_detail()
-        #
-        return self.usage_delegate(
-            "litellm_get_user_usage_detail", empty_usage_detail(),
-            project_id=project_id, user_id=user_id,
-        )
+        return empty_usage_detail()

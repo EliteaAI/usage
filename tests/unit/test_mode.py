@@ -39,26 +39,6 @@ class TestNormalizeMode:
         assert recording_log.messages("warning")
 
 
-class TestNormalizeSource:
-    def test_auto_follows_mode(self):
-        assert mode_module.normalize_source("auto", mode_module.MODE_OFF) == mode_module.SOURCE_LITELLM
-        assert mode_module.normalize_source("auto", mode_module.MODE_OBSERVE) == mode_module.SOURCE_ELITEA
-        assert mode_module.normalize_source("auto", mode_module.MODE_ENFORCE) == mode_module.SOURCE_ELITEA
-
-    def test_absent_source_defaults_to_auto(self):
-        assert mode_module.normalize_source(None, mode_module.MODE_OFF) == mode_module.SOURCE_LITELLM
-
-    def test_explicit_source_overrides_mode(self):
-        assert mode_module.normalize_source("litellm", mode_module.MODE_ENFORCE) == mode_module.SOURCE_LITELLM
-        assert mode_module.normalize_source("elitea", mode_module.MODE_OFF) == mode_module.SOURCE_ELITEA
-
-    def test_unknown_source_falls_back_to_auto_and_warns(self, recording_log):
-        assert mode_module.normalize_source("postgres", mode_module.MODE_OFF) == mode_module.SOURCE_LITELLM
-        assert any(
-            "Unknown usage.spend_source" in message for message in recording_log.messages("warning")
-        )
-
-
 class TestPredicates:
     @pytest.mark.parametrize("config,expected", [
         ({}, "off"),
@@ -86,8 +66,3 @@ class TestPredicates:
         #
         instance.descriptor.config["usage"]["mode"] = "enforce"
         assert instance.usage_get_mode() == "enforce"
-
-    def test_spend_source_reads_mode_from_the_same_config(self):
-        assert module_with({"mode": "off"}).usage_get_spend_source() == "litellm"
-        assert module_with({"mode": "observe"}).usage_get_spend_source() == "elitea"
-        assert module_with({"mode": "observe", "spend_source": "litellm"}).usage_get_spend_source() == "litellm"

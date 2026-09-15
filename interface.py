@@ -27,9 +27,10 @@ import cachetools  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
-from tools import context  # pylint: disable=E0401
+from tools import context, this  # pylint: disable=E0401
 
 from . import hooks
+from .methods.estimate import output_tokens_of
 from .methods.mode import MODE_OFF
 from .sources.dialect import path_of
 
@@ -40,6 +41,9 @@ RAW_MODEL_AUTH_KEY = "usage_raw_model"
 
 # Already canonicalised by the interface that parked it (#6569); re-validated in hooks anyway
 RUN_ID_AUTH_KEY = "platform_run_id"
+
+# The context is built before the call, not after: only here can it still be refused
+CONTEXT_AUTH_KEY = "usage_context"
 
 # Raw X-Elitea-Attribution value, parked by the interface that stripped it; decoded in hooks
 ATTRIBUTION_AUTH_KEY = "platform_attribution"
@@ -53,17 +57,56 @@ _provider_cache = cachetools.TTLCache(maxsize=4096, ttl=60)
 
 
 def prepare_llm_call(proxy_target, proxy_auth, raw_model_name=None, model_project_id=None):
-    """Park what metering needs and ask the provider for a usage frame. Never raises."""
+    """None to proceed, or the response to return instead of calling the model. Never raises."""
     try:
         if hooks.current_mode() == MODE_OFF:
-            return
+            return None
         #
         proxy_auth[RAW_MODEL_AUTH_KEY] = raw_model_name
         proxy_auth[PROVIDER_AUTH_KEY] = resolve_provider(model_project_id, raw_model_name)
         #
         request_usage_frame(proxy_target)
+        #
+        usage_context = hooks.begin_llm_call(
+            project_id=proxy_auth.get("project_id"),
+            user_id=(proxy_auth.get("user") or {}).get("id"),
+            model_name=raw_model_name,
+            endpoint=proxy_target.get("endpoint"),
+            headers=proxy_target.get("headers"),
+            provider=proxy_auth.get(PROVIDER_AUTH_KEY),
+            run_id=proxy_auth.get(RUN_ID_AUTH_KEY),
+            attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
+            max_output_tokens=requested_output_tokens(proxy_target),
+            input_size_bytes=request_size_of(proxy_target),
+        )
+        #
+        proxy_auth[CONTEXT_AUTH_KEY] = usage_context
+        #
+        if usage_context is not None and usage_context.denied:
+            return usage_context.response
+        #
+        return None
     except:  # pylint: disable=W0702
         log.exception("usage: failed to prepare an LLM call")
+        return None
+
+
+def requested_output_tokens(proxy_target):
+    """The output ceiling this request asked for, else the configured default."""
+    return output_tokens_of(
+        proxy_target.get("json"),
+        this.module.usage_default_output_tokens(),
+    )
+
+
+def request_size_of(proxy_target):
+    """Content-Length only — re-serializing a body to measure it is a known outage class."""
+    headers = proxy_target.get("headers") or {}
+    #
+    try:
+        return int(headers.get("Content-Length") or headers.get("content-length") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def meter_llm_call(proxy_target, proxy_auth, response, iterator):
@@ -72,18 +115,7 @@ def meter_llm_call(proxy_target, proxy_auth, response, iterator):
         return iterator
     #
     try:
-        usage_context = hooks.begin_llm_call(
-            project_id=proxy_auth.get("project_id"),
-            user_id=(proxy_auth.get("user") or {}).get("id"),
-            model_name=proxy_auth.get(RAW_MODEL_AUTH_KEY),
-            endpoint=proxy_target.get("endpoint"),
-            headers=proxy_target.get("headers"),
-            provider=proxy_auth.get(PROVIDER_AUTH_KEY),
-            run_id=proxy_auth.get(RUN_ID_AUTH_KEY),
-            attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
-        )
-        #
-        return hooks.meter_llm_response(usage_context, response, iterator)
+        return hooks.meter_llm_response(proxy_auth.get(CONTEXT_AUTH_KEY), response, iterator)
     except:  # pylint: disable=W0702
         # A metering failure must never cost the user their response
         log.exception("usage: failed to meter an LLM call")

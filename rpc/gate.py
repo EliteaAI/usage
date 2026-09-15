@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Mode RPC """
+""" Gate RPC """
 
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
@@ -23,12 +23,10 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 class RPC:  # pylint: disable=E1101,R0903,W0201
     """ RPC Resource """
 
-    @web.rpc("usage_mode", "usage_mode")
-    def usage_mode_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Current usage mode, so the UI can hide the feature when it is off."""
-        return self.usage_get_mode()
-
-    @web.rpc("usage_ensure_partitions", "usage_ensure_partitions_now")
-    def usage_ensure_partitions_rpc(self, **kwargs):  # pylint: disable=W0613
-        """Create the current and upcoming usage_event partitions. Called by the daily cron."""
-        return self.usage_ensure_partitions()
+    @web.rpc("usage_gate_check", "usage_gate_check_now")
+    def usage_gate_check_rpc(self, project_id, user_id=None, **kwargs):  # pylint: disable=W0613
+        """Read-only budget-door answer for callers off the inference plane."""
+        if not self.usage_is_enforcing():
+            return {"closed": False, "scope": None, "healthy": True}
+        #
+        return self.usage_gate_check(project_id, user_id)

@@ -26,13 +26,6 @@ MODE_ENFORCE = "enforce"
 
 MODES = (MODE_OFF, MODE_OBSERVE, MODE_ENFORCE)
 
-SOURCE_AUTO = "auto"
-SOURCE_LITELLM = "litellm"
-SOURCE_ELITEA = "elitea"
-
-SOURCES = (SOURCE_AUTO, SOURCE_LITELLM, SOURCE_ELITEA)
-
-
 def normalize_mode(value):
     """Coerce a configured mode to one of MODES, falling back to off.
 
@@ -54,20 +47,6 @@ def normalize_mode(value):
     return mode
 
 
-def normalize_source(value, mode):
-    """Resolve spend_source, mapping auto onto the mode so one flag moves both."""
-    source = SOURCE_AUTO if value is None else str(value).strip().lower()
-    #
-    if source not in SOURCES:
-        log.warning("Unknown usage.spend_source %r, treating as auto", value)
-        source = SOURCE_AUTO
-    #
-    if source != SOURCE_AUTO:
-        return source
-    #
-    return SOURCE_LITELLM if mode == MODE_OFF else SOURCE_ELITEA
-
-
 class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
 
@@ -80,13 +59,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_get_mode(self):
         """Current metering mode: off, observe or enforce."""
         return normalize_mode(self.usage_config().get("mode", None))
-
-    @web.method()
-    def usage_get_spend_source(self):
-        """Which backend the spend RPCs read: litellm or elitea."""
-        return normalize_source(
-            self.usage_config().get("spend_source", None), self.usage_get_mode(),
-        )
 
     @web.method()
     def usage_is_enabled(self):

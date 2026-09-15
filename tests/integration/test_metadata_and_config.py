@@ -11,8 +11,12 @@ import pytest
 SIBLING_PLUGINS = pathlib.Path(__file__).resolve().parents[3]
 
 EXPECTED_PROPERTIES = {
-    "usage_mode", "usage_spend_source", "usage_retention_months",
+    "usage_mode", "usage_retention_months",
     "usage_partition_ahead_months",
+    "usage_max_call_cost_usd", "usage_default_output_tokens", "usage_reservation_ttl_seconds",
+    "usage_queue_flush_batch_size", "usage_queue_flush_interval_seconds",
+    "usage_reaper_interval_seconds", "usage_lease_seconds", "usage_limits_cache_ttl_seconds",
+    "usage_project_warning_pct", "usage_personal_project_warning_pct", "usage_user_warning_pct",
 }
 
 
@@ -84,8 +88,10 @@ class TestConfigDefaults:
         """Unquoted `off` is boolean false in YAML 1.1; the file must keep it quoted."""
         assert isinstance(plugin_config["usage"]["mode"], str)
 
-    def test_spend_source_follows_the_mode_by_default(self, plugin_config):
-        assert plugin_config["usage"]["spend_source"] == "auto"
+    def test_warning_thresholds_default_to_eighty_percent(self, plugin_config):
+        thresholds = plugin_config["usage"]["warning_thresholds"]
+        #
+        assert thresholds == {"project_pct": 80, "personal_project_pct": 80, "user_pct": 80}
 
     def test_partition_lookahead_is_at_least_one_month(self, plugin_config):
         """A month boundary crossed between crons must not land rows with no partition."""
@@ -121,9 +127,17 @@ class TestAdminSchema:
         for name, prop in admin_schema["properties"].items():
             assert prop["requires_restart"] is False, name
 
+    # The mode and the three thresholds are the operator-facing budget controls; they render on
+    # the existing Cost Budgets page, which is the only section the admin UI declares for them.
+    COST_BUDGETS_PROPERTIES = {
+        "usage_mode", "usage_project_warning_pct", "usage_personal_project_warning_pct",
+        "usage_user_warning_pct",
+    }
+
     def test_every_property_is_sectioned(self, admin_schema):
         for name, prop in admin_schema["properties"].items():
-            assert prop.get("section") == "Usage", name
+            expected = "cost_budgets" if name in self.COST_BUDGETS_PROPERTIES else "Usage"
+            assert prop.get("section") == expected, name
 
     def test_visible_when_references_a_sibling_property(self, admin_schema):
         properties = admin_schema["properties"]
@@ -136,15 +150,12 @@ class TestAdminSchema:
             #
             assert visible_when["field"] in properties, name
 
-    @pytest.mark.parametrize("name,values", [
-        ("usage_mode", ["off", "observe", "enforce"]),
-        ("usage_spend_source", ["auto", "litellm", "elitea"]),
-    ])
-    def test_enums_match_the_code_constants(self, admin_schema, name, values):
+    def test_mode_enum_matches_the_code_constants(self, admin_schema):
         from usage.methods import mode as mode_module  # pylint: disable=C0415
         #
-        assert admin_schema["properties"][name]["enum"] == values
-        assert list(mode_module.MODES if name == "usage_mode" else mode_module.SOURCES) == values
+        values = ["off", "observe", "enforce"]
+        assert admin_schema["properties"]["usage_mode"]["enum"] == values
+        assert list(mode_module.MODES) == values
 
     def test_numeric_properties_carry_bounds(self, admin_schema):
         for name in ("usage_retention_months", "usage_partition_ahead_months"):

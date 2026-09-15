@@ -15,12 +15,19 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" OpenAI Responses API — Anthropic's key names, OpenAI's cache convention """
+""" OpenAI Responses API — Anthropic's key names, OpenAI's cache convention
+
+Image generation is read here too: it reports the same input_tokens/output_tokens shape, and
+its base64 payload precedes `usage`, so head sniffing alone can never reach it.
+"""
 
 from .base import CACHE_INCLUSIVE, first_int
 from .dialect import (
     ScannerDialect, path_of, set_if_unset, set_if_zero, set_latest,
 )
+
+
+IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
 
 
 class OpenAIResponsesDialect(ScannerDialect):
@@ -36,6 +43,9 @@ class OpenAIResponsesDialect(ScannerDialect):
         path = path_of(endpoint).rstrip("/")
         #
         if path.endswith("/responses") or "/responses/" in path:
+            return True
+        #
+        if path.endswith(IMAGE_PATHS):
             return True
         #
         # The details sub-objects are what tell this apart from anthropic.messages.

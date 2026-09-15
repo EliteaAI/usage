@@ -17,11 +17,13 @@ from usage.sources import registry
 
 BEGIN_PARAMS = [
     "project_id", "user_id", "model_name", "endpoint", "headers", "provider", "run_id",
-    "attribution",
+    "attribution", "max_output_tokens", "input_size_bytes",
 ]
 
 # Optional so a second interface can adopt the hooks before it can supply any of them
-BEGIN_OPTIONAL_PARAMS = ("provider", "run_id", "attribution")
+BEGIN_OPTIONAL_PARAMS = (
+    "provider", "run_id", "attribution", "max_output_tokens", "input_size_bytes",
+)
 
 # Any uuid; what matters is that it survives canonicalisation and a malformed one does not
 RUN_ID = "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
@@ -60,6 +62,19 @@ class Recorder:
 
     def usage_write_event(self, row):
         self.rows.append(row)
+        return True
+
+    def usage_enqueue_event(self, row):  # pylint: disable=W0613
+        # False on purpose: these tests assert on the synchronous fallback path
+        return False
+
+    def usage_estimate_micro(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
+        return 0
+
+    def usage_gate_acquire(self, project_id, user_id, estimate_micro, moment):  # pylint: disable=W0613
+        return {"allowed": True, "scope": None, "reservation": None, "healthy": True}
+
+    def usage_gate_settle(self, reservation, actual_micro):  # pylint: disable=W0613
         return True
 
     def usage_resolve_project_id(self, user_id, user_name, headers):  # pylint: disable=W0613
@@ -511,3 +526,70 @@ class TestFailureIsolation:
         #
         assert drain(ctx, [OPENAI_JSON]) == [OPENAI_JSON]
         assert metering.rows == []
+
+
+class TestAdmission:
+    """What the caller gets back when the gate refuses, or cannot answer at all.
+
+    The bodies here are the wire contract: the SDK matches on `type`/`code` and the UI looks
+    the same `code` up in its own table, so a shape change breaks both without a test failing
+    anywhere else.
+    """
+
+    @staticmethod
+    def _enforce(metering, monkeypatch, verdict):
+        monkeypatch.setattr(
+            hooks.this.descriptor, "config", {"usage": {"mode": "enforce"}},
+        )
+        monkeypatch.setattr(
+            metering.recorder, "usage_gate_acquire", lambda *a, **k: verdict,
+        )
+        #
+        return begin()
+
+    def test_a_refusal_is_a_429_carrying_the_budget_contract(self, metering, monkeypatch):
+        ctx = self._enforce(metering, monkeypatch, {
+            "allowed": False, "scope": "project", "reservation": None, "healthy": True,
+        })
+        body, status, headers = ctx.response
+        #
+        assert ctx.denied is True
+        assert status == 429
+        assert headers["Content-Type"] == "application/json"
+        assert json.loads(body) == {"error": {
+            "message": hooks.BUDGET_ERROR_MESSAGE,
+            "type": "budget_exceeded",
+            "code": "project_budget_exceeded",
+        }}
+
+    def test_a_member_refusal_names_the_member_scope(self, metering, monkeypatch):
+        ctx = self._enforce(metering, monkeypatch, {
+            "allowed": False, "scope": "member", "reservation": None, "healthy": True,
+        })
+        #
+        assert json.loads(ctx.response[0])["error"]["code"] == "member_budget_exceeded"
+
+    def test_a_broken_gate_is_a_503_and_never_wears_the_budget_error(
+            self, metering, monkeypatch,
+    ):
+        ctx = self._enforce(metering, monkeypatch, {
+            "allowed": False, "scope": None, "reservation": None, "healthy": False,
+        })
+        body, status, _ = ctx.response
+        #
+        assert ctx.denied is True
+        assert status == 503
+        assert json.loads(body)["error"]["type"] == "usage_unavailable"
+
+    def test_observe_serves_a_call_that_is_over_budget(self, metering, monkeypatch):
+        monkeypatch.setattr(
+            metering.recorder, "usage_gate_acquire",
+            lambda *a, **k: {
+                "allowed": False, "scope": "project", "reservation": None, "healthy": True,
+            },
+        )
+        ctx = begin()
+        #
+        assert ctx.denied is False
+        assert ctx.response is None
+        assert drain(ctx, [OPENAI_JSON]) == [OPENAI_JSON]

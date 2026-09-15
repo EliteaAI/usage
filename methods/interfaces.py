@@ -66,7 +66,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_report_interfaces(self):
         """Log which interfaces will be metered, and which will not.
 
-        In enforce an interface without usage_hooks is recorded refused; the refusal lands with the gate.
+        In enforce an interface without usage_hooks keeps serving, but its spend is invisible
+        to the gate, so it is named in an ERROR rather than blocked.
         """
         mode = self.usage_get_mode()
         records = self.usage_list_interfaces()
@@ -83,8 +84,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             if mode == MODE_ENFORCE:
                 refused.append(record["name"])
                 log.error(
-                    "usage: interface %s does not declare usage hooks and is refused service "
-                    "in enforce mode", record["name"],
+                    "usage: interface %s does not declare usage hooks; in enforce mode its "
+                    "traffic is unmetered and ungated", record["name"],
                 )
             elif mode == MODE_OBSERVE:
                 log.warning(
