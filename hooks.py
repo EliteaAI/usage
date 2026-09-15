@@ -95,6 +95,8 @@ class UsageContext:  # pylint: disable=R0902
     user_email: str = None
     idempotency_key: str = None
     start_time_ns: int = None
+    reservation: str = None
+    estimate_micro: int = 0
     # usage_event columns, already named as such; see ATTRIBUTION_KEYS
     attribution: dict = None
 
@@ -102,6 +104,7 @@ class UsageContext:  # pylint: disable=R0902
 def begin_llm_call(  # pylint: disable=R0913,R0917
         project_id, user_id, model_name, endpoint, headers,
         provider=None, run_id=None, attribution=None,
+        max_output_tokens=None, input_size_bytes=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
@@ -126,17 +129,18 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         start_time_ns=time.monotonic_ns(),
     )
     #
-    _admit(ctx, mode)
+    _admit(ctx, mode, max_output_tokens, input_size_bytes)
     #
     return ctx
 
 
-def _admit(ctx, mode):
-    """Refuse a call whose budget is already full. Only enforce mode turns that into a response."""
+def _admit(ctx, mode, max_output_tokens, input_size_bytes):
+    """Reserve this call's estimated cost. Only enforce mode turns a refusal into a response."""
     if ctx.project_id is None:
         return
     #
-    verdict = _check(ctx)
+    ctx.estimate_micro = _estimate_micro(ctx, max_output_tokens, input_size_bytes)
+    verdict = _acquire(ctx)
     #
     if not verdict.get("healthy"):
         # A broken gate is not a budget breach, so it never wears the budget error
@@ -145,7 +149,8 @@ def _admit(ctx, mode):
         #
         return
     #
-    if not verdict.get("closed"):
+    if verdict.get("allowed"):
+        ctx.reservation = verdict.get("reservation")
         return
     #
     scope = verdict.get("scope") or SCOPE_PROJECT
@@ -165,13 +170,27 @@ def _deny(ctx, response):
     ctx.response = response
 
 
-def _check(ctx):
-    """{"closed", "scope", "healthy"}; unhealthy when the gate cannot answer."""
+def _acquire(ctx):
+    """{"allowed", "scope", "reservation", "healthy"}; unhealthy when the gate cannot answer."""
     try:
-        return this.module.usage_gate_check(ctx.project_id, ctx.user_id) or {}
+        return this.module.usage_gate_acquire(
+            ctx.project_id, ctx.user_id, ctx.estimate_micro,
+            datetime.datetime.now(datetime.timezone.utc),
+        ) or {}
     except:  # pylint: disable=W0702
         log.exception("usage: admission gate failed for project %s", ctx.project_id)
         return {"healthy": False}
+
+
+def _estimate_micro(ctx, max_output_tokens, input_size_bytes):
+    """0 whenever the call cannot be priced, which never refuses anything."""
+    try:
+        return int(this.module.usage_estimate_micro(
+            ctx.model_name, max_output_tokens, input_size_bytes,
+        ) or 0)
+    except:  # pylint: disable=W0702
+        log.exception("usage: failed to estimate a reservation for %s", ctx.model_name)
+        return 0
 
 
 def _denial_response(scope):
@@ -308,20 +327,18 @@ def _metered(ctx, response, iterator):
         # In finally so a client disconnect mid-stream is still billed, and after the last
         # byte so the insert never sits in the user-visible latency path
         row = _record(ctx, dialect, status)
-        _accrue(ctx, row)
+        _settle(ctx, row)
 
 
-def _accrue(ctx, row):
-    """Add what the call really cost to the counters the gate reads."""
-    if ctx.project_id is None:
+def _settle(ctx, row):
+    """Release the reservation and accrue what the call really cost, in that one round trip."""
+    if not ctx.reservation:
         return
     #
     try:
-        this.module.usage_gate_accrue(
-            ctx.project_id, ctx.user_id, (row or {}).get("cost_micro_usd") or 0,
-        )
+        this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_micro_usd") or 0)
     except:  # pylint: disable=W0702
-        log.exception("usage: failed to accrue spend for project %s", ctx.project_id)
+        log.exception("usage: failed to settle a reservation; the reaper will reclaim it")
 
 
 def _feed(dialect, chunk):
