@@ -27,16 +27,13 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import member_key, project_key
+from ._counters import EVENT_TYPE_LLM, member_key, project_key
 from .gate import QUEUE_KEY
+from .schema import COST_SPLIT_COLUMNS
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
-
-# Only llm rows are counted, matching reconcile and the read path; a tool row would inflate
-# call_count against facts that the drift report can never close
-EVENT_TYPE_LLM = "llm"
 
 
 def period_of(ts):
@@ -172,6 +169,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # The partition key is not nullable and queued rows carry no period of their own
         for row in rows:
             row.setdefault("period", period_of(row["ts"]))
+            # A multi-row VALUES takes its column list from the first row, so a batch that mixes
+            # rows queued either side of a rolling restart has to agree on every key. Rows the
+            # old code enqueued carry no cost split; they land with zeros rather than failing
+            # the whole batch.
+            for column in COST_SPLIT_COLUMNS:
+                row.setdefault(column, 0)
         #
         statement = insert(UsageEvent).values(rows).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],

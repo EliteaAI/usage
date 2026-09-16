@@ -28,15 +28,14 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import ALL_MODELS_SENTINEL, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start
+from ._analytics import total_tokens_expr
+from ._counters import (
+    ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
+)
 from .reconcile import current_period, period_bounds
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 from ..rpc.facade import empty_spend, empty_usage_detail
-
-# Only LLM rows are counted, matching usage_counter and the drift report: the page total, the
-# gate total and reconcile must never be able to disagree
-LLM_EVENT = "llm"
 
 # Defensive: callers page far below this, but an IN () list must not grow unbounded
 ID_CHUNK = 1000
@@ -77,7 +76,12 @@ def _counter_measures(period_day, *where):
 
 
 def _spend_shape(tag, period, row):
-    """The legacy spend shape, filled from a counter row."""
+    """The legacy spend shape, filled from a counter row.
+
+    total_tokens is input+output because the counter carries no cache buckets. Budget callers
+    read `spend`; the Usage page's token figures come off usage_event, where the definition
+    matches Analytics.
+    """
     inputs, outputs, cost, _calls = row
     #
     return {
@@ -95,7 +99,7 @@ def _event_where(project_id, start, end, user_id=None):
     clauses = [
         UsageEvent.project_id == int(project_id),
         UsageEvent.ts >= start, UsageEvent.ts < end,
-        UsageEvent.event_type == LLM_EVENT,
+        UsageEvent.event_type == EVENT_TYPE_LLM,
     ]
     #
     if user_id is not None:
@@ -149,13 +153,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_read_projects_spend(self, project_ids, period=None, **_kwargs):
-        """Month spend per project id. Every requested id is present, with 0.0 when unmetered."""
+        """Month spend per project id. Every requested id is present, with 0.0 when unmetered.
+
+        A map has no `available` flag, so a failed read answers all-zero, never a partial map.
+        """
         _period, _start, _end, period_day = _resolve(period)
-        spend = {int(project_id): 0.0 for project_id in project_ids or []}
+        spend = {}
         #
         try:
+            chunks = _chunks(project_ids)
+            spend = {value: 0.0 for chunk in chunks for value in chunk}
+            #
             with db.engine.connect() as connection:
-                for chunk in _chunks(project_ids):
+                for chunk in chunks:
                     statement = select(
                         UsageCounter.project_id, func.sum(UsageCounter.cost_micro_usd),
                     ).where(
@@ -170,18 +180,27 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         spend[int(project_id)] = _dollars(cost)
         except:  # pylint: disable=W0702
             log.exception("usage: batched project spend read failed")
+            # All-zero rather than the partial map: a caller cannot tell a real 0.0 from a
+            # dropped chunk, so a half-read must not look like a complete answer
+            return dict.fromkeys(spend, 0.0)
         #
         return spend
 
     @web.method()
     def usage_read_users_spend(self, project_id, user_ids, period=None, **_kwargs):
-        """Month spend per member of one project, keyed by user id."""
+        """Month spend per member of one project, keyed by user id.
+
+        A failed read answers all-zero for every requested id, never a partial map.
+        """
         _period, _start, _end, period_day = _resolve(period)
-        spend = {int(user_id): 0.0 for user_id in user_ids or []}
+        spend = {}
         #
         try:
+            chunks = _chunks(user_ids)
+            spend = {value: 0.0 for chunk in chunks for value in chunk}
+            #
             with db.engine.connect() as connection:
-                for chunk in _chunks(user_ids):
+                for chunk in chunks:
                     statement = select(
                         UsageCounter.user_id, func.sum(UsageCounter.cost_micro_usd),
                     ).where(
@@ -196,6 +215,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         spend[int(user_id)] = _dollars(cost)
         except:  # pylint: disable=W0702
             log.exception("usage: batched member spend read failed for project %s", project_id)
+            return dict.fromkeys(spend, 0.0)
         #
         return spend
 
@@ -258,17 +278,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         The per-day date_trunc grouping is not index-backed on purpose — no functional index
         is added for it; the row filter is what the index serves.
         """
+        # total_tokens_expr, not input+output: the Usage page and Analytics have to report the
+        # same number for the same rows, so the definition lives in one place
         totals = select(
             func.sum(UsageEvent.input_tokens), func.sum(UsageEvent.output_tokens),
             func.sum(UsageEvent.cache_read_tokens), func.sum(UsageEvent.cache_creation_tokens),
             func.sum(UsageEvent.cost_micro_usd), func.count(),
+            func.sum(total_tokens_expr()),
         ).where(*where)
         #
         # The table ranks rows and draws share bars in payload order, so the sort is the server's
         by_model = select(
             UsageEvent.model_name,
             func.sum(UsageEvent.cost_micro_usd),
-            func.sum(UsageEvent.input_tokens) + func.sum(UsageEvent.output_tokens),
+            func.sum(total_tokens_expr()),
             func.count(),
         ).where(*where).group_by(UsageEvent.model_name).order_by(
             func.sum(UsageEvent.cost_micro_usd).desc(), UsageEvent.model_name,
@@ -278,14 +301,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # tokens and calls too: the chart's own "has data" check reads api_requests
         by_day = select(
             day, func.sum(UsageEvent.cost_micro_usd),
-            func.sum(UsageEvent.input_tokens) + func.sum(UsageEvent.output_tokens),
+            func.sum(total_tokens_expr()),
             func.count(),
         ).where(*where).group_by(day).order_by(day)
         #
         try:
             with db.engine.connect() as connection:
-                inputs, outputs, cache_read, cache_creation, cost, calls = \
-                    connection.execute(totals).first() or (0, 0, 0, 0, 0, 0)
+                inputs, outputs, cache_read, cache_creation, cost, calls, tokens = \
+                    connection.execute(totals).first() or (0, 0, 0, 0, 0, 0, 0)
                 models = [
                     {
                         "model": model_name or "",
@@ -316,7 +339,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "models": models,
             "daily": daily,
             "spend": _dollars(cost),
-            "total_tokens": int(inputs or 0) + int(outputs or 0),
+            "total_tokens": int(tokens or 0),
             "input_tokens": int(inputs or 0),
             "output_tokens": int(outputs or 0),
             "cache_read_tokens": int(cache_read or 0),

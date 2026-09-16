@@ -17,12 +17,12 @@ from usage.sources import registry
 
 BEGIN_PARAMS = [
     "project_id", "user_id", "model_name", "endpoint", "headers", "provider", "run_id",
-    "attribution", "max_output_tokens", "input_size_bytes",
+    "attribution", "user_email", "max_output_tokens", "input_size_bytes",
 ]
 
 # Optional so a second interface can adopt the hooks before it can supply any of them
 BEGIN_OPTIONAL_PARAMS = (
-    "provider", "run_id", "attribution", "max_output_tokens", "input_size_bytes",
+    "provider", "run_id", "attribution", "user_email", "max_output_tokens", "input_size_bytes",
 )
 
 # Any uuid; what matters is that it survives canonicalisation and a malformed one does not

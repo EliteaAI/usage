@@ -1,6 +1,6 @@
 {
   "name": "usage",
-  "version": "0.9",
+  "version": "0.10",
   "module": "plugins.usage",
   "depends_on": [
     "shared"

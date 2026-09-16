@@ -26,7 +26,9 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import ALL_MODELS_SENTINEL, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start
+from ._counters import (
+    ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
+)
 from .drainer import counter_upsert
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
@@ -134,7 +136,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             func.sum(UsageEvent.input_tokens), func.sum(UsageEvent.output_tokens),
             func.sum(UsageEvent.cost_micro_usd), func.count(),
         ).where(
-            UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.event_type == "llm",
+            UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.event_type == EVENT_TYPE_LLM,
         ).group_by(
             UsageEvent.project_id, UsageEvent.user_id,
         )

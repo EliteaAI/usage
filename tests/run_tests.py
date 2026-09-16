@@ -80,6 +80,7 @@ def install_pylon_stubs():
     )
     tools.config = types.SimpleNamespace(POSTGRES_SCHEMA='centry')
     tools.context = types.SimpleNamespace(rpc_manager=None)
+    # Provided by `shared`, which usage depends_on, so it always resolves in a live pylon
     openapi_registry = types.SimpleNamespace(registered=[])
     openapi_registry.register_plugin = \
         lambda **kwargs: openapi_registry.registered.append(kwargs)

@@ -157,6 +157,34 @@ class TestMapReads:
         #
         assert instance.usage_read_projects_spend(project_ids=[1, 2]) == {1: 0.0, 2: 0.0}
 
+    def test_a_chunk_failing_midway_zeroes_the_whole_map(self, build):
+        # A caller cannot tell a real 0.0 from a chunk that never ran, so a partial read must
+        # not be handed back looking like a complete answer
+        class HalfBroken(Engine):
+            def __init__(self):
+                super().__init__([(1, 2_000_000)])
+                self.seen = 0
+                outer = self
+
+                def execute(statement, params=None):
+                    outer.seen += 1
+                    if outer.seen > 1:
+                        raise RuntimeError("connection reset")
+                    return Result([(1, 2_000_000)])
+
+                self.connection.execute = execute
+        #
+        instance, _ = build(HalfBroken())
+        ids = list(range(spend.ID_CHUNK + 2))
+        #
+        assert set(instance.usage_read_projects_spend(project_ids=ids).values()) == {0.0}
+
+    def test_an_unusable_id_is_handled_not_raised(self, build):
+        # int() used to run before the guard, so one bad id escaped as an exception
+        instance, _ = build(Engine([]))
+        #
+        assert instance.usage_read_users_spend(project_id=7, user_ids=["oops"]) == {}
+
     def test_ids_are_chunked_so_an_in_list_cannot_grow_unbounded(self):
         chunks = spend._chunks(range(spend.ID_CHUNK + 5))  # pylint: disable=W0212
         #
@@ -188,14 +216,26 @@ class TestMemberSpendListing:
 
 
 # totals, then per-model rows, then per-day rows
+# totals carry their own total_tokens column: it is total_tokens_expr, not input+output, so
+# the Usage page and Analytics report one number for the same rows
 DETAIL_RESULTS = (
-    [(120, 40, 5, 7, 1_500_000, 2)],
-    [("gpt-4o", 1_500_000, 160, 2)],
-    [(DAY, 1_500_000, 160, 2)],
+    [(120, 40, 5, 7, 1_500_000, 2, 172)],
+    [("gpt-4o", 1_500_000, 172, 2)],
+    [(DAY, 1_500_000, 172, 2)],
 )
 
 
 class TestUsageDetail:
+    def test_total_tokens_is_the_shared_analytics_definition(self, build):
+        # Usage showing a different number than Analytics for the same rows was the bug; the
+        # expression is imported, so the two cannot drift apart again
+        instance, engine = build(Engine(*DETAIL_RESULTS))
+        #
+        instance.usage_read_project_usage_detail(project_id=7, period=PERIOD)
+        #
+        for statement in engine.connection.statements:
+            assert "billable_input_tokens" in statement
+
     def test_totals_models_and_daily_are_all_filled(self, build):
         instance, _ = build(Engine(*DETAIL_RESULTS))
         #
@@ -204,16 +244,16 @@ class TestUsageDetail:
         assert result["spend"] == 1.5
         assert result["input_tokens"] == 120
         assert result["output_tokens"] == 40
-        assert result["total_tokens"] == 160
+        assert result["total_tokens"] == 172
         assert result["cache_read_tokens"] == 5
         assert result["cache_creation_tokens"] == 7
         assert result["api_requests"] == 2
         assert result["models"] == [
-            {"model": "gpt-4o", "spend": 1.5, "total_tokens": 160, "api_requests": 2},
+            {"model": "gpt-4o", "spend": 1.5, "total_tokens": 172, "api_requests": 2},
         ]
         # api_requests is what the chart's own emptiness check reads, so it has to be here
         assert result["daily"] == [
-            {"date": "2026-09-11", "spend": 1.5, "total_tokens": 160, "api_requests": 2},
+            {"date": "2026-09-11", "spend": 1.5, "total_tokens": 172, "api_requests": 2},
         ]
         assert result["available"] is True
 

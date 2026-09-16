@@ -52,10 +52,12 @@ class Module(module.ModuleModel):
     def ready(self):
         """ Ready callback """
         # After shared.ready() created the parent table — usage depends_on shared
+        self.usage_ensure_event_columns()
         self.usage_ensure_partitions()
         self._report_interfaces()
         self._register_openapi()
         self._register_cron()
+        self._register_openapi()
         self.usage_start_workers()
 
     def reconfig(self):
@@ -122,3 +124,19 @@ class Module(module.ModuleModel):
             log.warning("usage: no scheduling plugin found; crons not registered")
         except Exception as exc:  # pylint: disable=W0703
             log.warning("usage: failed to register crons: %s", exc)
+
+    def _register_openapi(self):
+        """Publish the analytics endpoints to /shared/openapi/ and the MCP tool list."""
+        try:
+            from tools import openapi_registry  # pylint: disable=C0415,E0401
+            #
+            from .api import v2 as api_v2  # pylint: disable=C0415
+            #
+            openapi_registry.register_plugin(
+                plugin_name="usage",
+                version=self.descriptor.metadata.get("version", "0.1"),
+                description="Usage metering and project AI-adoption analytics",
+                api_module=api_v2,
+            )
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("usage: failed to register OpenAPI: %s", exc)
