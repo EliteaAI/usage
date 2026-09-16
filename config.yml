@@ -23,7 +23,8 @@ usage:
   reservation:
     # Upper bound on one call's estimate, so overspend stays (concurrency x this) + flush lag.
     max_call_cost_usd: 2.0
-    # Assumed output length when the request does not declare max_tokens.
+    # Assumed output length when the request does not declare max_tokens. A UI-sent -1 does
+    # NOT hit this path -- LiteLLM expands it to the model's full context window instead.
     default_output_tokens: 4096
     # Must exceed the proxy's own consumer timeout or a long stream is reaped mid-flight.
     ttl_seconds: 900
