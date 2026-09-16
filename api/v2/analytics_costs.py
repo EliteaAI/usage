@@ -36,7 +36,7 @@ if _API_AVAILABLE:
         #
         return [
             func.sum(
-                func.coalesce(UsageEvent.input_tokens, 0)
+                an.billable_input_expr()
                 * func.coalesce(model_price.input_cost_per_token, 0)
             ).label("input_cost"),
             func.sum(

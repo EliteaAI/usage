@@ -230,7 +230,7 @@ if _API_AVAILABLE:
                 extra_cost_cols = []
                 if _model_price_available:
                     input_cost_col = func.sum(
-                        func.coalesce(UsageEvent.input_tokens, 0)
+                        an.billable_input_expr()
                         * func.coalesce(ModelPrice.input_cost_per_token, 0),
                     ).label("input_cost")
                     output_cost_col = func.sum(

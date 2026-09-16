@@ -224,7 +224,7 @@ if _API_AVAILABLE:
                 # and cannot fan out — no func.max() collapsing trick is needed here, unlike
                 # the audit_events version's trace_id-correlated subquery re-join.
                 input_cost_col = func.sum(
-                    func.coalesce(UsageEvent.input_tokens, 0)
+                    an.billable_input_expr()
                     * func.coalesce(ModelPrice.input_cost_per_token, 0)
                 ).label("input_cost")
                 output_cost_col = func.sum(

@@ -207,7 +207,7 @@ if _API_AVAILABLE:
                 # model_name is unique on model_prices, so this outerjoin cannot fan out.
                 columns += [
                     func.sum(
-                        func.coalesce(UsageEvent.input_tokens, 0)
+                        an.billable_input_expr()
                         * func.coalesce(ModelPrice.input_cost_per_token, 0)
                     ).label("input_cost"),
                     func.sum(

@@ -28,6 +28,7 @@ agent_runs_expr counts runs instead of the calls inside them.
 """
 
 import datetime
+import time
 
 from sqlalchemy import Date, and_, case, cast, distinct, func, select
 
@@ -59,9 +60,31 @@ SYSTEM_USER_EMAIL_SUFFIX = "@centry.user"
 # Drops the synthetic actor from anything user-facing
 HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
+# Global super-admin verdicts, cached per user_id: {user_id: (monotonic_stamp, is_super_admin)}
+SUPER_ADMIN_TTL_SECONDS = 300
+SUPER_ADMIN_CACHE_MAX = 2048
+_super_admin_cache = {}
+
+
+def as_utc(value):
+    """Aware UTC, or None.
+
+    Two reasons every bound goes through this. A request bound parsed from 'YYYY-MM-DD' is
+    naive while the defaults below are aware, and subtracting one from the other raises — so
+    supplying only one bound used to 500. And ts is timestamptz, so a naive bound is compared
+    in the session timezone rather than UTC, which shifts the window silently.
+    """
+    if value is None:
+        return None
+    #
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.timezone.utc)
+    #
+    return value.astimezone(datetime.timezone.utc)
+
 
 def parse_date_range(args):
-    """[from, to) bounds from date_from/date_to, defaulted and clamped.
+    """[from, to) bounds from date_from/date_to, defaulted and clamped, always aware UTC.
 
     A single supplied bound anchors the other rather than widening to everything.
     """
@@ -69,12 +92,12 @@ def parse_date_range(args):
     date_to = args.get("date_to")
     #
     try:
-        dt_from = datetime.datetime.fromisoformat(date_from) if date_from else None
+        dt_from = as_utc(datetime.datetime.fromisoformat(date_from)) if date_from else None
     except (ValueError, TypeError):
         dt_from = None
     #
     try:
-        dt_to = datetime.datetime.fromisoformat(date_to) if date_to else None
+        dt_to = as_utc(datetime.datetime.fromisoformat(date_to)) if date_to else None
     except (ValueError, TypeError):
         dt_to = None
     #
@@ -126,6 +149,18 @@ def total_tokens_expr():
         + func.coalesce(UsageEvent.cache_read_tokens, 0)
         + func.coalesce(UsageEvent.cache_creation_tokens, 0)
     )
+
+
+def billable_input_expr():
+    """Input tokens to price at the full input rate.
+
+    Under the inclusive cache convention (OpenAI, Google) cache_read_tokens is part of
+    input_tokens, so pricing input_tokens at the full rate *and* cache_read_tokens at the cache
+    rate charges a cached token twice. billable_input_tokens is that convention normalised away,
+    and it is exactly what the write path prices into cost_micro_usd — so a split built on it
+    reconciles with the authoritative total instead of exceeding it.
+    """
+    return func.coalesce(UsageEvent.billable_input_tokens, 0)
 
 
 def count_where(condition):
@@ -223,8 +258,6 @@ def resolve_emails(user_ids):
     if not wanted:
         return {}
     #
-    # auth exposes get_user only, so this is one lookup per id. Callers pass a page or a
-    # leaderboard, never the whole project, so the fan-out is bounded by the payload's limit.
     resolved = {}
     #
     for user in _get_users(wanted):
@@ -235,12 +268,28 @@ def resolve_emails(user_ids):
 
 
 def _get_users(user_ids):
-    """The directory entries that resolve; a missing user is skipped, not an error."""
+    """The directory entries that resolve; a missing user is skipped, not an error.
+
+    One call for the whole id set: list_users resolves them in a single SQL IN, so a project's
+    member count does not turn into one round trip per member. It returns *every* user when the
+    id list is falsy, hence the guard. The per-id loop stays only as a fallback for a directory
+    that does not expose the batched RPC.
+    """
     from tools import auth  # pylint: disable=C0415,E0401
+    #
+    wanted = [user_id for user_id in user_ids if user_id is not None]
+    #
+    if not wanted:
+        return []
+    #
+    try:
+        return [user for user in (auth.list_users(user_ids=wanted) or []) if user]
+    except:  # pylint: disable=W0702
+        log.warning("usage: batched user lookup unavailable, resolving one at a time")
     #
     users = []
     #
-    for user_id in user_ids:
+    for user_id in wanted:
         try:
             user = auth.get_user(user_id=user_id)
         except:  # pylint: disable=W0702
@@ -300,6 +349,41 @@ def label_users(rows_user_ids, stored_emails=None):
     return labels
 
 
+def _is_super_admin(user_id):
+    """Whether this user holds super_admin platform-wide.
+
+    Cached because there is no batched administration-mode roles RPC to ask for the whole set at
+    once, and global admin status changes far more slowly than a dashboard reloads. A failed
+    lookup is not cached and counts as "not a super-admin", so a transient auth error keeps a
+    member in the denominator rather than silently dropping them.
+    """
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    now = time.monotonic()
+    cached = _super_admin_cache.get(user_id)
+    #
+    if cached is not None and now - cached[0] < SUPER_ADMIN_TTL_SECONDS:
+        return cached[1]
+    #
+    try:
+        roles = rpc_tools.RpcMixin().rpc.timeout(5).auth_get_user_roles(
+            user_id, "administration",
+        )
+    except:  # pylint: disable=W0702
+        return False
+    #
+    verdict = "super_admin" in (roles or [])
+    #
+    if len(_super_admin_cache) >= SUPER_ADMIN_CACHE_MAX:
+        for key, entry in list(_super_admin_cache.items()):
+            if now - entry[0] >= SUPER_ADMIN_TTL_SECONDS:
+                _super_admin_cache.pop(key, None)
+    #
+    _super_admin_cache[user_id] = (now, verdict)
+    #
+    return verdict
+
+
 def project_member_count(project_id, unique_users=0):
     """Project members, as the adoption denominator.
 
@@ -307,7 +391,7 @@ def project_member_count(project_id, unique_users=0):
     super-admins — they hold an admin role on every project for oversight rather than as team
     members. A super-admin with real activity still surfaces through the unique_users floor.
     """
-    from tools import auth, rpc_tools  # pylint: disable=C0415,E0401
+    from tools import auth  # pylint: disable=C0415,E0401
     #
     total = 0
     #
@@ -320,20 +404,10 @@ def project_member_count(project_id, unique_users=0):
                 if user.get("email") and not is_system_email(user["email"])
             ]
             #
-            counted = []
-            #
-            for user in humans:
-                try:
-                    roles = rpc_tools.RpcMixin().rpc.timeout(5).auth_get_user_roles(
-                        user["id"], "administration",
-                    )
-                except:  # pylint: disable=W0702
-                    roles = []
-                #
-                if "super_admin" not in (roles or []):
-                    counted.append(user)
-            #
-            total = len(counted)
+            total = len([
+                user for user in humans
+                if not _is_super_admin(user["id"])
+            ])
     except:  # pylint: disable=W0702
         log.exception("usage: project member lookup failed for project %s", project_id)
         total = 0
