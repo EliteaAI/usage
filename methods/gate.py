@@ -46,6 +46,8 @@ UNLIMITED = -1
 KEY_PREFIX = "usage"
 RESV_INDEX_KEY = f"{KEY_PREFIX}:resv:index"
 QUEUE_KEY = f"{KEY_PREFIX}:queue:events"
+# Where a row that can never be inserted goes, so it stops blocking the queue behind it
+DEAD_QUEUE_KEY = f"{KEY_PREFIX}:queue:dead"
 DRAIN_LEASE_KEY = f"{KEY_PREFIX}:drain:lease"
 REAP_LEASE_KEY = f"{KEY_PREFIX}:reap:lease"
 
