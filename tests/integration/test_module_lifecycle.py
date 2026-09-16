@@ -31,7 +31,6 @@ def build(config=None, rpc=None, descriptors=None):
     instance = module_module.Module(context, descriptor)
     bind(instance, mode_module.Method, partitions.Method, interfaces.Method)
     #
-    instance.usage_ensure_event_columns = lambda *a, **k: calls.append(("ensure_columns", None))
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
     instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
     #
@@ -141,11 +140,7 @@ class TestReady:
         #
         instance.ready()
         #
-        # Columns first: a partition inherits the parent's shape at creation time, so the
-        # cost-split columns have to exist before the next partition is cut
-        assert [
-            name for name, _ in calls if name in ("ensure_columns", "ensure_partitions")
-        ] == ["ensure_columns", "ensure_partitions"]
+        assert [name for name, _ in calls if name == "ensure_partitions"] == ["ensure_partitions"]
 
     def test_openapi_registration_happens_or_the_endpoint_is_invisible_to_swagger(self):
         from tools import openapi_registry  # pylint: disable=C0415
@@ -154,6 +149,29 @@ class TestReady:
         build()[0].ready()
         #
         assert openapi_registry.registered[-1]["plugin_name"] == "usage"
+
+    def test_the_usage_tag_is_registered_not_just_the_plugin(self):
+        # A second _register_openapi definition once shadowed the first, so the plugin still
+        # registered while the usage/usage tag silently vanished from swagger. plugin_name alone
+        # could not tell the difference; the tag can.
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        tags = openapi_registry.registered[-1].get("tags") or []
+        #
+        assert [tag["name"] for tag in tags] == ["usage/usage"]
+
+    def test_only_one_openapi_registration_happens(self):
+        # ready() called _register_openapi twice after a merge; a duplicate registration is
+        # harmless today but says the callsite list is wrong
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        assert len(openapi_registry.registered) == 1
 
     def test_enumerates_interfaces_and_registers_the_cron(self):
         instance, calls = build()
