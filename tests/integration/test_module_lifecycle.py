@@ -31,6 +31,7 @@ def build(config=None, rpc=None, descriptors=None):
     instance = module_module.Module(context, descriptor)
     bind(instance, mode_module.Method, partitions.Method, interfaces.Method)
     #
+    instance.usage_ensure_event_columns = lambda *a, **k: calls.append(("ensure_columns", None))
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
     instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
     #
@@ -140,7 +141,11 @@ class TestReady:
         #
         instance.ready()
         #
-        assert [name for name, _ in calls if name == "ensure_partitions"] == ["ensure_partitions"]
+        # Columns first: a partition inherits the parent's shape at creation time, so the
+        # cost-split columns have to exist before the next partition is cut
+        assert [
+            name for name, _ in calls if name in ("ensure_columns", "ensure_partitions")
+        ] == ["ensure_columns", "ensure_partitions"]
 
     def test_enumerates_interfaces_and_registers_the_cron(self):
         instance, calls = build()
