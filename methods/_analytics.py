@@ -30,7 +30,7 @@ agent_runs_expr counts runs instead of the calls inside them.
 import datetime
 import time
 
-from sqlalchemy import Date, and_, case, cast, distinct, func, select
+from sqlalchemy import Date, and_, case, cast, distinct, func, or_, select
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -101,6 +101,15 @@ def parse_date_range(args):
     except (ValueError, TypeError):
         dt_to = None
     #
+    return clamp_date_range(dt_from, dt_to)
+
+
+def clamp_date_range(dt_from, dt_to):
+    """Default and clamp an already-parsed pair, so a caller that got its bounds from
+    somewhere other than query args (an RPC) cannot ask for an unbounded span.
+    """
+    dt_from, dt_to = as_utc(dt_from), as_utc(dt_to)
+    #
     if not dt_from and not dt_to:
         dt_to = datetime.datetime.now(datetime.timezone.utc)
         dt_from = dt_to - datetime.timedelta(days=DEFAULT_DATE_RANGE_DAYS)
@@ -127,6 +136,15 @@ def base_filters(project_id, dt_from, dt_to, human_only=True):
     #
     if human_only:
         conditions.append(HUMAN_ACTOR)
+        # HUMAN_ACTOR only drops the user_id=0 sentinel; real system/service accounts have
+        # genuine nonzero ids and a recognisable email, so they are dropped here instead.
+        conditions.append(or_(
+            UsageEvent.user_email.is_(None),
+            and_(
+                ~UsageEvent.user_email.in_(SYSTEM_USER_EMAILS),
+                ~UsageEvent.user_email.like(f"{SYSTEM_USER_EMAIL_PREFIX}%{SYSTEM_USER_EMAIL_SUFFIX}"),
+            ),
+        ))
     #
     return conditions
 
@@ -209,6 +227,56 @@ def active_users_expr():
 def day_expr():
     """ Helper """
     return cast(UsageEvent.ts, Date)
+
+
+def week_expr():
+    """Calendar week, Monday-aligned (Postgres date_trunc semantics)."""
+    return func.date_trunc("week", UsageEvent.ts)
+
+
+def month_expr():
+    """ Helper """
+    return func.date_trunc("month", UsageEvent.ts)
+
+
+GRANULARITY_DAY = "day"
+GRANULARITY_WEEK = "week"
+GRANULARITY_MONTH = "month"
+# Order matters nowhere here; the dict is only ever read by an already-validated key
+_BUCKET_EXPRS = {GRANULARITY_DAY: day_expr, GRANULARITY_WEEK: week_expr, GRANULARITY_MONTH: month_expr}
+
+
+def parse_granularity(args):
+    """day | week | month, defaulted to day. An unrecognised value defaults rather than
+    reaching bucket_expr, so a bad query param can never select SQL by string.
+    """
+    value = (args.get("granularity") or GRANULARITY_DAY).strip().lower()
+    #
+    return value if value in _BUCKET_EXPRS else GRANULARITY_DAY
+
+
+def bucket_expr(granularity):
+    """The group-by expression for an already-validated granularity."""
+    return _BUCKET_EXPRS.get(granularity, day_expr)()
+
+
+def bucket_bounds(bucket_start, granularity):
+    """[start, end) for one bucket, so a caller renders a row without inferring a week's or a
+    month's length from the label alone.
+    """
+    if bucket_start is None:
+        return None, None
+    #
+    if granularity == GRANULARITY_WEEK:
+        bucket_end = bucket_start + datetime.timedelta(days=7)
+    elif granularity == GRANULARITY_MONTH:
+        year = bucket_start.year + bucket_start.month // 12
+        month = bucket_start.month % 12 + 1
+        bucket_end = bucket_start.replace(year=year, month=month)
+    else:
+        bucket_end = bucket_start + datetime.timedelta(days=1)
+    #
+    return bucket_start, bucket_end
 
 
 def cost_usd(micro):
@@ -342,6 +410,34 @@ def search_user_ids(project_id, search):
             matched.append(int(user["id"]))
     #
     return matched
+
+
+def resolve_role_filter(project_id, roles):
+    """user_id set for the given project role names, or None for "no filter" (today's
+    behaviour, all roles).
+
+    One bulk RPC pair for the whole project, never one lookup per role or per member — the
+    same shape admin/rpc/roles.py's get_users_roles_in_project already uses. A role that
+    exists but has no members returns an empty set, which is a legitimate zero, not a reason
+    to fall back to matching everyone.
+    """
+    wanted = {role for role in (roles or []) if role}
+    #
+    if not wanted:
+        return None
+    #
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    try:
+        project_roles = auth.list_project_roles(project_id) or []
+        user_roles = auth.list_project_user_roles(project_id) or []
+    except:  # pylint: disable=W0702
+        log.exception("usage: role lookup failed for project %s", project_id)
+        return set()
+    #
+    role_ids = {r["id"] for r in project_roles if r.get("name") in wanted}
+    #
+    return {ur["user_id"] for ur in user_roles if ur.get("role_id") in role_ids}
 
 
 def label_users(rows_user_ids, stored_emails=None):
@@ -483,3 +579,43 @@ def clamp_int(value, default, minimum=None, maximum=None):
 def select_from(columns, conditions):
     """ Helper """
     return select(*columns).where(*conditions)
+
+
+def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None):
+    """Distinct AI-active users per calendar bucket, optionally restricted to project roles.
+
+    The one implementation behind both the REST endpoint and the RPC elitea_core calls to put
+    this number next to its own generic active-users count (#5110), so the two can never
+    disagree about a bucket's boundaries or its total.
+    """
+    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    granularity = granularity if granularity in _BUCKET_EXPRS else GRANULARITY_DAY
+    wanted_roles = sorted({role for role in (roles or []) if role})
+    #
+    role_user_ids = resolve_role_filter(project_id, wanted_roles)
+    conditions = base_filters(project_id, dt_from, dt_to)
+    #
+    if role_user_ids is not None:
+        # Possibly empty: a selected role with no members is a legitimate zero
+        conditions.append(UsageEvent.user_id.in_(role_user_ids))
+    #
+    bucket = bucket_expr(granularity).label("bucket")
+    rows = fetch_all(
+        select_from([bucket, active_users_expr().label("ai_active_users")], conditions)
+        .group_by(bucket).order_by(bucket)
+    )
+    #
+    buckets = []
+    for row in rows:
+        bucket_start, bucket_end = bucket_bounds(row["bucket"], granularity)
+        buckets.append({
+            "bucket_start": bucket_start.isoformat() if bucket_start else None,
+            "bucket_end": bucket_end.isoformat() if bucket_end else None,
+            "ai_active_users": int(row["ai_active_users"] or 0),
+        })
+    #
+    return {
+        "granularity": granularity,
+        "roles": wanted_roles,
+        "buckets": buckets,
+    }
