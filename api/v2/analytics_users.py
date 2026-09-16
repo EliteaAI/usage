@@ -20,13 +20,6 @@ if _API_AVAILABLE:
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
 
-    try:
-        from plugins.costs.models.model_price import ModelPrice
-        _model_price_available = True
-    except ImportError:
-        ModelPrice = None
-        _model_price_available = False
-
     _SORT_WHITELIST = frozenset([
         "total_events", "active_days", "llm_events", "tool_events",
         "agent_events", "chat_events", "errors", "user_email",
@@ -227,29 +220,6 @@ if _API_AVAILABLE:
                     func.coalesce(UsageEvent.cost_micro_usd, 0),
                 ).label("cost_micro")
 
-                extra_cost_cols = []
-                if _model_price_available:
-                    input_cost_col = func.sum(
-                        an.billable_input_expr()
-                        * func.coalesce(ModelPrice.input_cost_per_token, 0),
-                    ).label("input_cost")
-                    output_cost_col = func.sum(
-                        func.coalesce(UsageEvent.output_tokens, 0)
-                        * func.coalesce(ModelPrice.output_cost_per_token, 0),
-                    ).label("output_cost")
-                    cache_read_cost_col = func.sum(
-                        func.coalesce(UsageEvent.cache_read_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_read_input_token_cost, 0),
-                    ).label("cache_read_cost")
-                    cache_creation_cost_col = func.sum(
-                        func.coalesce(UsageEvent.cache_creation_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0),
-                    ).label("cache_creation_cost")
-                    extra_cost_cols = [
-                        input_cost_col, output_cost_col,
-                        cache_read_cost_col, cache_creation_cost_col,
-                    ]
-
                 statement = select(
                     UsageEvent.user_id,
                     email_col,
@@ -265,13 +235,8 @@ if _API_AVAILABLE:
                     cache_read_tokens_col,
                     cache_creation_tokens_col,
                     cost_micro_col,
-                    *extra_cost_cols,
+                    *an.cost_split_sums(),
                 ).where(*conditions).group_by(UsageEvent.user_id)
-
-                if _model_price_available:
-                    statement = statement.outerjoin(
-                        ModelPrice, UsageEvent.model_name == ModelPrice.model_name,
-                    )
 
                 sort_map = {
                     "total_events": total_events_col,
@@ -319,14 +284,7 @@ if _API_AVAILABLE:
                             "cache_read_tokens": int(r["cache_read_tokens"] or 0),
                             "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
                             "llm_cost": an.cost_usd(r["cost_micro"]),
-                            "input_cost": round(float(r["input_cost"]), 6)
-                            if _model_price_available and r["input_cost"] else 0.0,
-                            "output_cost": round(float(r["output_cost"]), 6)
-                            if _model_price_available and r["output_cost"] else 0.0,
-                            "cache_read_cost": round(float(r["cache_read_cost"]), 6)
-                            if _model_price_available and r["cache_read_cost"] else 0.0,
-                            "cache_creation_cost": round(float(r["cache_creation_cost"]), 6)
-                            if _model_price_available and r["cache_creation_cost"] else 0.0,
+                            **an.cost_split_usd(r),
                         }
                         for r in rows
                     ],

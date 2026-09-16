@@ -169,13 +169,6 @@ if _API_AVAILABLE:
         @staticmethod
         def _kpis(conditions, entity_id):
             """Display name plus the headline numbers, in one scan."""
-            try:
-                from plugins.costs.models.model_price import ModelPrice
-                _model_price_available = True
-            except ImportError:
-                ModelPrice = None
-                _model_price_available = False
-
             # No root_entity_name column: read the name off whichever row IS the run
             # (entity_id == root_entity_id).
             entity_name_expr = func.max(case(
@@ -201,34 +194,9 @@ if _API_AVAILABLE:
                 # spent the tokens.
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
                 an.llm_calls_expr().label("llm_calls"),
-            ]
-
-            if _model_price_available:
-                # model_name is unique on model_prices, so this outerjoin cannot fan out.
-                columns += [
-                    func.sum(
-                        an.billable_input_expr()
-                        * func.coalesce(ModelPrice.input_cost_per_token, 0)
-                    ).label("input_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.output_tokens, 0)
-                        * func.coalesce(ModelPrice.output_cost_per_token, 0)
-                    ).label("output_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.cache_read_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
-                    ).label("cache_read_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.cache_creation_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
-                    ).label("cache_creation_cost"),
-                ]
+            ] + an.cost_split_sums()
 
             stmt = select(*columns).where(*conditions)
-            if _model_price_available:
-                stmt = stmt.select_from(UsageEvent).outerjoin(
-                    ModelPrice, UsageEvent.model_name == ModelPrice.model_name,
-                )
 
             row = an.fetch_one(stmt)
             #
@@ -251,10 +219,7 @@ if _API_AVAILABLE:
                 "cache_read_tokens": int(row["cache_read_tokens"] or 0) if row else 0,
                 "cache_creation_tokens": int(row["cache_creation_tokens"] or 0) if row else 0,
                 "llm_cost": llm_cost,
-                "input_cost": round(float(row["input_cost"]), 6) if _model_price_available and row and row["input_cost"] else 0.0,
-                "output_cost": round(float(row["output_cost"]), 6) if _model_price_available and row and row["output_cost"] else 0.0,
-                "cache_read_cost": round(float(row["cache_read_cost"]), 6) if _model_price_available and row and row["cache_read_cost"] else 0.0,
-                "cache_creation_cost": round(float(row["cache_creation_cost"]), 6) if _model_price_available and row and row["cache_creation_cost"] else 0.0,
+                **an.cost_split_usd(row or {}),
                 "avg_cost_per_call": round(llm_cost / llm_calls, 6) if llm_calls else 0,
             }
             #

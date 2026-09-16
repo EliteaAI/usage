@@ -2,11 +2,10 @@
 Analytics cost breakdown, ported onto usage_event (#6574).
 
 Feeds both the Costs and Tokens analytics tabs from one payload: KPI totals, per-model,
-per-agent, per-user cost/token breakdowns, and a daily trend. cost_micro_usd on usage_event is
-a single integer total with no input/output/cache split, so the per-component cost fields
-(input_cost, output_cost, cache_read_cost, cache_creation_cost) are derived by joining the costs
-plugin's per-token ModelPrice catalog rather than read straight off the row; total_cost always
-comes from summing cost_micro_usd itself.
+per-agent, per-user cost/token breakdowns, and a daily trend. Every cost field — the total and
+its four components alike — is summed straight off the columns usage_event recorded at meter
+time. Nothing here consults the price catalog, so editing a model's price changes what the next
+call costs and leaves what a past call cost exactly as it was charged.
 """
 
 from pylon.core.tools import log
@@ -28,49 +27,6 @@ if _API_AVAILABLE:
     _MODEL_LIMIT = 30
     _AGENT_LIMIT = 20
     _USER_LIMIT = 20
-
-    def _cost_split_columns(model_price_available, model_price):
-        """Per-token-rate cost columns; only meaningful when the costs plugin is installed."""
-        if not model_price_available:
-            return []
-        #
-        return [
-            func.sum(
-                an.billable_input_expr()
-                * func.coalesce(model_price.input_cost_per_token, 0)
-            ).label("input_cost"),
-            func.sum(
-                func.coalesce(UsageEvent.output_tokens, 0)
-                * func.coalesce(model_price.output_cost_per_token, 0)
-            ).label("output_cost"),
-            func.sum(
-                func.coalesce(UsageEvent.cache_read_tokens, 0)
-                * func.coalesce(model_price.cache_read_input_token_cost, 0)
-            ).label("cache_read_cost"),
-            func.sum(
-                func.coalesce(UsageEvent.cache_creation_tokens, 0)
-                * func.coalesce(model_price.cache_creation_input_token_cost, 0)
-            ).label("cache_creation_cost"),
-        ]
-
-    def _split_costs(row, model_price_available):
-        """ Helper """
-        if not model_price_available:
-            return {
-                "input_cost": 0.0, "output_cost": 0.0,
-                "cache_read_cost": 0.0, "cache_creation_cost": 0.0,
-            }
-        #
-        return {
-            "input_cost": round(float(row.get("input_cost")), 6) if row.get("input_cost") else 0.0,
-            "output_cost": round(float(row.get("output_cost")), 6) if row.get("output_cost") else 0.0,
-            "cache_read_cost": (
-                round(float(row.get("cache_read_cost")), 6) if row.get("cache_read_cost") else 0.0
-            ),
-            "cache_creation_cost": (
-                round(float(row.get("cache_creation_cost")), 6) if row.get("cache_creation_cost") else 0.0
-            ),
-        }
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """LLM cost breakdown analytics for the project."""
@@ -216,13 +172,6 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_costs/prompt_lib/<project_id>
             """
             try:
-                from plugins.costs.models.model_price import ModelPrice
-                _model_price_available = True
-            except ImportError:
-                ModelPrice = None
-                _model_price_available = False
-
-            try:
                 dt_from, dt_to = an.parse_date_range(request.args)
                 # No is_error filter: a provider that reported tokens alongside a 4xx has still
                 # charged for them, so error rows stay in every sum below (#6574).
@@ -231,11 +180,11 @@ if _API_AVAILABLE:
                 ]
 
                 return {
-                    "kpis": self._kpis(conditions, ModelPrice, _model_price_available),
-                    "by_model": self._by_model(project_id, conditions, ModelPrice, _model_price_available),
-                    "by_agent": self._by_agent(conditions, ModelPrice, _model_price_available),
-                    "by_user": self._by_user(conditions, ModelPrice, _model_price_available),
-                    "daily": self._daily(conditions, ModelPrice, _model_price_available),
+                    "kpis": self._kpis(conditions),
+                    "by_model": self._by_model(project_id, conditions),
+                    "by_agent": self._by_agent(conditions),
+                    "by_user": self._by_user(conditions),
+                    "daily": self._daily(conditions),
                 }, 200
 
             except Exception:
@@ -243,7 +192,7 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics costs"}, 500
 
         @staticmethod
-        def _kpis(conditions, model_price, model_price_available):
+        def _kpis(conditions):
             """One scan for every headline number."""
             columns = [
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
@@ -255,15 +204,10 @@ if _API_AVAILABLE:
                 ).label("total_cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.count().label("total_calls"),
-            ] + _cost_split_columns(model_price_available, model_price)
+            ] + an.cost_split_sums()
 
-            statement = select(*columns)
-            if model_price_available:
-                statement = statement.outerjoin(
-                    model_price, UsageEvent.model_name == model_price.model_name,
-                )
             # An ungrouped aggregate always returns exactly one row; the fallback is belt-and-braces.
-            row = an.fetch_one(statement.where(*conditions)) or {}
+            row = an.fetch_one(select(*columns).where(*conditions)) or {}
 
             total_cost = an.cost_usd(row.get("cost_micro"))
             total_calls = row.get("total_calls") or 0
@@ -278,12 +222,12 @@ if _API_AVAILABLE:
                 "avg_cost_per_call": round(total_cost / total_calls, 8) if total_calls > 0 else 0.0,
                 **{
                     f"total_{key}": value
-                    for key, value in _split_costs(row, model_price_available).items()
+                    for key, value in an.cost_split_usd(row).items()
                 },
             }
 
         @staticmethod
-        def _by_model(project_id, conditions, model_price, model_price_available):
+        def _by_model(project_id, conditions):
             """Cost/token breakdown per model."""
             columns = [
                 UsageEvent.model_name,
@@ -294,14 +238,9 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + _cost_split_columns(model_price_available, model_price)
+            ] + an.cost_split_sums()
 
-            statement = select(*columns)
-            if model_price_available:
-                statement = statement.outerjoin(
-                    model_price, UsageEvent.model_name == model_price.model_name,
-                )
-            statement = statement.where(
+            statement = select(*columns).where(
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
             ).group_by(UsageEvent.model_name).order_by(
                 func.sum(UsageEvent.cost_micro_usd).desc(),
@@ -321,13 +260,13 @@ if _API_AVAILABLE:
                     "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
                     "total_tokens": int(r["total_tokens"] or 0),
                     "total_cost": an.cost_usd(r["cost_micro"]),
-                    **_split_costs(r, model_price_available),
+                    **an.cost_split_usd(r),
                 }
                 for r in rows
             ]
 
         @staticmethod
-        def _by_agent(conditions, model_price, model_price_available):
+        def _by_agent(conditions):
             """Cost/token breakdown per agent run.
 
             Grouped by (root_entity_type, root_entity_id): every llm row already carries the
@@ -352,14 +291,9 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + _cost_split_columns(model_price_available, model_price)
+            ] + an.cost_split_sums()
 
-            statement = select(*columns)
-            if model_price_available:
-                statement = statement.outerjoin(
-                    model_price, UsageEvent.model_name == model_price.model_name,
-                )
-            statement = statement.where(
+            statement = select(*columns).where(
                 *conditions, an.is_agent_row(), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type, UsageEvent.root_entity_id,
@@ -372,7 +306,7 @@ if _API_AVAILABLE:
                     "entity_name": r["entity_name"] or f"Agent #{r['root_entity_id']}",
                     "entity_id": r["root_entity_id"],
                     "total_cost": an.cost_usd(r["cost_micro"]),
-                    **_split_costs(r, model_price_available),
+                    **an.cost_split_usd(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
@@ -388,7 +322,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _by_user(conditions, model_price, model_price_available):
+        def _by_user(conditions):
             """Cost/token breakdown per user.
 
             Grouped by user_id alone: user_email is null on rows written before the write path
@@ -403,14 +337,9 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + _cost_split_columns(model_price_available, model_price)
+            ] + an.cost_split_sums()
 
-            statement = select(*columns)
-            if model_price_available:
-                statement = statement.outerjoin(
-                    model_price, UsageEvent.model_name == model_price.model_name,
-                )
-            statement = statement.where(*conditions).group_by(
+            statement = select(*columns).where(*conditions).group_by(
                 UsageEvent.user_id,
             ).order_by(func.sum(UsageEvent.cost_micro_usd).desc()).limit(_USER_LIMIT)
 
@@ -426,7 +355,7 @@ if _API_AVAILABLE:
                     "user_id": r["user_id"],
                     "user_email": emails.get(r["user_id"]),
                     "total_cost": an.cost_usd(r["cost_micro"]),
-                    **_split_costs(r, model_price_available),
+                    **an.cost_split_usd(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
@@ -437,7 +366,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _daily(conditions, model_price, model_price_available):
+        def _daily(conditions):
             """ Daily cost/token trend """
             day = an.day_expr().label("day")
 
@@ -449,14 +378,9 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + _cost_split_columns(model_price_available, model_price)
+            ] + an.cost_split_sums()
 
-            statement = select(*columns)
-            if model_price_available:
-                statement = statement.outerjoin(
-                    model_price, UsageEvent.model_name == model_price.model_name,
-                )
-            statement = statement.where(*conditions).group_by(day).order_by(day)
+            statement = select(*columns).where(*conditions).group_by(day).order_by(day)
 
             rows = an.fetch_all(statement)
 
@@ -464,7 +388,7 @@ if _API_AVAILABLE:
                 {
                     "date": r["day"].isoformat() if r["day"] else None,
                     "total_cost": an.cost_usd(r["cost_micro"]),
-                    **_split_costs(r, model_price_available),
+                    **an.cost_split_usd(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),

@@ -20,13 +20,6 @@ if _API_AVAILABLE:
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
 
-    try:
-        from plugins.costs.models.model_price import ModelPrice
-        _model_price_available = True
-    except ImportError:
-        ModelPrice = None
-        _model_price_available = False
-
     _AGENT_LIMIT = 20
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -196,27 +189,6 @@ if _API_AVAILABLE:
             by user_email as the original did was splitting one person's rows whenever the
             stored email varied (or was null) across them.
             """
-            extra_cost_cols = []
-            if _model_price_available:
-                extra_cost_cols = [
-                    func.sum(
-                        an.billable_input_expr()
-                        * func.coalesce(ModelPrice.input_cost_per_token, 0),
-                    ).label("input_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.output_tokens, 0)
-                        * func.coalesce(ModelPrice.output_cost_per_token, 0),
-                    ).label("output_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.cache_read_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_read_input_token_cost, 0),
-                    ).label("cache_read_cost"),
-                    func.sum(
-                        func.coalesce(UsageEvent.cache_creation_tokens, 0)
-                        * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0),
-                    ).label("cache_creation_cost"),
-                ]
-
             statement = select(
                 func.max(UsageEvent.user_email).label("user_email"),
                 func.count().label("total_events"),
@@ -242,13 +214,8 @@ if _API_AVAILABLE:
                     func.coalesce(UsageEvent.cache_creation_tokens, 0),
                 ).label("cache_creation_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-                *extra_cost_cols,
+                *an.cost_split_sums(),
             ).where(*conditions)
-
-            if _model_price_available:
-                statement = statement.outerjoin(
-                    ModelPrice, UsageEvent.model_name == ModelPrice.model_name,
-                )
 
             row = an.fetch_one(statement)
             if not row:
@@ -276,14 +243,7 @@ if _API_AVAILABLE:
                     "cache_read_tokens": int(row["cache_read_tokens"] or 0),
                     "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
                     "llm_cost": llm_cost,
-                    "input_cost": round(float(row["input_cost"]), 6)
-                    if _model_price_available and row["input_cost"] else 0.0,
-                    "output_cost": round(float(row["output_cost"]), 6)
-                    if _model_price_available and row["output_cost"] else 0.0,
-                    "cache_read_cost": round(float(row["cache_read_cost"]), 6)
-                    if _model_price_available and row["cache_read_cost"] else 0.0,
-                    "cache_creation_cost": round(float(row["cache_creation_cost"]), 6)
-                    if _model_price_available and row["cache_creation_cost"] else 0.0,
+                    **an.cost_split_usd(row),
                     "avg_cost_per_call": (llm_cost / llm_events) if llm_cost and llm_events else 0.0,
                 },
             }

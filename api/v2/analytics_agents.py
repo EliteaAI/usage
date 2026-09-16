@@ -177,13 +177,6 @@ if _API_AVAILABLE:
         @staticmethod
         def _agents(conditions, search, sort_by, sort_order, limit, offset):
             """Grouped-by-run agent rows, paginated and sorted."""
-            try:
-                from plugins.costs.models.model_price import ModelPrice
-                _model_price_available = True
-            except ImportError:
-                ModelPrice = None
-                _model_price_available = False
-
             # There is no root_entity_name column: the display name is read off whichever
             # row IS the run (entity_id == root_entity_id), never guessed from a child call.
             entity_name_expr = func.max(case(
@@ -205,8 +198,9 @@ if _API_AVAILABLE:
                 func.coalesce(UsageEvent.cache_creation_tokens, 0)
             ).label("cache_creation_tokens")
             total_tokens_col = func.sum(an.total_tokens_expr()).label("total_tokens")
-            # cost_micro_usd is the authoritative meter-time column; no join is involved here
-            # so, unlike the audit_events port, no rows/cost is not error-filtered (D1).
+            # Cost and its split are both meter-time columns on the row: no price-catalog join
+            # anywhere here, so a later price edit cannot restate what these runs cost. Also
+            # not error-filtered, unlike the audit_events port (D1).
             cost_micro_col = func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro")
             llm_calls_col = an.llm_calls_expr().label("llm_calls")
 
@@ -217,39 +211,12 @@ if _API_AVAILABLE:
                 input_tokens_col, output_tokens_col,
                 cache_read_tokens_col, cache_creation_tokens_col,
                 total_tokens_col, cost_micro_col, llm_calls_col,
+            ] + [
+                func.sum(func.coalesce(column, 0)).label(f"{key}_micro")
+                for key, column in an.COST_SPLIT_COLUMNS.items()
             ]
 
-            if _model_price_available:
-                # model_name is unique on model_prices, so this outerjoin is 1:0-or-1 per row
-                # and cannot fan out — no func.max() collapsing trick is needed here, unlike
-                # the audit_events version's trace_id-correlated subquery re-join.
-                input_cost_col = func.sum(
-                    an.billable_input_expr()
-                    * func.coalesce(ModelPrice.input_cost_per_token, 0)
-                ).label("input_cost")
-                output_cost_col = func.sum(
-                    func.coalesce(UsageEvent.output_tokens, 0)
-                    * func.coalesce(ModelPrice.output_cost_per_token, 0)
-                ).label("output_cost")
-                cache_read_cost_col = func.sum(
-                    func.coalesce(UsageEvent.cache_read_tokens, 0)
-                    * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
-                ).label("cache_read_cost")
-                cache_creation_cost_col = func.sum(
-                    func.coalesce(UsageEvent.cache_creation_tokens, 0)
-                    * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
-                ).label("cache_creation_cost")
-                columns += [
-                    input_cost_col, output_cost_col,
-                    cache_read_cost_col, cache_creation_cost_col,
-                ]
-
-            stmt = select(*columns).where(*conditions)
-            if _model_price_available:
-                stmt = stmt.select_from(UsageEvent).outerjoin(
-                    ModelPrice, UsageEvent.model_name == ModelPrice.model_name,
-                )
-            stmt = stmt.group_by(UsageEvent.root_entity_id)
+            stmt = select(*columns).where(*conditions).group_by(UsageEvent.root_entity_id)
             if search:
                 stmt = stmt.having(entity_name_expr.ilike(f"%{search}%"))
 
@@ -284,10 +251,7 @@ if _API_AVAILABLE:
                     "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
                     "total_tokens": int(r["total_tokens"] or 0),
                     "llm_cost": an.cost_usd(r["cost_micro"]),
-                    "input_cost": round(float(r["input_cost"]), 6) if _model_price_available and r["input_cost"] else 0.0,
-                    "output_cost": round(float(r["output_cost"]), 6) if _model_price_available and r["output_cost"] else 0.0,
-                    "cache_read_cost": round(float(r["cache_read_cost"]), 6) if _model_price_available and r["cache_read_cost"] else 0.0,
-                    "cache_creation_cost": round(float(r["cache_creation_cost"]), 6) if _model_price_available and r["cache_creation_cost"] else 0.0,
+                    **{key: an.cost_usd(r[f"{key}_micro"]) for key in an.COST_SPLIT_COLUMNS},
                     "avg_tokens_per_call": (
                         (r["total_tokens"] or 0) / r["llm_calls"]
                         if r["llm_calls"] else 0

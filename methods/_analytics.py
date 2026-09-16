@@ -151,18 +151,6 @@ def total_tokens_expr():
     )
 
 
-def billable_input_expr():
-    """Input tokens to price at the full input rate.
-
-    Under the inclusive cache convention (OpenAI, Google) cache_read_tokens is part of
-    input_tokens, so pricing input_tokens at the full rate *and* cache_read_tokens at the cache
-    rate charges a cached token twice. billable_input_tokens is that convention normalised away,
-    and it is exactly what the write path prices into cost_micro_usd — so a split built on it
-    reconciles with the authoritative total instead of exceeding it.
-    """
-    return func.coalesce(UsageEvent.billable_input_tokens, 0)
-
-
 def count_where(condition):
     """Rows matching condition, as a sum over the same single scan."""
     return func.sum(case((condition, 1), else_=0))
@@ -226,6 +214,30 @@ def day_expr():
 def cost_usd(micro):
     """Micro-USD to USD. Integer micro-dollars are the stored form so sums cannot drift."""
     return round(int(micro or 0) / 1_000_000, 6)
+
+
+# Response key -> the micro-USD column holding that component. The write path priced all four
+# when the call was made, so a reader sums them and never consults the price catalog: editing a
+# model's price changes what the next call costs, not what a past call cost.
+COST_SPLIT_COLUMNS = {
+    "input_cost": UsageEvent.input_cost_micro_usd,
+    "output_cost": UsageEvent.output_cost_micro_usd,
+    "cache_read_cost": UsageEvent.cache_read_cost_micro_usd,
+    "cache_creation_cost": UsageEvent.cache_creation_cost_micro_usd,
+}
+
+
+def cost_split_sums():
+    """The four component sums, labelled '<key>_micro' to match cost_split_usd()."""
+    return [
+        func.sum(func.coalesce(column, 0)).label(f"{key}_micro")
+        for key, column in COST_SPLIT_COLUMNS.items()
+    ]
+
+
+def cost_split_usd(row):
+    """Component sums as USD. They add up to the row's total, having been stored that way."""
+    return {key: cost_usd(row.get(f"{key}_micro")) for key in COST_SPLIT_COLUMNS}
 
 
 def rounded(value, digits=1):

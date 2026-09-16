@@ -442,10 +442,11 @@ def _reading_of(dialect):
 def _row(ctx, reading, status):  # pylint: disable=R0914
     """The usage_event payload. A call is always recorded, never dropped for being unreadable."""
     billable = base.billable_input_tokens(reading)
-    cost, cost_source = _price(
+    cost, cost_source, breakdown = _price(
         ctx.model_name, billable, reading.output_tokens,
         reading.cache_read_tokens, reading.cache_creation_tokens,
     )
+    cost_micro, split_micro = _cost_micros(cost, breakdown)
     now = datetime.datetime.now(datetime.timezone.utc)
     #
     return {
@@ -468,16 +469,54 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
         "reasoning_tokens": reading.reasoning_tokens or 0,
         "billable_input_tokens": billable or 0,
         # 0 only ever alongside cost_source='unpriced', so a zero is never mistaken for free
-        "cost_micro_usd": 0 if cost is None else int(round(cost * 1_000_000)),
+        "cost_micro_usd": cost_micro,
         "cost_source": cost_source,
+        **split_micro,
         "token_source": reading.token_source,
         "duration_ms": _elapsed_ms(ctx),
         "is_error": status >= 400,
     }
 
 
+COST_SPLIT_COLUMNS = {
+    "input_cost": "input_cost_micro_usd",
+    "output_cost": "output_cost_micro_usd",
+    "cache_read_cost": "cache_read_cost_micro_usd",
+    "cache_creation_cost": "cache_creation_cost_micro_usd",
+}
+
+
+def _cost_micros(cost, breakdown):
+    """(total_micro_usd, {column: micro_usd}) — the split stored beside the total.
+
+    The parts are summed into the total rather than the total being rounded on its own, so a
+    breakdown always adds up to exactly the figure it breaks down. The two differ by at most a
+    couple of micro-dollars, and a split that reconciles is worth more than that.
+
+    No breakdown means either an unpriced model or a costs plugin that predates the breakdown
+    key; both keep the previous behaviour — the authoritative total, and zeros for the split.
+    """
+    if not breakdown:
+        return (
+            0 if cost is None else int(round(cost * 1_000_000)),
+            {column: 0 for column in COST_SPLIT_COLUMNS.values()},
+        )
+    #
+    split = {
+        column: int(round((breakdown.get(key) or 0) * 1_000_000))
+        for key, column in COST_SPLIT_COLUMNS.items()
+    }
+    #
+    return sum(split.values()), split
+
+
 def _price(model_name, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens):
-    """(cost_usd, cost_source); an unpriced model is marked, never silently zero."""
+    """(cost_usd, cost_source, breakdown); an unpriced model is marked, never silently zero.
+
+    The breakdown comes from the costs catalog rather than being multiplied out here, so the
+    parts and the total agree on the same effective rates — including the catalog's rule that a
+    model with no cache rate is charged the input rate for cached tokens.
+    """
     # Uncached on purpose: `costs` is in this pylon, so the RPC dispatches in-process, and it
     # serves rates from its own in-memory catalog — caching here would copy money math out of it.
     try:
@@ -501,9 +540,9 @@ def _price(model_name, input_tokens, output_tokens, cache_read_tokens, cache_cre
             "usage: model %s is unpriced; the call is not counted against budgets", model_name,
         )
         #
-        return None, COST_SOURCE_UNPRICED
+        return None, COST_SOURCE_UNPRICED, {}
     #
-    return cost, priced.get("cost_source") or COST_SOURCE_UNPRICED
+    return cost, priced.get("cost_source") or COST_SOURCE_UNPRICED, priced.get("breakdown") or {}
 
 
 def _run_id(value):
