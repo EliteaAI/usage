@@ -36,11 +36,6 @@ from ..models.usage_event import UsageEvent
 DEFAULT_BATCH_SIZE = 500
 
 
-def period_of(ts):
-    """Denormalised 'YYYYMM' of a row timestamp; accepts the queue's ISO string too."""
-    return f"{ts:%Y%m}" if hasattr(ts, "strftime") else str(ts)[:4] + str(ts)[5:7]
-
-
 COUNTER_INDEX = ["project_id", "user_id", "period_kind", "period_start", "model_name"]
 
 # What the counters accumulate; the RETURNING projection is the same list plus the row's identity
@@ -166,9 +161,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def usage_insert_events(self, connection, rows):
         """Insert the batch and count only what the unique index actually accepted."""
-        # The partition key is not nullable and queued rows carry no period of their own
         for row in rows:
-            row.setdefault("period", period_of(row["ts"]))
             # A multi-row VALUES takes its column list from the first row, so a batch that mixes
             # rows queued either side of a rolling restart has to agree on every key. Rows the
             # old code enqueued carry no cost split; they land with zeros rather than failing
