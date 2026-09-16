@@ -25,7 +25,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 from tools import db  # pylint: disable=E0401
 
 from ._counters import EVENT_TYPE_LLM
-from .drainer import counter_deltas
+from .drainer import counter_deltas, event_values
 from ..models.usage_event import UsageEvent
 
 
@@ -36,7 +36,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_write_event(self, row):
         """True when a row landed. At-least-once delivery is safe: a repeat of the same
         (idempotency_key, ts) is dropped by the partitioned unique index."""
-        payload = dict(row)
+        payload = event_values([row])[0]
         #
         statement = insert(UsageEvent).values(**payload).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],

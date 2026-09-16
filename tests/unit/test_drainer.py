@@ -4,6 +4,7 @@ import json
 import types
 
 import pytest
+from sqlalchemy.exc import CompileError
 
 from fixtures.fake_redis import RecordingRedis
 from fixtures.helpers import bind, fake_module
@@ -11,6 +12,8 @@ from usage.methods import drainer
 from usage.methods._counters import member_key, project_key
 
 TS = datetime.datetime(2026, 9, 11, 12, 0, tzinfo=datetime.timezone.utc)
+
+
 
 
 def event(key, project_id=42, user_id=7, cost=1000, event_type="llm"):
@@ -286,3 +289,120 @@ class TestRequeueOnFailure:
         instance.usage_enqueue_event(event("a"))
         #
         assert instance.usage_drain_batch() == 0
+
+
+class TestEventValues:
+    """A queued row is projected onto the model's own columns, as a copy.
+
+    Both halves matter: the projection is what survives a column the model no longer has, and
+    the copy is what keeps a failed tick from writing the drainer's own defaults back into Redis
+    -- which is how a dropped column's key became permanently unusable queue content.
+    """
+
+    def test_a_key_with_no_column_is_dropped_not_raised(self):
+        values = drainer.event_values([{**event("a"), "period": "202609"}])
+        #
+        assert "period" not in values[0]
+        assert values[0]["idempotency_key"] == "a"
+
+    def test_dropping_a_key_is_reported(self, recording_log):
+        drainer.event_values([{**event("a"), "period": "202609"}])
+        #
+        assert any("period" in str(record) for record in recording_log.records)
+
+    def test_a_clean_row_reports_nothing(self, recording_log):
+        drainer.event_values([event("a")])
+        #
+        assert not recording_log.messages("warning")
+
+    def test_the_caller_s_row_is_left_alone(self):
+        row = event("a")
+        #
+        drainer.event_values([row])
+        #
+        assert set(row) == set(event("a"))
+
+    def test_the_cost_split_is_defaulted_on_the_copy(self):
+        values = drainer.event_values([event("a")])
+        #
+        assert all(values[0][column] == 0 for column in drainer.COST_SPLIT_COLUMNS)
+
+    def test_a_stored_split_is_kept(self):
+        values = drainer.event_values([{**event("a"), "input_cost_micro_usd": 900}])
+        #
+        assert values[0]["input_cost_micro_usd"] == 900
+
+
+class TestPoisonRow:
+    """A row that cannot be inserted must not starve the rows queued behind it."""
+
+    def _instance(self, client, monkeypatch, broken=CompileError):
+        instance = build(Landing())
+        instance.usage_redis_client = lambda: client
+        #
+        def insert_events(_connection, rows):
+            if any("period" in row for row in rows):
+                raise broken("unconsumed column names: period")
+            #
+            return rows
+        #
+        instance.usage_insert_events = insert_events
+        monkeypatch.setattr(
+            drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
+        )
+        #
+        return instance
+
+    def test_the_clean_rows_behind_it_still_land(self, monkeypatch):
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch)
+        instance.usage_enqueue_event({**event("bad"), "period": "202609"})
+        instance.usage_enqueue_event(event("good"))
+        #
+        assert instance.usage_drain_batch() == 1
+
+    def test_the_offender_leaves_the_queue_for_the_dead_letter_list(self, monkeypatch):
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch)
+        instance.usage_enqueue_event({**event("bad"), "period": "202609"})
+        instance.usage_enqueue_event(event("good"))
+        #
+        instance.usage_drain_batch()
+        #
+        assert client.lists.get(drainer.QUEUE_KEY, []) == []
+        retired = [json.loads(item) for item in client.lists[drainer.DEAD_QUEUE_KEY]]
+        assert [row["idempotency_key"] for row in retired] == ["bad"]
+
+    def test_a_second_tick_has_nothing_left_to_fail_on(self, monkeypatch):
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch)
+        instance.usage_enqueue_event({**event("bad"), "period": "202609"})
+        instance.usage_drain_batch()
+        #
+        assert instance.usage_drain_batch() == 0
+        assert client.lists.get(drainer.QUEUE_KEY, []) == []
+
+    def test_a_failure_that_is_not_the_row_keeps_the_whole_batch_queued(self, monkeypatch):
+        # An outage says nothing about the rows, and they are the only copy of the facts, so
+        # anything but a row-shape failure goes back on the queue
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch, broken=RuntimeError)
+        instance.usage_enqueue_event({**event("bad"), "period": "202609"})
+        instance.usage_enqueue_event(event("good"))
+        #
+        assert instance.usage_drain_batch() == 0
+        assert len(client.lists[drainer.QUEUE_KEY]) == 2
+        assert drainer.DEAD_QUEUE_KEY not in client.lists
+
+    def test_a_requeued_row_is_byte_identical_to_what_was_queued(self, monkeypatch):
+        # The requeue writes these rows back, so anything the insert path added to them would
+        # become permanent queue content
+        client = RecordingRedis()
+        instance = self._instance(client, monkeypatch, broken=RuntimeError)
+        original = {**event("a"), "period": "202609"}
+        instance.usage_enqueue_event(original)
+        queued = client.lists[drainer.QUEUE_KEY][0]
+        #
+        instance.usage_drain_batch()
+        #
+        assert client.lists[drainer.QUEUE_KEY] == [queued]

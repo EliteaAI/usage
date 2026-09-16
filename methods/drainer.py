@@ -21,6 +21,7 @@ import json
 
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import CompileError
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
@@ -28,12 +29,19 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 from tools import db  # pylint: disable=E0401
 
 from ._counters import EVENT_TYPE_LLM, member_key, project_key
-from .gate import QUEUE_KEY
+from .gate import DEAD_QUEUE_KEY, QUEUE_KEY
 from .schema import COST_SPLIT_COLUMNS
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
+
+# A retired row is kept around long enough to be looked at, not forever
+DEAD_QUEUE_TTL_SECONDS = 14 * 24 * 3600
+
+# Failures of the row itself, which no amount of retrying can fix. Anything else -- an
+# outage above all -- is transient and goes back on the queue untouched.
+PERMANENT_ERRORS = (CompileError, TypeError, ValueError)
 
 
 COUNTER_INDEX = ["project_id", "user_id", "period_kind", "period_start", "model_name"]
@@ -46,6 +54,34 @@ RETURNING_COLUMNS = (
     UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd,
     UsageEvent.event_type,
 )
+
+
+def event_values(rows):
+    """Rows projected onto usage_event's own columns, as copies.
+
+    Copies because a failed tick requeues these same rows: mutating them in place is how a key
+    the model no longer has ends up written back into Redis, where it can never be inserted again.
+    """
+    columns = set(UsageEvent.__table__.columns.keys())
+    values = []
+    unknown = set()
+    #
+    for row in rows:
+        unknown |= set(row) - columns
+        value = {name: item for name, item in row.items() if name in columns}
+        # Rows the old code enqueued carry no cost split; they land with zeros rather than
+        # failing the whole batch
+        for column in COST_SPLIT_COLUMNS:
+            value.setdefault(column, 0)
+        #
+        values.append(value)
+    #
+    if unknown:
+        log.warning(
+            "usage: ignoring queued key(s) with no usage_event column: %s", sorted(unknown),
+        )
+    #
+    return values
 
 
 def counter_deltas(rows):
@@ -104,14 +140,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_drain_batch(self):
         """One tick: queued facts to usage_event, then landed facts to usage_counter."""
         rows = self.usage_dequeue_events()
-        drained = 0
+        #
+        if not rows:
+            return 0
         #
         try:
             with db.engine.connect() as connection:
-                if rows:
-                    drained = len(self.usage_insert_events(connection, rows))
-                #
+                drained = len(self.usage_insert_events(connection, rows))
                 connection.commit()
+                #
+                return drained
+        except PERMANENT_ERRORS:
+            # Retrying the batch would fail identically forever, so isolate the offending row
+            # instead of starving everything queued behind it
+            log.exception("usage: drain tick failed to build its insert")
+            #
+            return self.usage_drain_isolated(rows)
         except:  # pylint: disable=W0702
             log.exception("usage: drain tick failed")
             # Safe to retry because the insert is idempotent on (idempotency_key, ts); dropping
@@ -119,8 +163,38 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             self.usage_requeue_events(rows)
             #
             return 0
+
+    @web.method()
+    def usage_drain_isolated(self, rows):
+        """Second pass after a batch failed to build: each row alone, offenders retired."""
+        drained = 0
+        #
+        for row in rows:
+            try:
+                with db.engine.connect() as connection:
+                    drained += len(self.usage_insert_events(connection, [row]))
+                    connection.commit()
+            except PERMANENT_ERRORS:
+                log.exception("usage: retiring a queued event that cannot be inserted")
+                self.usage_retire_events([row])
+            except:  # pylint: disable=W0702
+                log.exception("usage: a queued event could not be written")
+                self.usage_requeue_events([row])
         #
         return drained
+
+    @web.method()
+    def usage_retire_events(self, rows):
+        """Park unusable rows out of the queue's way, keeping them readable for a while."""
+        try:
+            client = self.usage_redis_client()
+            #
+            for row in rows:
+                client.rpush(DEAD_QUEUE_KEY, json.dumps(row, default=str))
+            #
+            client.expire(DEAD_QUEUE_KEY, DEAD_QUEUE_TTL_SECONDS)
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to retire %s unusable event(s)", len(rows))
 
     @web.method()
     def usage_requeue_events(self, rows):
@@ -161,15 +235,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def usage_insert_events(self, connection, rows):
         """Insert the batch and count only what the unique index actually accepted."""
-        for row in rows:
-            # A multi-row VALUES takes its column list from the first row, so a batch that mixes
-            # rows queued either side of a rolling restart has to agree on every key. Rows the
-            # old code enqueued carry no cost split; they land with zeros rather than failing
-            # the whole batch.
-            for column in COST_SPLIT_COLUMNS:
-                row.setdefault(column, 0)
-        #
-        statement = insert(UsageEvent).values(rows).on_conflict_do_nothing(
+        statement = insert(UsageEvent).values(event_values(rows)).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],
         ).returning(*RETURNING_COLUMNS)
         #
