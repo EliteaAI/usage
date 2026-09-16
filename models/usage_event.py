@@ -38,9 +38,6 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Denormalised 'YYYYMM' of ts: month reports group on it without a range scan
-    period: Mapped[str] = mapped_column(Text, nullable=False)
-
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -109,7 +106,6 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
         # Partitioned uniqueness only dedups within one (idempotency_key, ts); a retry that
         # recomputes ts instead of reusing the original can slip through. Optional follow-up.
         Index("uq_usage_event_idempotency", "idempotency_key", "ts", unique=True),
-        Index("ix_usage_event_project_period", "project_id", "period"),
         Index("ix_usage_event_project_ts", "project_id", "ts"),
         Index("ix_usage_event_project_entity_ts", "project_id", "entity_id", "ts"),
         Index("ix_usage_event_project_root_ts", "project_id", "root_entity_id", "ts"),

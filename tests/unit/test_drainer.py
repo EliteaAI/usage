@@ -167,6 +167,25 @@ class TestInsertEvents:
         assert [row["idempotency_key"] for row in landed] == ["b"]
         assert {delta["cost_micro_usd"] for delta in connection.upserts} == {5000}
 
+    def test_a_tool_row_lands_as_a_fact_but_never_touches_the_counters(self):
+        # It carries no cost, so only call_count drifted -- against facts reconcile filters out,
+        # which left the drift report permanently non-empty
+        connection = Landing()
+        instance = build(connection)
+        #
+        landed = insert(instance, connection, [event("a", event_type="tool")])
+        #
+        assert [row["idempotency_key"] for row in landed] == ["a"]
+        assert connection.upserts == []
+
+    def test_a_mixed_batch_counts_only_its_llm_rows(self):
+        connection = Landing()
+        instance = build(connection)
+        #
+        insert(instance, connection, [event("a"), event("b", event_type="tool")])
+        #
+        assert {delta["call_count"] for delta in connection.upserts} == {1}
+
 
 class TestQueue:
     def test_enqueue_reports_success(self):
@@ -209,34 +228,6 @@ class TestQueue:
         instance.usage_redis_client = lambda: (_ for _ in ()).throw(RuntimeError("down"))
         #
         assert instance.usage_dequeue_events() == []
-
-
-class TestPartitionKey:
-    """usage_event.period is NOT NULL and is the partition key, so a missing one aborts the tick.
-
-    The queue carries no period of its own: hooks build the row, Redis serializes it, and only
-    the writer knows which monthly partition it belongs in.
-    """
-
-    def test_every_queued_row_is_stamped_with_its_period(self):
-        connection = Landing()
-        rows = [event("a"), event("b")]
-        #
-        insert(build(connection), connection, rows)
-        #
-        assert [row["period"] for row in rows] == ["202609", "202609"]
-
-    def test_an_iso_string_timestamp_off_the_queue_still_yields_a_period(self):
-        # json.dumps(default=str) is what puts a string here rather than a datetime
-        assert drainer.period_of("2026-09-11 14:31:17.123456+00:00") == "202609"
-
-    def test_a_period_already_present_is_kept(self):
-        connection = Landing()
-        rows = [dict(event("a"), period="202512")]
-        #
-        insert(build(connection), connection, rows)
-        #
-        assert rows[0]["period"] == "202512"
 
 
 class TestRequeueOnFailure:

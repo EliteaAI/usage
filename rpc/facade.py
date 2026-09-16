@@ -19,8 +19,8 @@
 
 Not a generic aggregate(dims, metrics, filters) DSL — arbitrary dims cannot be index-proven.
 
-Every reader here answers with the zero shape until #6574 wires it to usage_event/usage_counter.
-The shapes are the contract the Usage page already consumes, so they are kept rather than removed.
+Thin delegation only: the aggregation SQL lives in methods/spend.py. The zero shapes below are
+the degraded answer for a failed read, and stay here because they are the page's contract.
 """
 
 import datetime
@@ -67,40 +67,46 @@ def empty_usage_detail(tag=""):
 class RPC:  # pylint: disable=E1101,R0903,W0201
     """ RPC Resource """
 
+    # The Python attribute names carry an _rpc suffix on purpose: binding this class after
+    # spend.Method onto the same Module would otherwise overwrite the method; the methods they call
+    # are named usage_read_* for the same reason — pylon rejects a registry name claimed twice.
+
     @web.rpc("usage_get_project_spend", "usage_get_project_spend")
-    def usage_get_project_spend(self, project_id, **kwargs):  # pylint: disable=W0613
+    def usage_get_project_spend_rpc(self, project_id, **kwargs):
         """Current-month spend for a project."""
-        return empty_spend()
+        return self.usage_read_project_spend(project_id=project_id, **kwargs)
 
     @web.rpc("usage_get_projects_spend", "usage_get_projects_spend")
-    def usage_get_projects_spend(self, project_ids, **kwargs):  # pylint: disable=W0613
+    def usage_get_projects_spend_rpc(self, project_ids, **kwargs):
         """Current-month spend for many projects, keyed by project id."""
-        return {project_id: 0.0 for project_id in project_ids}
+        return self.usage_read_projects_spend(project_ids=project_ids, **kwargs)
 
     @web.rpc("usage_get_user_spend", "usage_get_user_spend")
-    def usage_get_user_spend(self, project_id, user_id, **kwargs):  # pylint: disable=W0613
+    def usage_get_user_spend_rpc(self, project_id, user_id, **kwargs):
         """Current-month spend for one member of a project."""
-        return empty_spend()
+        return self.usage_read_user_spend(project_id=project_id, user_id=user_id, **kwargs)
 
     @web.rpc("usage_get_users_spend", "usage_get_users_spend")
-    def usage_get_users_spend(self, project_id, user_ids, **kwargs):  # pylint: disable=W0613
+    def usage_get_users_spend_rpc(self, project_id, user_ids, **kwargs):
         """Current-month spend for many members of a project, keyed by user id."""
-        return {user_id: 0.0 for user_id in user_ids}
+        return self.usage_read_users_spend(project_id=project_id, user_ids=user_ids, **kwargs)
 
     @web.rpc("usage_list_member_spend", "usage_list_member_spend")
-    def usage_list_member_spend(self, project_id, period=None, **kwargs):  # pylint: disable=W0613
+    def usage_list_member_spend_rpc(self, project_id, period=None, **kwargs):
         """Members with recorded spend, plus the project total.
 
         None means unreachable — callers already have a degraded branch for it.
         """
-        return None
+        return self.usage_read_member_spend_listing(project_id=project_id, period=period, **kwargs)
 
     @web.rpc("usage_get_project_usage_detail", "usage_get_project_usage_detail")
-    def usage_get_project_usage_detail(self, project_id, **kwargs):  # pylint: disable=W0613
+    def usage_get_project_usage_detail_rpc(self, project_id, **kwargs):
         """Per-model and per-day current-month usage for a project."""
-        return empty_usage_detail()
+        return self.usage_read_project_usage_detail(project_id=project_id, **kwargs)
 
     @web.rpc("usage_get_user_usage_detail", "usage_get_user_usage_detail")
-    def usage_get_user_usage_detail(self, project_id, user_id, **kwargs):  # pylint: disable=W0613
+    def usage_get_user_usage_detail_rpc(self, project_id, user_id, **kwargs):
         """Per-model and per-day current-month usage for one member of a project."""
-        return empty_usage_detail()
+        return self.usage_read_user_usage_detail(
+            project_id=project_id, user_id=user_id, **kwargs,
+        )

@@ -142,6 +142,37 @@ class TestReady:
         #
         assert [name for name, _ in calls if name == "ensure_partitions"] == ["ensure_partitions"]
 
+    def test_openapi_registration_happens_or_the_endpoint_is_invisible_to_swagger(self):
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        assert openapi_registry.registered[-1]["plugin_name"] == "usage"
+
+    def test_the_usage_tag_is_registered_not_just_the_plugin(self):
+        # A second _register_openapi definition once shadowed the first, so the plugin still
+        # registered while the usage/usage tag silently vanished from swagger. plugin_name alone
+        # could not tell the difference; the tag can.
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        tags = openapi_registry.registered[-1].get("tags") or []
+        #
+        assert [tag["name"] for tag in tags] == ["usage/usage"]
+
+    def test_only_one_openapi_registration_happens(self):
+        # ready() called _register_openapi twice after a merge; a duplicate registration is
+        # harmless today but says the callsite list is wrong
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        assert len(openapi_registry.registered) == 1
+
     def test_enumerates_interfaces_and_registers_the_cron(self):
         instance, calls = build()
         reported = []

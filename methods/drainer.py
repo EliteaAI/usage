@@ -27,18 +27,13 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import member_key, project_key
+from ._counters import EVENT_TYPE_LLM, member_key, project_key
 from .gate import QUEUE_KEY
 from .schema import COST_SPLIT_COLUMNS
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
-
-
-def period_of(ts):
-    """Denormalised 'YYYYMM' of a row timestamp; accepts the queue's ISO string too."""
-    return f"{ts:%Y%m}" if hasattr(ts, "strftime") else str(ts)[:4] + str(ts)[5:7]
 
 
 COUNTER_INDEX = ["project_id", "user_id", "period_kind", "period_start", "model_name"]
@@ -49,6 +44,7 @@ MEASURES = ("input_tokens", "output_tokens", "cost_micro_usd")
 RETURNING_COLUMNS = (
     UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
     UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd,
+    UsageEvent.event_type,
 )
 
 
@@ -165,9 +161,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def usage_insert_events(self, connection, rows):
         """Insert the batch and count only what the unique index actually accepted."""
-        # The partition key is not nullable and queued rows carry no period of their own
         for row in rows:
-            row.setdefault("period", period_of(row["ts"]))
             # A multi-row VALUES takes its column list from the first row, so a batch that mixes
             # rows queued either side of a rolling restart has to agree on every key. Rows the
             # old code enqueued carry no cost split; they land with zeros rather than failing
@@ -181,7 +175,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         landed = [dict(row) for row in connection.execute(statement).mappings()]
         #
-        self.usage_apply_counter_deltas(connection, counter_deltas(landed))
+        self.usage_apply_counter_deltas(connection, counter_deltas([
+            row for row in landed if row.get("event_type") == EVENT_TYPE_LLM
+        ]))
         #
         return landed
 

@@ -25,6 +25,10 @@ PERIOD_MONTH = "month"
 PROJECT_USER_SENTINEL = 0
 ALL_MODELS_SENTINEL = ""
 
+# The one event type that feeds usage_counter, so the page total, the gate total and the drift
+# report can never disagree. Spelled once here rather than per module.
+EVENT_TYPE_LLM = "llm"
+
 
 def period_start(moment, period_kind=PERIOD_MONTH):
     """First day of the period, as a date — the PK column is DATE, a datetime never matches.

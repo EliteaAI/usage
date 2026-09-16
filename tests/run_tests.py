@@ -80,13 +80,13 @@ def install_pylon_stubs():
     )
     tools.config = types.SimpleNamespace(POSTGRES_SCHEMA='centry')
     tools.context = types.SimpleNamespace(rpc_manager=None)
+    # Provided by `shared`, which usage depends_on, so it always resolves in a live pylon
+    openapi_registry = types.SimpleNamespace(registered=[])
+    openapi_registry.register_plugin = \
+        lambda **kwargs: openapi_registry.registered.append(kwargs)
+    tools.openapi_registry = openapi_registry
     tools.this = types.SimpleNamespace(
         descriptor=types.SimpleNamespace(config={}), module=None,
-    )
-    # Provided by `shared`, which usage depends_on, so it always resolves in a live pylon.
-    # ready() warns when registration fails, so the no-warning assertions are the guard.
-    tools.openapi_registry = types.SimpleNamespace(
-        register_plugin=lambda **kwargs: None,
     )
     sys.modules.setdefault('tools', tools)
 

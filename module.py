@@ -107,17 +107,25 @@ class Module(module.ModuleModel):
             log.warning("usage: failed to register crons: %s", exc)
 
     def _register_openapi(self):
-        """Publish the analytics endpoints to /shared/openapi/ and the MCP tool list."""
+        """Without this the api/v2 @register_openapi decorators are invisible to swagger."""
         try:
             from tools import openapi_registry  # pylint: disable=C0415,E0401
-            #
             from .api import v2 as api_v2  # pylint: disable=C0415
-            #
             openapi_registry.register_plugin(
                 plugin_name="usage",
-                version=self.descriptor.metadata.get("version", "0.1"),
+                version=self.descriptor.metadata.get("version", "1.0.0"),
                 description="Usage metering and project AI-adoption analytics",
+                tags=[
+                    {
+                        "name": "usage/usage",
+                        "description":
+                            "Current-period spend and token usage for a project or one of its "
+                            "members.",
+                    },
+                ],
                 api_module=api_v2,
             )
-        except Exception as exc:  # pylint: disable=W0703
-            log.warning("usage: failed to register OpenAPI: %s", exc)
+        # Guarded so an older bootstrap without the registry cannot block startup, but loud:
+        # a swallowed failure means every endpoint is silently absent from swagger
+        except Exception:  # pylint: disable=W0703
+            log.exception("usage: failed to register OpenAPI")

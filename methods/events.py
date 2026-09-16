@@ -24,7 +24,8 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from .drainer import counter_deltas, period_of
+from ._counters import EVENT_TYPE_LLM
+from .drainer import counter_deltas
 from ..models.usage_event import UsageEvent
 
 
@@ -36,7 +37,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """True when a row landed. At-least-once delivery is safe: a repeat of the same
         (idempotency_key, ts) is dropped by the partitioned unique index."""
         payload = dict(row)
-        payload.setdefault("period", period_of(payload["ts"]))
         #
         statement = insert(UsageEvent).values(**payload).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],
@@ -48,7 +48,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 landed = [dict(row) for row in connection.execute(statement).mappings()]
                 # Only LLM rows feed the counters, and off the queue the drainer's RETURNING
                 # never sees them, so this is their only count
-                if payload.get("event_type") == "llm":
+                if payload.get("event_type") == EVENT_TYPE_LLM:
                     self.usage_apply_counter_deltas(connection, counter_deltas(landed))
                 connection.commit()
             #
