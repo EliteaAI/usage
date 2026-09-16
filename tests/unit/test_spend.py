@@ -5,6 +5,7 @@ project must render a clean $0.00 with no "still being collected" banner, which 
 zero-rows case and the raising case are asserted separately everywhere below.
 """
 import datetime
+import re
 
 import pytest
 
@@ -258,11 +259,26 @@ class TestUsageDetail:
         for statement in engine.connection.statements:
             assert "event_type" in statement
 
-    def test_failed_calls_are_not_filtered_out(self, build):
-        # A call that errored still cost money, so no is_error predicate belongs on the read side
+    def test_only_the_intended_columns_are_filtered_on(self, build):
+        # A whitelist, not an "is_error absent" blacklist: a failed call still cost money, and
+        # any other unintended predicate would silently drop rows from the page total too
         instance, engine = build(Engine(*DETAIL_RESULTS))
         #
         instance.usage_read_project_usage_detail(project_id=7, period=PERIOD)
         #
         for statement in engine.connection.statements:
-            assert "is_error" not in statement
+            where = re.split(r"GROUP BY|ORDER BY", statement.split("WHERE", 1)[1])[0]
+            assert set(re.findall(r"usage_event\.(\w+)", where)) == {
+                "project_id", "ts", "event_type",
+            }
+
+    def test_the_member_variant_filters_on_user_id_and_nothing_more(self, build):
+        instance, engine = build(Engine(*DETAIL_RESULTS))
+        #
+        instance.usage_read_user_usage_detail(project_id=7, user_id=42, period=PERIOD)
+        #
+        for statement in engine.connection.statements:
+            where = re.split(r"GROUP BY|ORDER BY", statement.split("WHERE", 1)[1])[0]
+            assert set(re.findall(r"usage_event\.(\w+)", where)) == {
+                "project_id", "ts", "event_type", "user_id",
+            }

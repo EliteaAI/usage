@@ -188,9 +188,11 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         ) or {}
         #
         try:
-            limit = (rpc.timeout(10).elitea_core_get_effective_member_limits(
+            # RPC serialization can stringify the key; a missed hit reads as unlimited
+            limits = rpc.timeout(10).elitea_core_get_effective_member_limits(
                 project_id=project_id, user_ids=[user_id],
-            ) or {}).get(user_id)
+            ) or {}
+            limit = limits.get(user_id, limits.get(str(user_id)))
         except Exception:  # pylint: disable=W0703
             stored = budget.get("monthly_limit") if budget.get("enabled", True) else None
             limit = stored if stored is not None else _member_default(rpc, project_id)
