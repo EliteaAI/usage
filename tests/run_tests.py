@@ -83,6 +83,11 @@ def install_pylon_stubs():
     tools.this = types.SimpleNamespace(
         descriptor=types.SimpleNamespace(config={}), module=None,
     )
+    # Provided by `shared`, which usage depends_on, so it always resolves in a live pylon.
+    # ready() warns when registration fails, so the no-warning assertions are the guard.
+    tools.openapi_registry = types.SimpleNamespace(
+        register_plugin=lambda **kwargs: None,
+    )
     sys.modules.setdefault('tools', tools)
 
 
