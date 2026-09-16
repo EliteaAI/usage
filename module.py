@@ -52,7 +52,6 @@ class Module(module.ModuleModel):
     def ready(self):
         """ Ready callback """
         # After shared.ready() created the parent table — usage depends_on shared
-        self.usage_ensure_event_columns()
         self.usage_ensure_partitions()
         self._report_interfaces()
         self._register_cron()

@@ -15,11 +15,12 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" usage_event compatibility guard
+""" usage_event cost-split backfill
 
 create_all provisions a new database from the model, but never alters a table that already
-exists — so a column added to UsageEvent after a deploy needs applying here. Runs on every
-ready(), does nothing once the table matches.
+exists — so the cost-split columns are added to a deployed usage_event by hand, with
+docs/6574-cost-split-migration.sql. Once they exist, usage_freeze_cost_split gives the rows
+written before them a split.
 """
 
 from sqlalchemy import text
@@ -50,18 +51,6 @@ def existing_columns(connection, schema, table):
     ).scalars().all()
     #
     return set(rows)
-
-
-def add_column_statement(schema, columns):
-    """One ALTER for every missing column: a partitioned parent rewrites its children each time.
-
-    IF NOT EXISTS as well as the caller's check — two pylons can reach this concurrently.
-    """
-    additions = ", ".join(
-        f'ADD COLUMN IF NOT EXISTS "{name}" BIGINT NOT NULL DEFAULT 0' for name in columns
-    )
-    #
-    return f"ALTER TABLE {schema}.usage_event {additions};"
 
 
 def freeze_cost_split_statement(schema):
@@ -129,39 +118,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
 
     @web.method()
-    def usage_ensure_event_columns(self):
-        """Apply any UsageEvent column the live table is missing; returns how many were added."""
-        schema = c.POSTGRES_SCHEMA
-        #
-        with db.engine.connect() as connection:
-            present = existing_columns(connection, schema, "usage_event")
-            #
-            if not present:
-                # shared provisions the table; usage_ensure_partitions already warns when it
-                # has not happened yet, so this stays quiet
-                return 0
-            #
-            missing = [name for name in COST_SPLIT_COLUMNS if name not in present]
-            #
-            if not missing:
-                return 0
-            #
-            connection.execute(text(add_column_statement(schema, missing)))
-            connection.commit()
-        #
-        log.info("usage: added %s usage_event column(s): %s", len(missing), ", ".join(missing))
-        #
-        self.usage_freeze_cost_split()
-        #
-        return len(missing)
-
-    @web.method()
     def usage_freeze_cost_split(self):
         """Backfill the split for rows that predate it; a no-op on every later call.
 
-        Separate from the column guard so an operator can re-run it after the costs catalog is
-        first populated — a row whose model had no price at all when the columns landed is left
-        for that next run rather than frozen at zero.
+        Operator-invoked rather than automatic, so it can be re-run after the costs catalog is
+        first populated — a row whose model had no price at all on the first run is left for the
+        next one rather than frozen at zero.
         """
         schema = c.POSTGRES_SCHEMA
         #
