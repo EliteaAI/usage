@@ -15,6 +15,7 @@ def build(config=None, rpc=None, descriptors=None):
     descriptor = types.SimpleNamespace(
         config={"usage": config if config is not None else {}},
         name="usage",
+        metadata={"version": "0.8"},
         init_all=lambda: calls.append(("init_all", None)),
         register_tool=lambda name, tool: calls.append(("register_tool", name)),
     )
@@ -140,6 +141,14 @@ class TestReady:
         instance.ready()
         #
         assert [name for name, _ in calls if name == "ensure_partitions"] == ["ensure_partitions"]
+
+    def test_openapi_registration_happens_or_the_endpoint_is_invisible_to_swagger(self):
+        from tools import openapi_registry  # pylint: disable=C0415
+        openapi_registry.registered.clear()
+        #
+        build()[0].ready()
+        #
+        assert openapi_registry.registered[-1]["plugin_name"] == "usage"
 
     def test_enumerates_interfaces_and_registers_the_cron(self):
         instance, calls = build()

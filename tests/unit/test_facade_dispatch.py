@@ -1,7 +1,7 @@
-"""Facade reads: every spend RPC answers with the zero shape and touches no other plugin.
+"""Facade reads: every spend RPC delegates to its own plugin's method and touches no other.
 
-The shapes matter more than the values here — they are the contract the Usage page consumes,
-and #6574 fills them in from usage_event/usage_counter behind these same signatures.
+The zero shapes still matter — they are the contract the Usage page consumes, and a failed
+read in methods/spend.py answers with them rather than raising.
 """
 import pytest
 
@@ -12,32 +12,55 @@ from fixtures.helpers import bind, fake_module
 from fixtures.stubs import RecordingRpc
 
 
-# name -> (kwargs the caller passes, zero shape factory)
-SPEND_RPCS = {
-    "usage_get_project_spend": ({"project_id": 7}, facade.empty_spend),
-    "usage_get_user_spend": ({"project_id": 7, "user_id": 42}, facade.empty_spend),
-    "usage_get_project_usage_detail": ({"project_id": 7}, facade.empty_usage_detail),
-    "usage_get_user_usage_detail": (
-        {"project_id": 7, "user_id": 42}, facade.empty_usage_detail,
-    ),
+# rpc name -> kwargs the caller passes
+ALL_RPCS = {
+    "usage_get_project_spend": {"project_id": 7},
+    "usage_get_user_spend": {"project_id": 7, "user_id": 42},
+    "usage_get_project_usage_detail": {"project_id": 7},
+    "usage_get_user_usage_detail": {"project_id": 7, "user_id": 42},
+    "usage_get_projects_spend": {"project_ids": [1, 2]},
+    "usage_get_users_spend": {"project_id": 7, "user_ids": [4, 5]},
+    "usage_list_member_spend": {"project_id": 7, "period": None},
 }
 
-MAP_RPCS = {
-    "usage_get_projects_spend": ({"project_ids": [1, 2]}, {1: 0.0, 2: 0.0}),
-    "usage_get_users_spend": ({"project_id": 7, "user_ids": [4, 5]}, {4: 0.0, 5: 0.0}),
+# The RPC keeps the public name; the method it delegates to is named differently on purpose,
+# because pylon rejects a registry name that is claimed twice.
+METHOD_OF = {
+    "usage_get_project_spend": "usage_read_project_spend",
+    "usage_get_user_spend": "usage_read_user_spend",
+    "usage_get_project_usage_detail": "usage_read_project_usage_detail",
+    "usage_get_user_usage_detail": "usage_read_user_usage_detail",
+    "usage_get_projects_spend": "usage_read_projects_spend",
+    "usage_get_users_spend": "usage_read_users_spend",
+    "usage_list_member_spend": "usage_read_member_spend_listing",
 }
 
-ALL_RPCS = {name: kwargs for name, (kwargs, _) in SPEND_RPCS.items()}
-ALL_RPCS.update({name: kwargs for name, (kwargs, _) in MAP_RPCS.items()})
-ALL_RPCS["usage_list_member_spend"] = {"project_id": 7, "period": None}
+
+class RecordingMethods:
+    """Stands in for spend.Method: records the call instead of running SQL."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, name):
+        def method(**kwargs):
+            self.calls.append((name, kwargs))
+            return "delegated"
+        #
+        return method
 
 
 @pytest.fixture
 def instance(monkeypatch):
-    """A facade bound to a Module stand-in, with a recording rpc_manager in place."""
-    def build(config=None, rpc=None):
+    """A facade bound to a Module stand-in, with recording methods and rpc_manager in place."""
+    def build(config=None, rpc=None, methods=None):
+        methods = methods if methods is not None else RecordingMethods()
         stand_in = fake_module(config={"usage": config or {}})
         bound = bind(stand_in, mode_module.Method, facade.RPC)
+        #
+        for name in ALL_RPCS:
+            setattr(bound, METHOD_OF[name], methods(METHOD_OF[name]))
+        #
         # raising=False: the facade has no `context` import any more, and that is the point --
         # a reintroduced delegation would find this stub and be caught by the assertions below.
         monkeypatch.setattr(
@@ -45,6 +68,8 @@ def instance(monkeypatch):
             raising=False,
         )
         stand_in.context.rpc_manager = rpc or RecordingRpc()
+        bound.recorded = methods
+        #
         return bound
     #
     return build
@@ -57,30 +82,41 @@ class TestNoDelegation:
         rpc = RecordingRpc()
         bound = instance({"mode": mode}, rpc)
         #
-        getattr(bound, name)(**ALL_RPCS[name])
+        getattr(bound, f"{name}_rpc")(**ALL_RPCS[name])
         #
         assert rpc.names() == []
 
 
-class TestZeroShapes:
-    @pytest.mark.parametrize("name", sorted(SPEND_RPCS))
-    def test_spend_reads_are_unavailable(self, instance, name):
-        kwargs, factory = SPEND_RPCS[name]
+class TestDelegation:
+    """The _rpc suffix is what keeps the RPC from overwriting the method it calls."""
+
+    @pytest.mark.parametrize("name", sorted(ALL_RPCS))
+    def test_the_rpc_calls_its_own_method(self, instance, name):
         bound = instance()
         #
-        result = getattr(bound, name)(**kwargs)
+        result = getattr(bound, f"{name}_rpc")(**ALL_RPCS[name])
         #
-        assert result == factory()
-        assert result["available"] is False
+        assert result == "delegated"
+        assert bound.recorded.calls[0][0] == METHOD_OF[name]
 
-    @pytest.mark.parametrize("name", sorted(MAP_RPCS))
-    def test_map_rpcs_return_a_zeroed_key_per_requested_id(self, instance, name):
-        kwargs, expected = MAP_RPCS[name]
+    @pytest.mark.parametrize("name", sorted(ALL_RPCS))
+    def test_every_caller_kwarg_reaches_the_method(self, instance, name):
+        bound = instance()
         #
-        assert getattr(instance(), name)(**kwargs) == expected
+        getattr(bound, f"{name}_rpc")(**ALL_RPCS[name])
+        #
+        assert bound.recorded.calls[0][1] == ALL_RPCS[name]
 
-    def test_member_spend_returns_none_for_the_unreachable_contract(self, instance):
-        assert instance().usage_list_member_spend(project_id=7) is None
+    @pytest.mark.parametrize("name", sorted(ALL_RPCS))
+    def test_the_attribute_name_differs_from_the_registered_rpc_name(self, name):
+        # Same name on both classes and the later bind wins, so the RPC would call itself
+        assert hasattr(facade.RPC, f"{name}_rpc")
+        assert not hasattr(facade.RPC, name)
+
+    @pytest.mark.parametrize("name", sorted(ALL_RPCS))
+    def test_the_method_name_is_not_the_rpc_name(self, name):
+        # pylon raises "Name '<x>' is already set" when a method and an RPC claim one name
+        assert METHOD_OF[name] != name
 
 
 class TestShapeParity:
@@ -95,7 +131,9 @@ class TestShapeParity:
     LITELLM_DETAIL = {
         "tag": "project-7-202609", "period": "202609",
         "models": [{"model": "gpt-4o", "spend": 3.5, "total_tokens": 160, "api_requests": 2}],
-        "daily": [{"date": "2026-09-01", "spend": 3.5}],
+        "daily": [
+            {"date": "2026-09-01", "spend": 3.5, "total_tokens": 160, "api_requests": 2},
+        ],
         "spend": 3.5, "total_tokens": 160, "input_tokens": 120, "output_tokens": 40,
         "cache_read_tokens": 0, "cache_creation_tokens": 0, "api_requests": 2,
         "available": True,
@@ -122,3 +160,8 @@ class TestShapeParity:
         # The UI renders the tag; None would print "None".
         assert facade.empty_spend()["tag"] == ""
         assert facade.empty_usage_detail()["tag"] == ""
+
+    def test_a_failed_read_is_the_only_unavailable_answer(self):
+        # available False means the query failed, not that the project had no traffic
+        assert facade.empty_spend()["available"] is False
+        assert facade.empty_usage_detail()["available"] is False

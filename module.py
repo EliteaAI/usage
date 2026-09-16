@@ -54,6 +54,7 @@ class Module(module.ModuleModel):
         # After shared.ready() created the parent table — usage depends_on shared
         self.usage_ensure_partitions()
         self._report_interfaces()
+        self._register_openapi()
         self._register_cron()
         self.usage_start_workers()
 
@@ -83,6 +84,23 @@ class Module(module.ModuleModel):
                 "usage: mode is enforce but %s interface(s) are unmetered and ungated: %s",
                 len(refused), ", ".join(refused),
             )
+
+    def _register_openapi(self):
+        """Without this the api/v2 @register_openapi decorators are invisible to swagger."""
+        from tools import openapi_registry  # pylint: disable=E0401,C0415
+        from .api import v2 as api_v2  # pylint: disable=C0415
+        openapi_registry.register_plugin(
+            plugin_name="usage",
+            version=self.descriptor.metadata.get("version", "1.0.0"),
+            description="Metered usage and spend reporting",
+            tags=[
+                {
+                    "name": "usage/usage",
+                    "description": "Current-period spend and token usage for a project or one of its members.",
+                },
+            ],
+            api_module=api_v2,
+        )
 
     def _register_cron(self):
         try:

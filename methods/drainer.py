@@ -34,6 +34,10 @@ from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
 
+# Only llm rows are counted, matching reconcile and the read path; a tool row would inflate
+# call_count against facts that the drift report can never close
+EVENT_TYPE_LLM = "llm"
+
 
 def period_of(ts):
     """Denormalised 'YYYYMM' of a row timestamp; accepts the queue's ISO string too."""
@@ -48,6 +52,7 @@ MEASURES = ("input_tokens", "output_tokens", "cost_micro_usd")
 RETURNING_COLUMNS = (
     UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
     UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd,
+    UsageEvent.event_type,
 )
 
 
@@ -174,7 +179,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         landed = [dict(row) for row in connection.execute(statement).mappings()]
         #
-        self.usage_apply_counter_deltas(connection, counter_deltas(landed))
+        self.usage_apply_counter_deltas(connection, counter_deltas([
+            row for row in landed if row.get("event_type") == EVENT_TYPE_LLM
+        ]))
         #
         return landed
 

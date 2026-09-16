@@ -80,6 +80,10 @@ def install_pylon_stubs():
     )
     tools.config = types.SimpleNamespace(POSTGRES_SCHEMA='centry')
     tools.context = types.SimpleNamespace(rpc_manager=None)
+    openapi_registry = types.SimpleNamespace(registered=[])
+    openapi_registry.register_plugin = \
+        lambda **kwargs: openapi_registry.registered.append(kwargs)
+    tools.openapi_registry = openapi_registry
     tools.this = types.SimpleNamespace(
         descriptor=types.SimpleNamespace(config={}), module=None,
     )

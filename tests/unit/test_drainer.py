@@ -167,6 +167,25 @@ class TestInsertEvents:
         assert [row["idempotency_key"] for row in landed] == ["b"]
         assert {delta["cost_micro_usd"] for delta in connection.upserts} == {5000}
 
+    def test_a_tool_row_lands_as_a_fact_but_never_touches_the_counters(self):
+        # It carries no cost, so only call_count drifted -- against facts reconcile filters out,
+        # which left the drift report permanently non-empty
+        connection = Landing()
+        instance = build(connection)
+        #
+        landed = insert(instance, connection, [event("a", event_type="tool")])
+        #
+        assert [row["idempotency_key"] for row in landed] == ["a"]
+        assert connection.upserts == []
+
+    def test_a_mixed_batch_counts_only_its_llm_rows(self):
+        connection = Landing()
+        instance = build(connection)
+        #
+        insert(instance, connection, [event("a"), event("b", event_type="tool")])
+        #
+        assert {delta["call_count"] for delta in connection.upserts} == {1}
+
 
 class TestQueue:
     def test_enqueue_reports_success(self):
