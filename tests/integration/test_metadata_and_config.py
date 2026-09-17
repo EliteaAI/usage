@@ -17,6 +17,7 @@ EXPECTED_PROPERTIES = {
     "usage_queue_flush_batch_size", "usage_queue_flush_interval_seconds",
     "usage_reaper_interval_seconds", "usage_lease_seconds", "usage_limits_cache_ttl_seconds",
     "usage_project_warning_pct", "usage_personal_project_warning_pct", "usage_user_warning_pct",
+    "usage_reconcile_repair_batch_size",
 }
 
 

@@ -195,6 +195,16 @@ class TestReady:
         ]
         assert all(payload["active"] is True for payload in payloads)
 
+    def test_the_reconcile_cron_applies_repairs_not_just_reports(self):
+        # Report-only was the safe starting point; once the repair path was hardened (locking,
+        # batched isolation, loud non-deduped failures) the cron must actually apply the fix
+        instance, calls = build()
+        #
+        instance.ready()
+        #
+        payloads = {args["rpc_func"]: args for name, args in calls if name == "cron"}
+        assert payloads["usage_reconcile_counters"]["rpc_kwargs"] == {"apply": True}
+
     def test_missing_scheduler_does_not_block_startup(self, recording_log):
         """A pylon without the scheduling plugin is a valid deployment."""
         def raiser(_timeout):

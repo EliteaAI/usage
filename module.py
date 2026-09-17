@@ -96,7 +96,7 @@ class Module(module.ModuleModel):
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 "rpc_func": "usage_reconcile_counters",
-                "rpc_kwargs": {},
+                "rpc_kwargs": {"apply": True},
                 "name": "usage_reconcile_counters",
                 "cron": "17 * * * *",
                 "active": True,
