@@ -9,6 +9,29 @@ import time
 from usage.methods import gate
 
 
+class RecordingPipeline:
+    """Buffers EVALs and replays them on execute(), as redis-py's pipeline does."""
+
+    def __init__(self, client):
+        self.client = client
+        self.queued = []
+
+    def eval(self, script, numkeys, *args):  # pylint: disable=W0622
+        self.queued.append((script, numkeys, args))
+        #
+        return self
+
+    def execute(self):
+        results = [
+            self.client.eval(script, numkeys, *args)
+            for script, numkeys, args in self.queued
+        ]
+        self.client.pipelines_executed += 1
+        self.queued = []
+        #
+        return results
+
+
 class RecordingRedis:
     """Enough of redis-py for the gate, the drainer, the reaper and the lease."""
 
@@ -20,6 +43,7 @@ class RecordingRedis:
         self.strings = {}
         self.expiries = {}
         self.calls = []
+        self.pipelines_executed = 0
 
     # -- hashes
 
@@ -168,6 +192,11 @@ class RecordingRedis:
             return True
         #
         return False
+
+    # -- pipelines
+
+    def pipeline(self, transaction=True):  # pylint: disable=W0613
+        return RecordingPipeline(self)
 
     # -- eval
 

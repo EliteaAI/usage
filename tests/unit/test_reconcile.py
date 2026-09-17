@@ -445,6 +445,32 @@ class TestRepairReachesTheGateCounter:
         #
         assert self.member_key() not in instance.redis.hashes
 
+    def test_a_whole_batch_costs_one_pipeline_not_one_round_trip_per_row(self, monkeypatch):
+        """At 20k-project scale a per-row EVAL would block for the length of the batch."""
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        rows = [self.over_counted(project_id=project_id) for project_id in range(1, 21)]
+        #
+        for row in rows:
+            instance.redis.hset(self.member_key(row["project_id"]), "counter", 900)
+        #
+        instance.usage_reconcile_repair(rows)
+        #
+        assert instance.redis.pipelines_executed == 1
+        assert all(
+            instance.redis.counter(self.member_key(row["project_id"])) == 100 for row in rows
+        )
+
+    def test_a_batch_with_no_cost_drift_opens_no_pipeline(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        row = drift_row(1, cost=100)
+        row["actual"]["cost_micro_usd"] = 100
+        #
+        instance.usage_reconcile_repair([row])
+        #
+        assert instance.redis.pipelines_executed == 0
+
     def test_a_report_only_run_leaves_the_cached_counter_alone(self, monkeypatch):
         instance = build()
         patch_engine(monkeypatch, lock_acquired=True)

@@ -399,25 +399,32 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             self.usage_gate_prime(hash_key, counter_key)
 
     @web.method()
-    def usage_gate_push_counter_delta(self, hash_key, delta_micro):
-        """Apply a reconciler correction to the cached counter the gate actually reads.
+    def usage_gate_push_counter_deltas(self, deltas):
+        """Apply reconciler corrections to the cached counters the gate actually reads.
 
         PRIME_LUA only ever raises a cached counter, so without this a repaired-down row keeps
-        being enforced against its pre-repair figure until the key expires.
+        being enforced against its pre-repair figure until the key expires. One pipeline per
+        call, not a round trip per row: a wide repair would otherwise block on hundreds of
+        sequential EVALs. Returns how many live keys moved.
         """
-        delta = int(delta_micro or 0)
+        pending = [(key, int(delta)) for key, delta in deltas if int(delta)]
         #
-        if not delta:
-            return False
+        if not pending:
+            return 0
         #
         try:
-            return bool(int(self.usage_redis_client().eval(
-                REPAIR_PUSH_LUA, 1, hash_key, delta, KEY_TTL_SECONDS,
-            )))
-        except:  # pylint: disable=W0702
-            log.exception("usage: failed to push a repair delta into %s", hash_key)
+            pipe = self.usage_redis_client().pipeline(transaction=False)
             #
-            return False
+            for hash_key, delta in pending:
+                pipe.eval(REPAIR_PUSH_LUA, 1, hash_key, delta, KEY_TTL_SECONDS)
+            #
+            return sum(int(moved or 0) for moved in pipe.execute())
+        except:  # pylint: disable=W0702
+            log.exception(
+                "usage: failed to push %s repair delta(s) into the gate counters", len(pending),
+            )
+            #
+            return 0
 
     @web.method()
     def usage_counter_of(self, counter_key):

@@ -72,6 +72,14 @@ def _repair_row(row):
 
 
 
+def _repair_hash_key(row):
+    """The gate-side counter hash a drift row's correction belongs to."""
+    if int(row["user_id"]) == PROJECT_USER_SENTINEL:
+        return project_hash_key(row["project_id"], row["period_start"])
+    #
+    return member_hash_key(row["project_id"], row["user_id"], row["period_start"])
+
+
 def period_bounds(period):
     """[start, next_start) of a 'YYYYMM' period, as UTC datetimes."""
     year, month = int(str(period)[:4]), int(str(period)[4:6])
@@ -248,30 +256,24 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             "project_id": row["project_id"], "user_id": row["user_id"],
                         })
             #
-            for row in pushed:
-                self.usage_reconcile_push_repair(row)
+            self.usage_reconcile_push_repairs(pushed)
         #
         return repaired, failed
 
     @web.method()
-    def usage_reconcile_push_repair(self, row):
-        """Mirror one repaired row into the gate's Redis counter — the layer enforcement reads.
+    def usage_reconcile_push_repairs(self, rows):
+        """Mirror repaired rows into the gate's Redis counters — the layer enforcement reads.
 
         Postgres-only repair would leave the gate blocking against the stale, higher figure.
+        Whole batch in one call, so the push costs one round trip rather than one per row.
         """
-        delta = row["expected"]["cost_micro_usd"] - row["actual"]["cost_micro_usd"]
-        #
-        if not delta:
-            return False
-        #
-        user_id = row["user_id"]
-        hash_key = (
-            project_hash_key(row["project_id"], row["period_start"])
-            if int(user_id) == PROJECT_USER_SENTINEL
-            else member_hash_key(row["project_id"], user_id, row["period_start"])
-        )
-        #
-        return self.usage_gate_push_counter_delta(hash_key, delta)
+        return self.usage_gate_push_counter_deltas([
+            (
+                _repair_hash_key(row),
+                row["expected"]["cost_micro_usd"] - row["actual"]["cost_micro_usd"],
+            )
+            for row in rows
+        ])
 
     @web.method()
     def usage_reconcile_record_run(self, summary):
