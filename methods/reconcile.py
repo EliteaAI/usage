@@ -31,7 +31,7 @@ from ._counters import (
     ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
 )
 from .drainer import counter_upsert
-from .gate import KEY_PREFIX
+from .gate import KEY_PREFIX, member_hash_key, project_hash_key
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
@@ -211,6 +211,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         for offset in range(0, len(drift), batch_size):
             batch = drift[offset:offset + batch_size]
+            # Collected, then pushed outside the try: a push failure must not re-enter the
+            # retry path and apply the same Postgres delta twice
+            pushed = []
             #
             try:
                 with db.engine.connect() as connection:
@@ -220,6 +223,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     connection.commit()
                 #
                 repaired += len(batch)
+                pushed = batch
             except:  # pylint: disable=W0702
                 log.exception(
                     "usage: repair batch of %s row(s) failed to apply; retrying individually",
@@ -233,6 +237,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             connection.commit()
                         #
                         repaired += 1
+                        pushed.append(row)
                     except:  # pylint: disable=W0702
                         log.error(
                             "usage: repair FAILED for project %s user %s period %s — "
@@ -242,8 +247,31 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         failed.append({
                             "project_id": row["project_id"], "user_id": row["user_id"],
                         })
+            #
+            for row in pushed:
+                self.usage_reconcile_push_repair(row)
         #
         return repaired, failed
+
+    @web.method()
+    def usage_reconcile_push_repair(self, row):
+        """Mirror one repaired row into the gate's Redis counter — the layer enforcement reads.
+
+        Postgres-only repair would leave the gate blocking against the stale, higher figure.
+        """
+        delta = row["expected"]["cost_micro_usd"] - row["actual"]["cost_micro_usd"]
+        #
+        if not delta:
+            return False
+        #
+        user_id = row["user_id"]
+        hash_key = (
+            project_hash_key(row["project_id"], row["period_start"])
+            if int(user_id) == PROJECT_USER_SENTINEL
+            else member_hash_key(row["project_id"], user_id, row["period_start"])
+        )
+        #
+        return self.usage_gate_push_counter_delta(hash_key, delta)
 
     @web.method()
     def usage_reconcile_record_run(self, summary):

@@ -51,6 +51,9 @@ class RecordingRedis:
         #
         return int(bucket[field])
 
+    def exists(self, key):
+        return 1 if key in self.hashes else 0
+
     def counter(self, key):
         return int(self.hashes.get(key, {}).get("counter", 0))
 
@@ -184,6 +187,9 @@ class RecordingRedis:
         if script == gate.PRUNE_LUA:
             return self._prune(keys, argv)
         #
+        if script == gate.REPAIR_PUSH_LUA:
+            return self._repair_push(keys, argv)
+        #
         raise AssertionError("unknown script")
 
     def _prime(self, keys, argv):
@@ -198,6 +204,18 @@ class RecordingRedis:
         self.expire(hash_key, int(argv[1]))
         #
         return raised
+
+    def _repair_push(self, keys, argv):
+        """Mirrors the Lua: a cold key is left alone, a live one moves by the signed delta."""
+        hash_key = keys[0]
+        #
+        if not self.exists(hash_key):
+            return 0
+        #
+        self.hincrby(hash_key, "counter", int(argv[0]))
+        self.expire(hash_key, int(argv[1]))
+        #
+        return 1
 
     def _prune(self, keys, argv):
         resv, index = keys

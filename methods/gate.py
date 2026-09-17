@@ -130,6 +130,17 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return raised
 """
 
+# KEYS: 1=counter hash · ARGV: 1=signed delta, 2=key ttl seconds
+# Delta, never HSET: a settle can HINCRBY the same key between the reconciler reading Postgres
+# and correcting it, and an absolute write would drop it. A cold key is left untouched — the
+# next gate call primes it from the already-corrected row instead.
+REPAIR_PUSH_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HINCRBY', KEYS[1], 'counter', tonumber(ARGV[1]))
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+"""
+
 # KEYS: 1=resv zset, 2=resv index · ARGV: 1=index member
 # One script, or a racing GATE_LUA slips its ZADD+SADD between the ZCARD and the SREM and the
 # reservation it just took becomes invisible to the reaper — headroom nothing can reclaim
@@ -386,6 +397,27 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         if was_primed and self.usage_redis_client().hget(hash_key, "counter") is None:
             _primed.pop(hash_key, None)
             self.usage_gate_prime(hash_key, counter_key)
+
+    @web.method()
+    def usage_gate_push_counter_delta(self, hash_key, delta_micro):
+        """Apply a reconciler correction to the cached counter the gate actually reads.
+
+        PRIME_LUA only ever raises a cached counter, so without this a repaired-down row keeps
+        being enforced against its pre-repair figure until the key expires.
+        """
+        delta = int(delta_micro or 0)
+        #
+        if not delta:
+            return False
+        #
+        try:
+            return bool(int(self.usage_redis_client().eval(
+                REPAIR_PUSH_LUA, 1, hash_key, delta, KEY_TTL_SECONDS,
+            )))
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to push a repair delta into %s", hash_key)
+            #
+            return False
 
     @web.method()
     def usage_counter_of(self, counter_key):
