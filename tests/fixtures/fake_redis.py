@@ -118,6 +118,15 @@ class RecordingRedis:
         #
         return taken
 
+    def lrange(self, key, start, end):
+        queue = self.lists.get(key, [])
+        #
+        return queue[start:None if end == -1 else end + 1]
+
+    def ltrim(self, key, start, end):
+        queue = self.lists.get(key, [])
+        self.lists[key] = queue[start:None if end == -1 else end + 1]
+
     # -- strings and leases
 
     def set(self, key, value, nx=False, ex=None):  # pylint: disable=C0103

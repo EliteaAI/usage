@@ -197,6 +197,20 @@
         "minimum": 1,
         "maximum": 100
       }
+    },
+    "usage_reconcile_repair_batch_size": {
+      "type": "integer",
+      "title": "Reconcile repair batch size",
+      "description": "Counter rows repaired per transaction when the hourly reconciler applies a fix.",
+      "path": "usage.reconcile.repair_batch_size",
+      "section": "Usage",
+      "default": 500,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      }
     }
   }
 }
