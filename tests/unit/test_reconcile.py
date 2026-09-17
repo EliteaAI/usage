@@ -5,13 +5,14 @@ was added for was invisible from the class: a plain staticmethod is never bound 
 Module, so `self._accumulate(...)` raised AttributeError only once the cron fired.
 """
 import datetime
+import time
 import types
 
 import pytest
 
 from fixtures.fake_redis import RecordingRedis
 from fixtures.helpers import bind, fake_module
-from usage.methods import reconcile
+from usage.methods import gate, reconcile
 
 START = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
 END = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
@@ -31,9 +32,12 @@ class Rows:
 
 
 def build():
-    instance = bind(fake_module(), reconcile.Method)
+    # gate.Method too: the repair pushes through it, and Pylon binds both onto one Module
+    instance = bind(fake_module(), gate.Method, reconcile.Method)
     # Lives on the drainer mixin; Pylon binds both onto the same Module instance
     instance.usage_queue_depth = lambda: 0
+    instance.redis = RecordingRedis()
+    instance.usage_redis_client = lambda: instance.redis
     #
     return instance
 
@@ -355,6 +359,138 @@ class TestReconcileRepairBatching:
         assert repaired == 0
         assert failed == [{"project_id": 2, "user_id": 7}]
         assert all(connection.commits == 0 for connection in connections)
+
+
+class TestRepairReachesTheGateCounter:
+    """The gate reads Redis, not Postgres, and PRIME_LUA never lowers a cached counter — so a
+    Postgres-only repair would keep enforcing the pre-repair figure until the key expired."""
+
+    def member_key(self, project_id=1, user_id=7):
+        return gate.member_hash_key(project_id, user_id, START.date())
+
+    def over_counted(self, project_id=1, user_id=7, expected=100, actual=900):
+        """A row the reconciler lowers: the counters sit above the facts behind them."""
+        row = drift_row(project_id, user_id=user_id, cost=expected)
+        row["actual"]["cost_micro_usd"] = actual
+        row["actual"]["call_count"] = 1
+        #
+        return row
+
+    def test_a_repaired_member_row_lowers_the_cached_counter(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)  # over-counted by 800
+        #
+        instance.usage_reconcile_repair([self.over_counted()])
+        #
+        assert instance.redis.counter(hash_key) == 100
+
+    def test_a_repaired_project_row_lands_on_the_project_hash(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        hash_key = gate.project_hash_key(1, START.date())
+        instance.redis.hset(hash_key, "counter", 500)
+        #
+        instance.usage_reconcile_repair([self.over_counted(
+            user_id=reconcile.PROJECT_USER_SENTINEL, expected=120, actual=500,
+        )])
+        #
+        assert instance.redis.counter(hash_key) == 120
+
+    def test_a_settle_landing_during_the_repair_is_not_lost(self, monkeypatch):
+        """Delta, not overwrite: the concurrent HINCRBY has to survive the correction."""
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)
+        # The drift row was computed against 900; a call settles 50 before the push lands
+        instance.redis.hincrby(hash_key, "counter", 50)
+        #
+        instance.usage_reconcile_repair([self.over_counted()])
+        #
+        assert instance.redis.counter(hash_key) == 150
+
+    def test_the_ttl_is_refreshed_so_a_repaired_counter_does_not_expire_early(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)
+        instance.redis.expire(hash_key, 5)
+        #
+        instance.usage_reconcile_repair([self.over_counted()])
+        #
+        assert instance.redis.expiries[hash_key] > time.time() + gate.KEY_TTL_SECONDS - 60
+
+    def test_a_row_with_no_cost_drift_touches_nothing(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)
+        instance.redis.expire(hash_key, 5)
+        row = drift_row(1, cost=100)
+        row["actual"]["cost_micro_usd"] = 100  # only call_count drifts
+        #
+        instance.usage_reconcile_repair([row])
+        #
+        assert instance.redis.counter(hash_key) == 900
+        assert instance.redis.expiries[hash_key] < time.time() + 60
+
+    def test_a_cold_key_is_not_created_by_a_repair(self, monkeypatch):
+        """Priming from the now-corrected Postgres row is the right source for a cold key."""
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        #
+        instance.usage_reconcile_repair([self.over_counted()])
+        #
+        assert self.member_key() not in instance.redis.hashes
+
+    def test_a_whole_batch_costs_one_pipeline_not_one_round_trip_per_row(self, monkeypatch):
+        """At 20k-project scale a per-row EVAL would block for the length of the batch."""
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        rows = [self.over_counted(project_id=project_id) for project_id in range(1, 21)]
+        #
+        for row in rows:
+            instance.redis.hset(self.member_key(row["project_id"]), "counter", 900)
+        #
+        instance.usage_reconcile_repair(rows)
+        #
+        assert instance.redis.pipelines_executed == 1
+        assert all(
+            instance.redis.counter(self.member_key(row["project_id"])) == 100 for row in rows
+        )
+
+    def test_a_batch_with_no_cost_drift_opens_no_pipeline(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance)
+        row = drift_row(1, cost=100)
+        row["actual"]["cost_micro_usd"] = 100
+        #
+        instance.usage_reconcile_repair([row])
+        #
+        assert instance.redis.pipelines_executed == 0
+
+    def test_a_report_only_run_leaves_the_cached_counter_alone(self, monkeypatch):
+        instance = build()
+        patch_engine(monkeypatch, lock_acquired=True)
+        instance.usage_counter_drift = lambda *_a, **_k: [self.over_counted()]
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)
+        #
+        instance.usage_reconcile_counters(period="202609", apply=False)
+        #
+        assert instance.redis.counter(hash_key) == 900
+
+    def test_a_failed_repair_is_not_pushed_to_redis(self, monkeypatch):
+        instance = build()
+        patch_repair_engine(monkeypatch, instance, poison_project_ids={1})
+        hash_key = self.member_key()
+        instance.redis.hset(hash_key, "counter", 900)
+        #
+        instance.usage_reconcile_repair([self.over_counted()])
+        #
+        assert instance.redis.counter(hash_key) == 900
 
 
 class TestReconcileRecordRunAndHistory:

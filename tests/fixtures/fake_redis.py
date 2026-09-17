@@ -9,6 +9,29 @@ import time
 from usage.methods import gate
 
 
+class RecordingPipeline:
+    """Buffers EVALs and replays them on execute(), as redis-py's pipeline does."""
+
+    def __init__(self, client):
+        self.client = client
+        self.queued = []
+
+    def eval(self, script, numkeys, *args):  # pylint: disable=W0622
+        self.queued.append((script, numkeys, args))
+        #
+        return self
+
+    def execute(self):
+        results = [
+            self.client.eval(script, numkeys, *args)
+            for script, numkeys, args in self.queued
+        ]
+        self.client.pipelines_executed += 1
+        self.queued = []
+        #
+        return results
+
+
 class RecordingRedis:
     """Enough of redis-py for the gate, the drainer, the reaper and the lease."""
 
@@ -20,6 +43,7 @@ class RecordingRedis:
         self.strings = {}
         self.expiries = {}
         self.calls = []
+        self.pipelines_executed = 0
 
     # -- hashes
 
@@ -50,6 +74,9 @@ class RecordingRedis:
         bucket[field] = str(int(bucket.get(field, 0)) + int(amount))
         #
         return int(bucket[field])
+
+    def exists(self, key):
+        return 1 if key in self.hashes else 0
 
     def counter(self, key):
         return int(self.hashes.get(key, {}).get("counter", 0))
@@ -166,6 +193,11 @@ class RecordingRedis:
         #
         return False
 
+    # -- pipelines
+
+    def pipeline(self, transaction=True):  # pylint: disable=W0613
+        return RecordingPipeline(self)
+
     # -- eval
 
     def eval(self, script, numkeys, *args):  # pylint: disable=W0622
@@ -184,6 +216,9 @@ class RecordingRedis:
         if script == gate.PRUNE_LUA:
             return self._prune(keys, argv)
         #
+        if script == gate.REPAIR_PUSH_LUA:
+            return self._repair_push(keys, argv)
+        #
         raise AssertionError("unknown script")
 
     def _prime(self, keys, argv):
@@ -198,6 +233,18 @@ class RecordingRedis:
         self.expire(hash_key, int(argv[1]))
         #
         return raised
+
+    def _repair_push(self, keys, argv):
+        """Mirrors the Lua: a cold key is left alone, a live one moves by the signed delta."""
+        hash_key = keys[0]
+        #
+        if not self.exists(hash_key):
+            return 0
+        #
+        self.hincrby(hash_key, "counter", int(argv[0]))
+        self.expire(hash_key, int(argv[1]))
+        #
+        return 1
 
     def _prune(self, keys, argv):
         resv, index = keys
