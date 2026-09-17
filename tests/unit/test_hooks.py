@@ -515,6 +515,18 @@ class TestFailureIsolation:
         #
         assert drain(begin(), [OPENAI_JSON]) == [OPENAI_JSON]
 
+    def test_a_dialect_lookup_failure_does_not_break_the_response(self, metering, monkeypatch):
+        def explode(*args, **kwargs):
+            raise RuntimeError("bad dialect lookup")
+
+        monkeypatch.setattr(registry, "match", explode)
+        #
+        assert drain(begin(), [OPENAI_JSON]) == [OPENAI_JSON]
+        #
+        row, = metering.rows
+        assert row["token_source"] == "unparsed"
+        assert row["dialect"] is None
+
     def test_an_unresolved_project_is_not_written(self, metering, monkeypatch):
         monkeypatch.setattr(
             metering.recorder, "usage_resolve_project_id", lambda *a, **k: None,

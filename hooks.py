@@ -357,10 +357,7 @@ def _metered(ctx, response, iterator):
             # still charged for them, and the row would otherwise be a silent zero
             if not probed:
                 probed = True
-                dialect = registry.match(
-                    ctx.endpoint, _content_type_of(response),
-                    _head_of(chunk), provider=ctx.provider,
-                )
+                dialect = _match(ctx, response, chunk)
             #
             if dialect is not None:
                 _feed(dialect, chunk)
@@ -392,6 +389,20 @@ def _settle(ctx, row):
         this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_micro_usd") or 0)
     except:  # pylint: disable=W0702
         log.exception("usage: failed to settle a reservation; the reaper will reclaim it")
+
+
+def _match(ctx, response, chunk):
+    """A broken lookup degrades the row to unparsed; it never breaks the response."""
+    content_type = _content_type_of(response)
+    #
+    try:
+        return registry.match(ctx.endpoint, content_type, _head_of(chunk), provider=ctx.provider)
+    except:  # pylint: disable=W0702
+        log.exception(
+            "usage: dialect match failed for endpoint %s provider %s content-type %s",
+            ctx.endpoint, ctx.provider, content_type,
+        )
+        return None
 
 
 def _feed(dialect, chunk):
