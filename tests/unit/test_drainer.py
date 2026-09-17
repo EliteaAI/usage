@@ -408,26 +408,32 @@ class TestPoisonRow:
         assert client.lists[drainer.QUEUE_KEY] == [queued]
 
 
+def drain_instance(client, monkeypatch, batch=2, batches=4):
+    """A drainer whose tick allowance and batch size are both small enough to reason about.
+
+    Shared by the multi-batch and backlog-reporting cases: they exercise the same loop from
+    opposite ends (does it keep going / does it say so when it cannot finish).
+    """
+    instance = build(Landing())
+    instance.usage_config = lambda: {"redis": {
+        "queue_flush_batch_size": batch, "queue_flush_max_batches_per_tick": batches,
+    }}
+    instance.usage_redis_client = lambda: client
+    instance.usage_insert_events = lambda _conn, rows: rows
+    monkeypatch.setattr(
+        drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
+    )
+    #
+    return instance
+
+
 class TestMultiBatchTick:
     """One batch per tick capped the drainer at batch_size/interval rows per second; a burst
     above that grew the queue forever. A tick now drains several batches, stopping early."""
 
-    def _instance(self, client, monkeypatch, batch=2, batches=4):
-        instance = build(Landing())
-        instance.usage_config = lambda: {"redis": {
-            "queue_flush_batch_size": batch, "queue_flush_max_batches_per_tick": batches,
-        }}
-        instance.usage_redis_client = lambda: client
-        instance.usage_insert_events = lambda _conn, rows: rows
-        monkeypatch.setattr(
-            drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
-        )
-        #
-        return instance
-
     def test_a_backlog_drains_several_batches_in_one_tick(self, monkeypatch):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch)
         #
         for key in range(8):
             instance.usage_enqueue_event(event(str(key)))
@@ -437,7 +443,7 @@ class TestMultiBatchTick:
 
     def test_it_stops_at_the_configured_number_of_batches(self, monkeypatch):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch, batches=2)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(8):
             instance.usage_enqueue_event(event(str(key)))
@@ -448,7 +454,7 @@ class TestMultiBatchTick:
     def test_the_ceiling_holds_even_when_configured_higher(self, monkeypatch):
         # The bound is the drain lease, so a config value above it must not be honoured
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch, batch=1, batches=999)
+        instance = drain_instance(client, monkeypatch, batch=1, batches=999)
         #
         for key in range(20):
             instance.usage_enqueue_event(event(str(key)))
@@ -458,11 +464,11 @@ class TestMultiBatchTick:
     def test_an_empty_queue_costs_one_batch_read(self, monkeypatch):
         client = RecordingRedis()
         #
-        assert self._instance(client, monkeypatch).usage_drain_batch() == 0
+        assert drain_instance(client, monkeypatch).usage_drain_batch() == 0
 
     def test_a_failing_batch_stops_the_tick_rather_than_hammering(self, monkeypatch):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch)
         instance.usage_insert_events = \
             lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("postgres is down"))
         #
@@ -493,22 +499,9 @@ class TestBacklogReporting:
     """There is no configurable threshold: a tick that uses its full batch allowance and still
     finds the queue non-empty logs that fact on its own -- nothing for an operator to size."""
 
-    def _instance(self, client, monkeypatch, batch=2, batches=2):
-        instance = build(Landing())
-        instance.usage_config = lambda: {"redis": {
-            "queue_flush_batch_size": batch, "queue_flush_max_batches_per_tick": batches,
-        }}
-        instance.usage_redis_client = lambda: client
-        instance.usage_insert_events = lambda _conn, rows: rows
-        monkeypatch.setattr(
-            drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
-        )
-        #
-        return instance
-
     def test_exhausting_the_allowance_with_rows_left_logs_loudly(self, monkeypatch, recording_log):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(6):
             instance.usage_enqueue_event(event(str(key)))
@@ -521,7 +514,7 @@ class TestBacklogReporting:
 
     def test_emptying_the_queue_within_the_allowance_says_nothing(self, monkeypatch, recording_log):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(3):
             instance.usage_enqueue_event(event(str(key)))
@@ -534,7 +527,7 @@ class TestBacklogReporting:
         # The loop's else-branch fires (every batch came back full), but depth is checked
         # freshly rather than trusting that -- so an exact fit stays silent
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(4):
             instance.usage_enqueue_event(event(str(key)))
@@ -545,7 +538,7 @@ class TestBacklogReporting:
 
     def test_repeated_backlog_logs_every_tick_not_deduped(self, monkeypatch, recording_log):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(10):
             instance.usage_enqueue_event(event(str(key)))
@@ -557,7 +550,7 @@ class TestBacklogReporting:
 
     def test_no_reporting_path_shortens_the_queue(self, monkeypatch):
         client = RecordingRedis()
-        instance = self._instance(client, monkeypatch)
+        instance = drain_instance(client, monkeypatch, batches=2)
         #
         for key in range(6):
             instance.usage_enqueue_event(event(str(key)))
@@ -565,3 +558,76 @@ class TestBacklogReporting:
         instance.usage_drain_batch()
         #
         assert len(client.lists[drainer.QUEUE_KEY]) == 2
+
+    def test_a_write_failure_reports_the_depth_it_leaves_behind(self, monkeypatch, recording_log):
+        # An outage lands zero rows, exactly like an empty queue does. Reported as a plain
+        # traceback it looked like a hiccup; what an operator needs is how much is piling up
+        client = RecordingRedis()
+        instance = drain_instance(client, monkeypatch, batches=4)
+        instance.usage_insert_events = \
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("postgres is down"))
+        #
+        for key in range(6):
+            instance.usage_enqueue_event(event(str(key)))
+        #
+        assert instance.usage_drain_batch() == 0
+        #
+        errors = [record for record in recording_log.records if record[0] == "error"]
+        assert len(errors) == 1
+        assert "fell behind" in errors[0][1]
+        # The whole point of routing this path through the reporter: the depth is in the line
+        assert errors[0][2][0] == 6
+        assert len(client.lists[drainer.QUEUE_KEY]) == 6
+
+    def test_a_write_failure_does_not_spend_the_rest_of_the_allowance(self, monkeypatch):
+        # Re-dequeueing the same rows against a database that just refused them is pure load
+        client = RecordingRedis()
+        instance = drain_instance(client, monkeypatch, batches=4)
+        attempts = []
+        #
+        def insert_events(_connection, rows):
+            attempts.append(len(rows))
+            raise RuntimeError("postgres is down")
+        #
+        instance.usage_insert_events = insert_events
+        #
+        for key in range(8):
+            instance.usage_enqueue_event(event(str(key)))
+        #
+        instance.usage_drain_batch()
+        #
+        assert attempts == [2]
+
+    def test_a_partly_failed_isolated_pass_stops_the_tick(self, monkeypatch, recording_log):
+        # The isolated pass costs a connection per row, and it can land some rows while
+        # requeueing others -- a nonzero count there must not read as "healthy, keep going"
+        client = RecordingRedis()
+        instance = drain_instance(client, monkeypatch, batch=3, batches=4)
+        attempts = []
+        #
+        def insert_events(_connection, rows):
+            attempts.append([row["idempotency_key"] for row in rows])
+            #
+            if any("period" in row for row in rows):
+                raise CompileError("unconsumed column names: period")
+            #
+            if any(row["idempotency_key"] == "flaky" for row in rows):
+                raise RuntimeError("deadlock detected")
+            #
+            return rows
+        #
+        instance.usage_insert_events = insert_events
+        instance.usage_enqueue_event({**event("bad"), "period": "202609"})
+        instance.usage_enqueue_event(event("flaky"))
+        instance.usage_enqueue_event(event("good"))
+        #
+        for key in range(3):
+            instance.usage_enqueue_event(event(str(key)))
+        #
+        assert instance.usage_drain_batch() == 1
+        # One batch build, then one attempt per row of it -- never a second batch
+        assert len(attempts) == 4
+        #
+        queued = [json.loads(item)["idempotency_key"] for item in client.lists[drainer.QUEUE_KEY]]
+        assert queued == ["flaky", "0", "1", "2"]
+        assert any("fell behind" in message for message in recording_log.messages("error"))
