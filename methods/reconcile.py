@@ -132,6 +132,7 @@ def _reconcile_apply(self, period, start, end):
         "drift": len(drift),
         "repaired": repaired,
         "failed": len(failed),
+        "queue_depth": self.usage_queue_depth(),
     })
     #
     return {

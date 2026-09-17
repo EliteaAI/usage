@@ -36,6 +36,12 @@ from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
 
+# Batches per tick. Upper bound is set by the drain lease, not by throughput: one tick must
+# finish well inside `lease_seconds` (20s) or a second replica starts draining alongside this
+# one. LPOP is atomic so no row is processed twice, but do not raise this past 8.
+DEFAULT_MAX_BATCHES_PER_TICK = 4
+MAX_BATCHES_PER_TICK_CEILING = 8
+
 # A retired row is kept around long enough to be looked at, not forever
 DEAD_QUEUE_TTL_SECONDS = 14 * 24 * 3600
 
@@ -138,7 +144,61 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_drain_batch(self):
-        """One tick: queued facts to usage_event, then landed facts to usage_counter."""
+        """One tick: up to N batches, stopping as soon as one comes back short or fails.
+
+        Several batches per tick because a single one caps the drainer at
+        batch_size / interval rows per second, which a sustained burst passes and then never
+        gives back. If even the full allowance doesn't empty the queue, that already IS the
+        signal -- no separate threshold to size or tune.
+        """
+        redis_config = self.usage_config().get("redis") or {}
+        batches = min(MAX_BATCHES_PER_TICK_CEILING, max(1, int(redis_config.get(
+            "queue_flush_max_batches_per_tick", DEFAULT_MAX_BATCHES_PER_TICK,
+        ))))
+        #
+        drained = 0
+        #
+        for _ in range(batches):
+            moved = self.usage_drain_one_batch()
+            #
+            if not moved:
+                break
+            #
+            drained += moved
+        else:
+            # Every allotted batch came back full: the tick ran out of allowance, not queue
+            self.usage_report_backlog(batches)
+        #
+        return drained
+
+    @web.method()
+    def usage_report_backlog(self, batches):
+        """Loud, not deduped: called only when a tick used its full batch allowance.
+
+        Checks depth itself rather than trusting the caller's "batches used" count, so a queue
+        that happened to empty out on the very last batch stays silent.
+        """
+        depth = self.usage_queue_depth()
+        #
+        if depth:
+            log.error(
+                "usage: drainer fell behind -- %s row(s) still queued after %s batch(es) this "
+                "tick; the drainer is not keeping up and this pressures the shared Redis",
+                depth, batches,
+            )
+
+    @web.method()
+    def usage_queue_depth(self):
+        """ Method """
+        try:
+            return int(self.usage_redis_client().llen(QUEUE_KEY))
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to read the event queue depth")
+            return None
+
+    @web.method()
+    def usage_drain_one_batch(self):
+        """One batch: queued facts to usage_event, then landed facts to usage_counter."""
         rows = self.usage_dequeue_events()
         #
         if not rows:

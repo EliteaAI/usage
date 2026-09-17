@@ -31,7 +31,11 @@ class Rows:
 
 
 def build():
-    return bind(fake_module(), reconcile.Method)
+    instance = bind(fake_module(), reconcile.Method)
+    # Lives on the drainer mixin; Pylon binds both onto the same Module instance
+    instance.usage_queue_depth = lambda: 0
+    #
+    return instance
 
 
 class TestFactTotals:
