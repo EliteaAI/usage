@@ -118,6 +118,9 @@ class RecordingRedis:
         #
         return taken
 
+    def llen(self, key):
+        return len(self.lists.get(key, []))
+
     def lrange(self, key, start, end):
         queue = self.lists.get(key, [])
         #

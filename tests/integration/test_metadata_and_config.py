@@ -15,6 +15,7 @@ EXPECTED_PROPERTIES = {
     "usage_partition_ahead_months",
     "usage_max_call_cost_usd", "usage_default_output_tokens", "usage_reservation_ttl_seconds",
     "usage_queue_flush_batch_size", "usage_queue_flush_interval_seconds",
+    "usage_queue_flush_max_batches_per_tick",
     "usage_reaper_interval_seconds", "usage_lease_seconds", "usage_limits_cache_ttl_seconds",
     "usage_project_warning_pct", "usage_personal_project_warning_pct", "usage_user_warning_pct",
     "usage_reconcile_repair_batch_size",

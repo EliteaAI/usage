@@ -33,6 +33,13 @@ usage:
   redis:
     queue_flush_batch_size: 500
     queue_flush_interval_seconds: 5
+    # Batches drained per tick; stops early when the queue empties. One batch per tick caps the
+    # drainer at batch_size / interval rows per second. Bounded by the drain lease below, NOT by
+    # throughput: a tick must finish inside lease_seconds or a second replica drains alongside
+    # this one. Do not raise past 8, incident or not.
+    # If this many full batches still don't empty the queue in one tick, the tick logs it
+    # loudly on its own -- no separate threshold to configure.
+    queue_flush_max_batches_per_tick: 4
     reaper_interval_seconds: 30
     # Lease held by the one replica that drains and reaps; refreshed each tick.
     lease_seconds: 20

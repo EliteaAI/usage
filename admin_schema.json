@@ -114,6 +114,20 @@
         "maximum": 3600
       }
     },
+    "usage_queue_flush_max_batches_per_tick": {
+      "type": "integer",
+      "title": "Queue flush batches per tick",
+      "description": "Batches drained per tick, so a behind drainer can catch up. Bounded by the worker lease, not by throughput: do not raise past 8.",
+      "path": "usage.redis.queue_flush_max_batches_per_tick",
+      "section": "Usage",
+      "default": 4,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 8
+      }
+    },
     "usage_reaper_interval_seconds": {
       "type": "integer",
       "title": "Reservation reaper interval (seconds)",

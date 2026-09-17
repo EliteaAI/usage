@@ -36,6 +36,12 @@ from ..models.usage_event import UsageEvent
 
 DEFAULT_BATCH_SIZE = 500
 
+# Batches per tick. Upper bound is set by the drain lease, not by throughput: one tick must
+# finish well inside `lease_seconds` (20s) or a second replica starts draining alongside this
+# one. LPOP is atomic so no row is processed twice, but do not raise this past 8.
+DEFAULT_MAX_BATCHES_PER_TICK = 4
+MAX_BATCHES_PER_TICK_CEILING = 8
+
 # A retired row is kept around long enough to be looked at, not forever
 DEAD_QUEUE_TTL_SECONDS = 14 * 24 * 3600
 
@@ -138,18 +144,84 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_drain_batch(self):
-        """One tick: queued facts to usage_event, then landed facts to usage_counter."""
+        """One tick: up to N batches, stopping as soon as one comes back short or fails.
+
+        Several batches per tick because a single one caps the drainer at
+        batch_size / interval rows per second, which a sustained burst passes and then never
+        gives back. If even the full allowance doesn't empty the queue, that already IS the
+        signal -- no separate threshold to size or tune.
+        """
+        redis_config = self.usage_config().get("redis") or {}
+        batches = min(MAX_BATCHES_PER_TICK_CEILING, max(1, int(redis_config.get(
+            "queue_flush_max_batches_per_tick", DEFAULT_MAX_BATCHES_PER_TICK,
+        ))))
+        #
+        drained = 0
+        #
+        for used in range(1, batches + 1):
+            moved, stalled = self.usage_drain_one_batch()
+            drained += moved
+            #
+            # Those rows are back on the queue, so report the depth they leave behind rather
+            # than spending the rest of the allowance on a database that is not taking writes
+            if stalled:
+                self.usage_report_backlog(used, stalled=True)
+                #
+                break
+            #
+            if not moved:
+                break
+        else:
+            # Every allotted batch came back full: the tick ran out of allowance, not queue
+            self.usage_report_backlog(batches)
+        #
+        return drained
+
+    @web.method()
+    def usage_report_backlog(self, batches, stalled=False):
+        """Loud, not deduped: the tick either ran out of batch allowance or could not write.
+
+        Reads depth itself rather than trusting the caller, so a queue that happened to empty
+        out on the very last batch stays silent.
+        """
+        depth = self.usage_queue_depth()
+        #
+        if depth:
+            log.error(
+                "usage: drainer fell behind -- %s row(s) still queued after %s batch(es) this "
+                "tick (%s); this pressures the shared Redis",
+                depth, batches,
+                "writes are failing, see the traceback above" if stalled
+                else "the per-tick batch allowance ran out",
+            )
+
+    @web.method()
+    def usage_queue_depth(self):
+        """ Method """
+        try:
+            return int(self.usage_redis_client().llen(QUEUE_KEY))
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to read the event queue depth")
+            return None
+
+    @web.method()
+    def usage_drain_one_batch(self):
+        """One batch: queued facts to usage_event, then landed facts to usage_counter.
+
+        Returns (landed, stalled); stalled means rows went back on the queue, which lands zero
+        rows just like an empty queue does and must not be mistaken for one.
+        """
         rows = self.usage_dequeue_events()
         #
         if not rows:
-            return 0
+            return 0, False
         #
         try:
             with db.engine.connect() as connection:
                 drained = len(self.usage_insert_events(connection, rows))
                 connection.commit()
                 #
-                return drained
+                return drained, False
         except PERMANENT_ERRORS:
             # Retrying the batch would fail identically forever, so isolate the offending row
             # instead of starving everything queued behind it
@@ -162,12 +234,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # the batch instead would lose the facts for good, reconcile included
             self.usage_requeue_events(rows)
             #
-            return 0
+            return 0, True
 
     @web.method()
     def usage_drain_isolated(self, rows):
-        """Second pass after a batch failed to build: each row alone, offenders retired."""
+        """Second pass after a batch failed to build: each row alone, offenders retired.
+
+        Returns (landed, stalled); one requeued row stalls the tick even when its neighbours
+        landed, because this pass costs a connection per row and re-reads that row next tick.
+        """
         drained = 0
+        stalled = False
         #
         for row in rows:
             try:
@@ -180,8 +257,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             except:  # pylint: disable=W0702
                 log.exception("usage: a queued event could not be written")
                 self.usage_requeue_events([row])
+                stalled = True
         #
-        return drained
+        return drained, stalled
 
     @web.method()
     def usage_retire_events(self, rows):
