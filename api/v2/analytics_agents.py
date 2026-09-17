@@ -252,8 +252,11 @@ if _API_AVAILABLE:
                     "total_tokens": int(r["total_tokens"] or 0),
                     "llm_cost": an.cost_usd(r["cost_micro"]),
                     **{key: an.cost_usd(r[f"{key}_micro"]) for key in an.COST_SPLIT_COLUMNS},
+                    # int() on both operands: sum() over bigint columns comes back as Decimal,
+                    # and a single Decimal anywhere in the payload makes the whole response
+                    # unserializable — the endpoint 500s instead of rendering any row.
                     "avg_tokens_per_call": (
-                        (r["total_tokens"] or 0) / r["llm_calls"]
+                        round(int(r["total_tokens"] or 0) / int(r["llm_calls"]), 1)
                         if r["llm_calls"] else 0
                     ),
                 }
