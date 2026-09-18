@@ -385,6 +385,19 @@ class TestAttribution:
         #
         row = metering.rows[0]
         assert "entity_id" not in row
+
+    def test_differing_entity_and_root_type_both_survive(self, metering):
+        # #6677: an eval/judge row's leaf (evaluation) and root (application) types legitimately
+        # differ — no validation here should collapse or drop either one.
+        eval_attribution = {
+            **ATTRIBUTION, "entity_type": "evaluation", "entity_id": 42, "entity_version_id": None,
+        }
+        drain(self.attributed(headers={hooks.ATTRIBUTION_HEADER: packed(eval_attribution)}),
+              [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert row["entity_type"] == "evaluation" and row["entity_id"] == 42
+        assert row["root_entity_type"] == "application" and row["root_entity_id"] == 1
         assert row["conversation_id"] == ATTRIBUTION["conversation_id"]
 
     def test_text_is_truncated_to_the_column_width(self, metering):

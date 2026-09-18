@@ -51,6 +51,10 @@ EVENT_TOOL = "tool"
 # belongs to, so a run's agent identity survives on every llm and tool row underneath it.
 AGENT_ROOT_TYPES = ("application", "pipeline")
 
+# Marks a judge/eval-batch call (#6677): root_entity_* still names the real application/pipeline
+# being evaluated, so this must be excluded from agent-run counts on entity_type, not root type.
+ENTITY_TYPE_EVALUATION = "evaluation"
+
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
 # the query, so there is no user_email allow-list to maintain beyond the synthetic actor.
 SYSTEM_USER_EMAILS = ("system@centry.user",)
@@ -191,7 +195,7 @@ def agent_runs_expr():
     separate run and inflated the figure by whatever the agent's fan-out happened to be.
     """
     return func.count(distinct(case(
-        (UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES), UsageEvent.run_id),
+        (is_agent_row(), UsageEvent.run_id),
         else_=None,
     )))
 
@@ -204,10 +208,7 @@ def agent_error_runs_expr():
     """
     return func.count(distinct(case(
         (
-            and_(
-                UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES),
-                UsageEvent.is_error.is_(True),
-            ),
+            and_(is_agent_row(), UsageEvent.is_error.is_(True)),
             UsageEvent.run_id,
         ),
         else_=None,
@@ -215,8 +216,11 @@ def agent_error_runs_expr():
 
 
 def is_agent_row():
-    """ Helper """
-    return UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES)
+    """Agent/pipeline runs, excluding evaluation calls against them (#6677)."""
+    return and_(
+        UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES),
+        func.coalesce(UsageEvent.entity_type, "") != ENTITY_TYPE_EVALUATION,
+    )
 
 
 def active_users_expr():
