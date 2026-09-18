@@ -581,12 +581,31 @@ def select_from(columns, conditions):
     return select(*columns).where(*conditions)
 
 
-def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None):
-    """Distinct AI-active users per calendar bucket, optionally restricted to project roles.
+def list_available_roles(project_id):
+    """Role names defined on the project, for the filter dropdown — independent of any role
+    the caller has already selected.
+    """
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    try:
+        project_roles = auth.list_project_roles(project_id) or []
+    except:  # pylint: disable=W0702
+        log.exception("usage: role lookup failed for project %s", project_id)
+        return []
+    #
+    return sorted({r["name"] for r in project_roles if r.get("name")})
 
-    The one implementation behind both the REST endpoint and the RPC elitea_core calls to put
-    this number next to its own generic active-users count (#5110), so the two can never
-    disagree about a bucket's boundaries or its total.
+
+def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None):
+    """Distinct active vs AI-active users per calendar bucket, optionally restricted to project
+    roles.
+
+    Every usage_event row is a metered LLM or tool call (D1's comment on _kpis), so within this
+    table active_users and ai_active_users are the same set by construction — both come from
+    active_users_expr(), not two different filters. The one implementation behind both the REST
+    endpoint and the RPC elitea_core calls to put this number next to its own generic
+    active-users count (#5110), so the two can never disagree about a bucket's boundaries or its
+    total.
     """
     dt_from, dt_to = clamp_date_range(dt_from, dt_to)
     granularity = granularity if granularity in _BUCKET_EXPRS else GRANULARITY_DAY
@@ -600,9 +619,12 @@ def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRAN
         conditions.append(UsageEvent.user_id.in_(role_user_ids))
     #
     bucket = bucket_expr(granularity).label("bucket")
+    active_users = active_users_expr()
     rows = fetch_all(
-        select_from([bucket, active_users_expr().label("ai_active_users")], conditions)
-        .group_by(bucket).order_by(bucket)
+        select_from(
+            [bucket, active_users.label("active_users"), active_users.label("ai_active_users")],
+            conditions,
+        ).group_by(bucket).order_by(bucket)
     )
     #
     buckets = []
@@ -611,11 +633,13 @@ def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRAN
         buckets.append({
             "bucket_start": bucket_start.isoformat() if bucket_start else None,
             "bucket_end": bucket_end.isoformat() if bucket_end else None,
+            "active_users": int(row["active_users"] or 0),
             "ai_active_users": int(row["ai_active_users"] or 0),
         })
     #
     return {
         "granularity": granularity,
         "roles": wanted_roles,
+        "available_roles": list_available_roles(project_id),
         "buckets": buckets,
     }

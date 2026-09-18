@@ -95,10 +95,12 @@ if _API_AVAILABLE:
                             "example": {
                                 "granularity": "week",
                                 "roles": ["Viewer"],
+                                "available_roles": ["Admin", "Editor", "Viewer"],
                                 "buckets": [
                                     {
                                         "bucket_start": "2026-01-05T00:00:00+00:00",
                                         "bucket_end": "2026-01-12T00:00:00+00:00",
+                                        "active_users": 4,
                                         "ai_active_users": 4,
                                     },
                                 ],
