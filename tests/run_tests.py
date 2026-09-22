@@ -85,8 +85,18 @@ def install_pylon_stubs():
     openapi_registry.register_plugin = \
         lambda **kwargs: openapi_registry.registered.append(kwargs)
     tools.openapi_registry = openapi_registry
+    # Default for_module() is a happy-path admin+scheduling stub, so ready()/deinit() stay quiet
+    # unless a test explicitly monkeypatches `this` to inspect that behaviour.
+    def _for_module(name):
+        return types.SimpleNamespace(module=types.SimpleNamespace(
+            register_admin_task=lambda *a, **k: None,
+            unregister_admin_task=lambda *a, **k: None,
+            register_managed_schedules=lambda *a, **k: None,
+        ))
+    #
     tools.this = types.SimpleNamespace(
         descriptor=types.SimpleNamespace(config={}), module=None,
+        for_module=_for_module,
     )
     sys.modules.setdefault('tools', tools)
 

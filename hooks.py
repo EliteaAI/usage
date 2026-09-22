@@ -149,6 +149,17 @@ def _admit(ctx, mode, max_output_tokens, input_size_bytes):
     if ctx.project_id is None:
         return
     #
+    if not _write_path_healthy():
+        if mode == MODE_ENFORCE:
+            _deny(ctx, _unhealthy_response(code="usage_write_path_unavailable"))
+        else:
+            log.error(
+                "usage: write path is unhealthy; project %s call served unrecorded in observe "
+                "mode", ctx.project_id,
+            )
+        #
+        return
+    #
     ctx.estimate_micro = _estimate_micro(ctx, max_output_tokens, input_size_bytes)
     verdict = _acquire(ctx)
     #
@@ -178,6 +189,15 @@ def _admit(ctx, mode, max_output_tokens, input_size_bytes):
 def _deny(ctx, response):
     ctx.denied = True
     ctx.response = response
+
+
+def _write_path_healthy():
+    """False only on a confirmed missing partition; unreachable is reported healthy."""
+    try:
+        return bool(this.module.usage_write_path_healthy())
+    except:  # pylint: disable=W0702
+        log.exception("usage: cannot probe the write path")
+        return True
 
 
 def _acquire(ctx):
@@ -217,12 +237,13 @@ def _denial_response(scope):
     return body, 429, {"Content-Type": "application/json"}
 
 
-def _unhealthy_response():
-    body = json.dumps({
-        "error": {"message": GATE_UNHEALTHY_MESSAGE, "type": "usage_unavailable"},
-    }).encode("utf-8")
+def _unhealthy_response(code=None):
+    error = {"message": GATE_UNHEALTHY_MESSAGE, "type": "usage_unavailable"}
     #
-    return body, 503, {"Content-Type": "application/json"}
+    if code:
+        error["code"] = code
+    #
+    return json.dumps({"error": error}).encode("utf-8"), 503, {"Content-Type": "application/json"}
 
 
 def _notify_limit_reached(ctx, scope):

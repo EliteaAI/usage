@@ -142,11 +142,48 @@ class TestParentGuard:
         #
         statement, params = engine.connection.queries[0]
         #
-        assert "relkind = 'p'" in statement
+        assert "relkind = ANY(:relkinds)" in statement
         assert params["schema"] == "centry"
+        assert params["relkinds"] == ["p"]
 
     def test_partitions_are_created_once_the_parent_exists(self):
         engine = RecordingEngine(parent_exists=True)
         #
         assert self.instance(engine).usage_ensure_partitions(from_month=(2026, 9)) >= 1
         assert engine.connection.commits == 1
+
+
+class TestUsagePartitionExists:
+    def instance(self, engine):
+        instance = bind(
+            fake_module(config={"usage": {}}), mode_module.Method, partitions.Method,
+        )
+        partitions.db.engine = engine
+        #
+        return instance
+
+    def test_defaults_to_the_current_month(self):
+        engine = RecordingEngine(parent_exists=True)
+        self.instance(engine).usage_partition_exists()
+        #
+        statement, params = engine.connection.queries[0]
+        #
+        assert params["relname"] == partitions.partition_name(
+            date.today().year, date.today().month,
+        )
+        assert params["relkinds"] == ["r"]
+
+    def test_true_when_the_child_partition_is_present(self):
+        engine = RecordingEngine(parent_exists=True)
+        assert self.instance(engine).usage_partition_exists(2026, 9) is True
+
+    def test_false_when_the_child_partition_is_missing(self):
+        engine = RecordingEngine(parent_exists=False)
+        assert self.instance(engine).usage_partition_exists(2026, 9) is False
+
+    def test_december_rolls_into_the_next_year_name(self):
+        engine = RecordingEngine(parent_exists=True)
+        self.instance(engine).usage_partition_exists(2026, 12)
+        #
+        _, params = engine.connection.queries[0]
+        assert params["relname"] == "usage_event_202612"

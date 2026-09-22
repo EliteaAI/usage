@@ -44,6 +44,20 @@
         "maximum": 12
       }
     },
+    "usage_partition_check_ttl_seconds": {
+      "type": "integer",
+      "title": "Write-path health cache (seconds)",
+      "description": "How long the gate caches its usage_event partition health probe before checking again.",
+      "path": "usage.partition_check_ttl_seconds",
+      "section": "Usage",
+      "default": 60,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3600
+      }
+    },
     "usage_max_call_cost_usd": {
       "type": "number",
       "title": "Max reserved cost per call (USD)",

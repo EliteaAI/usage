@@ -18,10 +18,11 @@
 """ Write-behind drainer — queue to usage_event, usage_event to usage_counter """
 
 import json
+import time
 
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import CompileError
+from sqlalchemy.exc import CompileError, ProgrammingError
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
@@ -48,6 +49,21 @@ DEAD_QUEUE_TTL_SECONDS = 14 * 24 * 3600
 # Failures of the row itself, which no amount of retrying can fix. Anything else -- an
 # outage above all -- is transient and goes back on the queue untouched.
 PERMANENT_ERRORS = (CompileError, TypeError, ValueError)
+
+# Postgres undefined_table -- the month's usage_event child partition was never created
+UNDEFINED_TABLE = "42P01"
+
+# One repair attempt per window across ticks, so a sustained failure cannot turn into a DDL storm
+REPAIR_RATE_SECONDS = 60
+_last_repair_attempt = [0.0]
+
+
+def is_missing_partition(exc):
+    """True for SQLSTATE 42P01 specifically, not any ProgrammingError."""
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    #
+    return code == UNDEFINED_TABLE
 
 
 COUNTER_INDEX = ["project_id", "user_id", "period_kind", "period_start", "model_name"]
@@ -129,6 +145,31 @@ def counter_upsert(delta):
     )
 
 
+def heal_and_retry_drain(module, rows):
+    """The cron that provisions partitions is not running; try once, then give up loudly.
+
+    Never requeues -- that is the infinite loop a missing partition would otherwise cause.
+    """
+    module.usage_repair_partitions_once()
+    #
+    try:
+        with db.engine.connect() as connection:
+            drained = len(module.usage_insert_events(connection, rows))
+            connection.commit()
+        #
+        log.warning("usage: self-healed a missing usage_event partition; drain retried")
+        #
+        return drained, False
+    except:  # pylint: disable=W0702
+        log.error(
+            "usage: MISSING PARTITION -- retiring %s event(s); the partition cron is not "
+            "running", len(rows),
+        )
+        module.usage_retire_events(rows)
+        #
+        return 0, False
+
+
 class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
 
@@ -205,6 +246,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return None
 
     @web.method()
+    def usage_repair_partitions_once(self):
+        """Rate-limited self-heal: at most one usage_ensure_partitions() per repair window."""
+        now = time.monotonic()
+        #
+        if now - _last_repair_attempt[0] < REPAIR_RATE_SECONDS:
+            return False
+        #
+        _last_repair_attempt[0] = now
+        #
+        try:
+            return bool(self.usage_ensure_partitions())
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to self-heal a missing usage_event partition")
+            return False
+
+    @web.method()
     def usage_drain_one_batch(self):
         """One batch: queued facts to usage_event, then landed facts to usage_counter.
 
@@ -222,6 +279,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 connection.commit()
                 #
                 return drained, False
+        except ProgrammingError as exc:
+            if not is_missing_partition(exc):
+                log.exception("usage: drain tick failed")
+                self.usage_requeue_events(rows)
+                #
+                return 0, True
+            #
+            return heal_and_retry_drain(self, rows)
         except PERMANENT_ERRORS:
             # Retrying the batch would fail identically forever, so isolate the offending row
             # instead of starving everything queued behind it
@@ -251,6 +316,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 with db.engine.connect() as connection:
                     drained += len(self.usage_insert_events(connection, [row]))
                     connection.commit()
+            except ProgrammingError as exc:
+                if is_missing_partition(exc):
+                    landed, _ = heal_and_retry_drain(self, [row])
+                    drained += landed
+                else:
+                    log.exception("usage: a queued event could not be written")
+                    self.usage_requeue_events([row])
+                    stalled = True
             except PERMANENT_ERRORS:
                 log.exception("usage: retiring a queued event that cannot be inserted")
                 self.usage_retire_events([row])

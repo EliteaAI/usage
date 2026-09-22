@@ -61,6 +61,11 @@ KEY_TTL_SECONDS = 90 * 24 * 3600
 _limits_cache = None
 _primed = cachetools.TTLCache(maxsize=16384, ttl=3600)
 
+DEFAULT_PARTITION_CHECK_TTL = 60
+
+# One probe per (year, month) per window; a missing partition does not change within it
+_partition_health_cache = None
+
 # KEYS: 1=project hash, 2=member hash or '', 3=resv zset, 4=resv index
 # ARGV: 1=estimate, 2=project limit (-1 unlimited), 3=member limit, 4=deadline ms,
 #       5=index member, 6=reservation member json, 7=key ttl seconds
@@ -190,6 +195,16 @@ def limits_cache(ttl_seconds):
         _limits_cache = cachetools.TTLCache(maxsize=8192, ttl=max(1, int(ttl_seconds)))
     #
     return _limits_cache
+
+
+def partition_health_cache(ttl_seconds):
+    """Built on first use so the configured TTL applies instead of a value fixed at import."""
+    global _partition_health_cache  # pylint: disable=W0603
+    #
+    if _partition_health_cache is None:
+        _partition_health_cache = cachetools.TTLCache(maxsize=1, ttl=max(1, int(ttl_seconds)))
+    #
+    return _partition_health_cache
 
 
 def as_limit(value):
@@ -435,6 +450,33 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         with db.engine.connect() as connection:
             return int(connection.execute(statement).scalar() or 0)
+
+    @web.method()
+    def usage_write_path_healthy(self):
+        """False only when the current month's usage_event partition is confirmed missing.
+
+        A probe failure is reported healthy — a transient catalog read must not become a
+        platform-wide refusal.
+        """
+        ttl = self.usage_config().get("partition_check_ttl_seconds", DEFAULT_PARTITION_CHECK_TTL)
+        cache = partition_health_cache(ttl)
+        #
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cache_key = (now.year, now.month)
+        cached = cache.get(cache_key)
+        #
+        if cached is not None:
+            return cached
+        #
+        try:
+            healthy = bool(self.usage_partition_exists(now.year, now.month))
+        except:  # pylint: disable=W0702
+            log.exception("usage: failed to probe the write path; treating it as healthy")
+            healthy = True
+        #
+        cache[cache_key] = healthy
+        #
+        return healthy
 
     @web.method()
     def usage_reservation_id(self):
