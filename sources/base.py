@@ -92,7 +92,9 @@ def billable_input_tokens(reading):
         return None
     #
     if reading.cache_convention == CACHE_INCLUSIVE:
-        return max(0, reading.input_tokens - (reading.cache_read_tokens or 0))
+        # Inclusive prompts carry cache writes too (LiteLLM's Anthropic-over-chat relay).
+        cached = (reading.cache_read_tokens or 0) + (reading.cache_creation_tokens or 0)
+        return max(0, reading.input_tokens - cached)
     #
     return max(0, reading.input_tokens)
 

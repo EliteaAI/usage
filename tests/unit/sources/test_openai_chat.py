@@ -179,11 +179,13 @@ class TestLiteLLMBedrockNormalisation:
         assert reading.cache_read_tokens == 2719
         assert billable_input_tokens(reading) == 12
 
-    def test_a_cache_write_is_full_price_input_and_still_reported(self, registered_dialects):
-        # Creation tokens are inside prompt_tokens and are billed, at a premium the catalog
-        # applies — so they must be visible on the reading without reducing billable input.
+    def test_a_cache_write_is_subtracted_exactly_once(self, registered_dialects):
+        # prompt_tokens (2731) = text_tokens (12) + cache_creation_tokens (2719). The writes
+        # are priced separately at the cache-write rate, so leaving them in billable input
+        # charged them twice and made total_tokens ~2x LiteLLM's (issue: nested-agent
+        # Analytics totals diverging from LiteLLM on Claude-over-chat/completions).
         reading = read("openai.chat", "/v1/chat/completions", "application/json",
                        json_body(self.CACHE_WRITE))
         #
         assert reading.cache_creation_tokens == 2719
-        assert billable_input_tokens(reading) == 2731
+        assert billable_input_tokens(reading) == 12
