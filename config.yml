@@ -13,6 +13,9 @@ usage:
   # Months of usage_event partitions created ahead of the current one.
   partition_ahead_months: 1
   #
+  # How long the gate caches its write-path health probe before checking again.
+  partition_check_ttl_seconds: 60
+  #
   # Percent-of-limit at which the UI warns, per budget scope. Only in enforce mode.
   warning_thresholds:
     project_pct: 80

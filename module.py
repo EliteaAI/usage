@@ -24,9 +24,12 @@ from queue import Empty
 
 from pylon.core.tools import log, module  # pylint: disable=E0611,E0401
 
+from tools import this  # pylint: disable=E0401
+
 from .hooks import begin_llm_call, meter_llm_response
 from .interface import meter_llm_call, prepare_llm_call, request_usage_frame
 from .methods.mode import MODE_ENFORCE
+from .schedule_bindings import MANAGED_SCHEDULES
 from .sources import registry
 
 
@@ -56,6 +59,7 @@ class Module(module.ModuleModel):
         self._report_interfaces()
         self._register_cron()
         self._register_openapi()
+        self._register_admin_tasks()
         self.usage_start_workers()
 
     def reconfig(self):
@@ -66,6 +70,68 @@ class Module(module.ModuleModel):
     def deinit(self):
         """ De-initialize module """
         log.info("De-initializing usage plugin")
+        self._unregister_admin_tasks()
+        self._release_managed_schedules()
+
+    def get_managed_schedules(self):
+        """Bindings scheduling pulls when it rebuilds its managed-schedule registry."""
+        return dict(MANAGED_SCHEDULES)
+
+    def _push_managed_schedules(self):
+        try:
+            scheduling = this.for_module("scheduling").module
+            register = getattr(scheduling, "register_managed_schedules", None)
+            if register is None:
+                log.warning(
+                    "usage: scheduling plugin has no managed-schedule support; "
+                    "usage_ensure_partitions/usage_reconcile_counters stay editable in Admin Portal"
+                )
+                return
+            register("usage", self.get_managed_schedules())
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("usage: failed to push managed schedules: %s", exc)
+
+    def _release_managed_schedules(self):
+        try:
+            scheduling = this.for_module("scheduling").module
+            register = getattr(scheduling, "register_managed_schedules", None)
+            if register is not None:
+                register("usage", {})
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("usage: failed to release managed schedules: %s", exc)
+
+    @staticmethod
+    def _wrap_admin_task(method_cls, method_name, module_instance):
+        """A plain wrapper preserving the docstring the admin UI shows.
+
+        Pylon's own @web.method() binding loses it once unwrapped by the admin UI.
+        """
+        original = getattr(method_cls, method_name)
+
+        def wrapper(*args, **kwargs):
+            return original(module_instance, *args, **kwargs)
+
+        wrapper.__doc__ = original.__doc__
+        wrapper.__name__ = method_name
+        return wrapper
+
+    def _register_admin_tasks(self):
+        try:
+            from .methods.admin_tasks import Method  # pylint: disable=C0415
+            task = self._wrap_admin_task(Method, "usage_ensure_partitions_now_task", self)
+            this.for_module("admin").module.register_admin_task(
+                "usage_ensure_partitions_now_task", task,
+            )
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("usage: failed to register admin tasks: %s", exc)
+
+    def _unregister_admin_tasks(self):
+        try:
+            this.for_module("admin").module.unregister_admin_task(
+                "usage_ensure_partitions_now_task", self.usage_ensure_partitions_now_task,
+            )
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("usage: failed to unregister admin tasks: %s", exc)
 
     # What a runtime interface calls; the three below are for an interface that knows its own
     # provider and so drives the lower level directly (WAM), instead of having it resolved
@@ -105,6 +171,8 @@ class Module(module.ModuleModel):
             log.warning("usage: no scheduling plugin found; crons not registered")
         except Exception as exc:  # pylint: disable=W0703
             log.warning("usage: failed to register crons: %s", exc)
+        #
+        self._push_managed_schedules()
 
     def _register_openapi(self):
         """Without this the api/v2 @register_openapi decorators are invisible to swagger."""

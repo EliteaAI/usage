@@ -12,7 +12,7 @@ SIBLING_PLUGINS = pathlib.Path(__file__).resolve().parents[3]
 
 EXPECTED_PROPERTIES = {
     "usage_mode", "usage_retention_months",
-    "usage_partition_ahead_months",
+    "usage_partition_ahead_months", "usage_partition_check_ttl_seconds",
     "usage_max_call_cost_usd", "usage_default_output_tokens", "usage_reservation_ttl_seconds",
     "usage_queue_flush_batch_size", "usage_queue_flush_interval_seconds",
     "usage_queue_flush_max_batches_per_tick",
@@ -102,11 +102,22 @@ class TestConfigDefaults:
     def test_retention_is_declared(self, plugin_config):
         assert plugin_config["usage"]["retention_months"] == 13
 
+    def test_partition_check_ttl_seconds_is_declared(self, plugin_config):
+        """The gate's health-probe cache falls back to a hardcoded default without this."""
+        assert plugin_config["usage"]["partition_check_ttl_seconds"] > 0
+
 
 class TestAdminSchema:
 
     def test_targets_this_plugin(self, admin_schema):
         assert admin_schema["plugin"] == "usage"
+
+    def test_partition_check_ttl_seconds_is_exposed_and_hot_reloadable(self, admin_schema):
+        """Restarting a pylon to change a cache TTL would defeat the point of the cache."""
+        prop = admin_schema["properties"]["usage_partition_check_ttl_seconds"]
+        #
+        assert prop["path"] == "usage.partition_check_ttl_seconds"
+        assert prop["requires_restart"] is False
 
     def test_exposes_exactly_the_expected_properties(self, admin_schema):
         assert set(admin_schema["properties"]) == EXPECTED_PROPERTIES

@@ -4,7 +4,7 @@ import json
 import types
 
 import pytest
-from sqlalchemy.exc import CompileError
+from sqlalchemy.exc import CompileError, ProgrammingError
 
 from fixtures.fake_redis import RecordingRedis
 from fixtures.helpers import bind, fake_module
@@ -406,6 +406,109 @@ class TestPoisonRow:
         instance.usage_drain_batch()
         #
         assert client.lists[drainer.QUEUE_KEY] == [queued]
+
+
+class FakeOrig(Exception):
+    """Stands in for the DB-API exception ProgrammingError wraps -- carries the SQLSTATE."""
+
+    def __init__(self, sqlstate):
+        super().__init__(sqlstate)
+        self.sqlstate = sqlstate
+
+
+def missing_partition_error():
+    return ProgrammingError("INSERT ...", {}, FakeOrig("42P01"))
+
+
+def other_programming_error():
+    return ProgrammingError("INSERT ...", {}, FakeOrig("42601"))
+
+
+class TestMissingPartitionSelfHeal:
+    """SQLSTATE 42P01 means the cron that provisions partitions is not running -- self-heal
+    once, and never let a missing partition become an infinite requeue loop."""
+
+    def _instance(self, monkeypatch, rows=None):
+        instance = build(Landing())
+        instance.usage_dequeue_events = lambda: rows if rows is not None else [event("a")]
+        instance.retired = []
+        instance.requeued = []
+        instance.usage_retire_events = lambda r: instance.retired.extend(r)
+        instance.usage_requeue_events = lambda r: instance.requeued.extend(r)
+        monkeypatch.setattr(
+            drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
+        )
+        monkeypatch.setattr(drainer, "_last_repair_attempt", [0.0])
+        #
+        return instance
+
+    def test_repair_succeeds_and_the_retry_lands_the_batch(self, monkeypatch, recording_log):
+        instance = self._instance(monkeypatch)
+        attempts = []
+        #
+        def insert_events(_connection, rows):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise missing_partition_error()
+            return rows
+        #
+        instance.usage_insert_events = insert_events
+        instance.usage_ensure_partitions = lambda: 1
+        #
+        assert instance.usage_drain_one_batch() == (1, False)
+        assert len(attempts) == 2
+        assert instance.retired == []
+        assert instance.requeued == []
+        assert any("self-healed" in message for message in recording_log.messages("warning"))
+
+    def test_repair_runs_but_the_retry_still_fails_so_rows_are_retired(
+        self, monkeypatch, recording_log,
+    ):
+        # This is the regression pin: a persistently missing partition must retire, not requeue
+        instance = self._instance(monkeypatch)
+        instance.usage_insert_events = \
+            lambda *_a, **_k: (_ for _ in ()).throw(missing_partition_error())
+        instance.usage_ensure_partitions = lambda: 0
+        #
+        assert instance.usage_drain_one_batch() == (0, False)
+        assert [row["idempotency_key"] for row in instance.retired] == ["a"]
+        assert instance.requeued == []
+        assert any("MISSING PARTITION" in message for message in recording_log.messages("error"))
+
+    def test_a_different_sqlstate_still_takes_the_transient_requeue_path(self, monkeypatch):
+        # Pins that the classifier matches on 42P01 specifically, not on ProgrammingError broadly
+        instance = self._instance(monkeypatch)
+        instance.usage_insert_events = \
+            lambda *_a, **_k: (_ for _ in ()).throw(other_programming_error())
+        repaired = []
+        instance.usage_ensure_partitions = lambda: repaired.append(1) or 1
+        #
+        assert instance.usage_drain_one_batch() == (0, True)
+        assert repaired == []
+        assert [row["idempotency_key"] for row in instance.requeued] == ["a"]
+        assert instance.retired == []
+
+    def test_the_repair_attempt_is_rate_limited_across_ticks(self, monkeypatch):
+        instance = self._instance(monkeypatch)
+        instance.usage_insert_events = \
+            lambda *_a, **_k: (_ for _ in ()).throw(missing_partition_error())
+        attempts = []
+        instance.usage_ensure_partitions = lambda: attempts.append(1) or 0
+        #
+        instance.usage_drain_one_batch()
+        instance.usage_drain_one_batch()
+        #
+        assert len(attempts) == 1
+
+    def test_usage_drain_isolated_classifies_42p01_the_same_way(self, monkeypatch, recording_log):
+        instance = self._instance(monkeypatch)
+        instance.usage_insert_events = \
+            lambda *_a, **_k: (_ for _ in ()).throw(missing_partition_error())
+        instance.usage_ensure_partitions = lambda: 0
+        #
+        assert instance.usage_drain_isolated([event("a")]) == (0, False)
+        assert [row["idempotency_key"] for row in instance.retired] == ["a"]
+        assert any("MISSING PARTITION" in message for message in recording_log.messages("error"))
 
 
 def drain_instance(client, monkeypatch, batch=2, batches=4):

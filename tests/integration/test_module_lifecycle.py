@@ -4,7 +4,7 @@ import types
 
 from fixtures.helpers import bind
 from usage import module as module_module
-from usage.methods import interfaces, mode as mode_module, partitions
+from usage.methods import admin_tasks, interfaces, mode as mode_module, partitions
 from usage.sources import registry
 
 
@@ -29,7 +29,7 @@ def build(config=None, rpc=None, descriptors=None):
     )
     #
     instance = module_module.Module(context, descriptor)
-    bind(instance, mode_module.Method, partitions.Method, interfaces.Method)
+    bind(instance, mode_module.Method, partitions.Method, interfaces.Method, admin_tasks.Method)
     #
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
     instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
@@ -319,3 +319,83 @@ class TestDeinit:
         instance, _ = build()
         #
         instance.deinit()
+
+
+class TestManagedSchedulesAndAdminTask:
+    """#6699 Part 4/5: the break-glass task and the two protected crons."""
+
+    def stub_this(self, monkeypatch, admin=None, scheduling=None):
+        """Replaces module.this with a fake for_module() router, recording what it dispatches."""
+        calls = {"admin": [], "scheduling": []}
+        #
+        if admin is None:
+            admin = types.SimpleNamespace(
+                register_admin_task=lambda *a, **k: calls["admin"].append(("register", a, k)),
+                unregister_admin_task=lambda *a, **k: calls["admin"].append(("unregister", a, k)),
+            )
+        if scheduling is None:
+            scheduling = types.SimpleNamespace(
+                register_managed_schedules=lambda *a: calls["scheduling"].append(a),
+            )
+        targets = {"admin": admin, "scheduling": scheduling}
+        #
+        monkeypatch.setattr(module_module, "this", types.SimpleNamespace(
+            for_module=lambda name: types.SimpleNamespace(module=targets[name]),
+        ))
+        return calls
+
+    def test_get_managed_schedules_returns_the_two_entries(self):
+        instance, _ = build()
+        #
+        assert set(instance.get_managed_schedules()) == {
+            "usage_ensure_partitions", "usage_reconcile_counters",
+        }
+
+    def test_ready_registers_the_admin_task(self, monkeypatch):
+        instance, _ = build()
+        calls = self.stub_this(monkeypatch)
+        #
+        instance.ready()
+        #
+        registered = [call for call in calls["admin"] if call[0] == "register"]
+        assert registered
+        assert registered[0][1][0] == "usage_ensure_partitions_now_task"
+
+    def test_ready_pushes_the_managed_schedules(self, monkeypatch):
+        instance, _ = build()
+        calls = self.stub_this(monkeypatch)
+        #
+        instance.ready()
+        #
+        assert calls["scheduling"] == [("usage", instance.get_managed_schedules())]
+
+    def test_a_scheduler_without_managed_schedule_support_warns_not_raises(
+        self, monkeypatch, recording_log,
+    ):
+        """An older scheduling plugin is a valid deployment; the crons just stay editable."""
+        instance, _ = build()
+        self.stub_this(monkeypatch, scheduling=types.SimpleNamespace())
+        #
+        instance.ready()
+        #
+        assert any(
+            "stay editable" in message for message in recording_log.messages("warning")
+        )
+
+    def test_deinit_unregisters_the_admin_task(self, monkeypatch):
+        instance, _ = build()
+        calls = self.stub_this(monkeypatch)
+        #
+        instance.deinit()
+        #
+        unregistered = [call for call in calls["admin"] if call[0] == "unregister"]
+        assert unregistered
+        assert unregistered[0][1][0] == "usage_ensure_partitions_now_task"
+
+    def test_deinit_releases_the_managed_schedules(self, monkeypatch):
+        instance, _ = build()
+        calls = self.stub_this(monkeypatch)
+        #
+        instance.deinit()
+        #
+        assert calls["scheduling"] == [("usage", {})]

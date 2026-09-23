@@ -59,15 +59,20 @@ def month_range(from_month, to_month):
     return result
 
 
-def parent_exists(connection, schema):
-    """True when the partitioned parent is present."""
+def relation_exists(connection, schema, relname, relkinds=("r", "p")):
+    """True when a relation with the given name/kind(s) is present in schema."""
     return connection.execute(
         text(
             "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = :schema AND c.relname = 'usage_event' AND c.relkind = 'p'"
+            "WHERE n.nspname = :schema AND c.relname = :relname AND c.relkind = ANY(:relkinds)"
         ),
-        {"schema": schema},
+        {"schema": schema, "relname": relname, "relkinds": list(relkinds)},
     ).first() is not None
+
+
+def parent_exists(connection, schema):
+    """True when the partitioned parent is present."""
+    return relation_exists(connection, schema, "usage_event", relkinds=("p",))
 
 
 def partition_statements(schema, from_month, to_month):
@@ -88,6 +93,18 @@ def partition_statements(schema, from_month, to_month):
 
 class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
+
+    @web.method()
+    def usage_partition_exists(self, year=None, month=None):
+        """True when this month's usage_event child partition is present."""
+        if year is None or month is None:
+            today = date.today()
+            year, month = today.year, today.month
+        #
+        with db.engine.connect() as connection:
+            return relation_exists(
+                connection, c.POSTGRES_SCHEMA, partition_name(year, month), relkinds=("r",),
+            )
 
     @web.method()
     def usage_ensure_partitions(self, from_month=None, to_month=None):

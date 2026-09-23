@@ -384,3 +384,78 @@ class TestDoorCheck:
         assert instance.usage_gate_check(42, 7, MOMENT) == {
             "closed": False, "scope": None, "healthy": False,
         }
+
+
+class TestPartitionHealth:
+    """usage_write_path_healthy(): the TTL-cached probe the fail-closed gate relies on."""
+
+    @pytest.fixture(autouse=True)
+    def clean_partition_cache(self):
+        gate._partition_health_cache = None  # pylint: disable=W0212
+        yield
+        gate._partition_health_cache = None  # pylint: disable=W0212
+
+    def instance(self, ttl=None, exists=True):
+        calls = []
+
+        def probe(year=None, month=None):
+            calls.append((year, month))
+            #
+            if isinstance(exists, Exception):
+                raise exists
+            #
+            return exists
+
+        config = {"partition_check_ttl_seconds": ttl} if ttl is not None else {}
+        instance = fake_module(
+            config={"usage": {}},
+            usage_config=lambda: config,
+            usage_partition_exists=probe,
+        )
+        bind(instance, gate.Method)
+        instance.usage_config = lambda: config
+        instance.usage_partition_exists = probe
+        #
+        return instance, calls
+
+    def test_repeated_calls_within_the_ttl_probe_once(self):
+        instance, calls = self.instance()
+        #
+        for _ in range(5):
+            assert instance.usage_write_path_healthy() is True
+        #
+        assert len(calls) == 1
+
+    def test_a_cleared_cache_probes_again(self):
+        instance, calls = self.instance()
+        #
+        instance.usage_write_path_healthy()
+        gate._partition_health_cache.clear()  # pylint: disable=W0212
+        instance.usage_write_path_healthy()
+        #
+        assert len(calls) == 2
+
+    def test_a_missing_partition_is_reported_unhealthy(self):
+        instance, _ = self.instance(exists=False)
+        #
+        assert instance.usage_write_path_healthy() is False
+
+    def test_a_probe_failure_is_reported_healthy(self, recording_log):
+        instance, _ = self.instance(exists=RuntimeError("catalog read failed"))
+        #
+        assert instance.usage_write_path_healthy() is True
+        assert recording_log.messages("exception")
+
+    def test_the_ttl_comes_from_config_not_the_hardcoded_default(self):
+        instance, _ = self.instance(ttl=999)
+        #
+        instance.usage_write_path_healthy()
+        #
+        assert gate._partition_health_cache.ttl == 999  # pylint: disable=W0212
+
+    def test_missing_config_falls_back_to_the_default_ttl(self):
+        instance, _ = self.instance()
+        #
+        instance.usage_write_path_healthy()
+        #
+        assert gate._partition_health_cache.ttl == gate.DEFAULT_PARTITION_CHECK_TTL  # pylint: disable=W0212
