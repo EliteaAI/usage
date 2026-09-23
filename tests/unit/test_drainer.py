@@ -424,6 +424,25 @@ def other_programming_error():
     return ProgrammingError("INSERT ...", {}, FakeOrig("42601"))
 
 
+class FakeMonotonic:
+    """A controllable stand-in for time.monotonic().
+
+    Its real origin is unspecified per-process, so resetting _last_repair_attempt to 0.0 and
+    trusting "now" to already be past REPAIR_RATE_SECONDS is not safe on every runner -- a
+    container whose clock hasn't ticked past 60s yet would rate-limit away the very first
+    repair. Starting the fake far from zero makes that comparison deterministic instead.
+    """
+
+    def __init__(self, start=1_000_000.0):
+        self.value = start
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
 class TestMissingPartitionSelfHeal:
     """SQLSTATE 42P01 means the cron that provisions partitions is not running -- self-heal
     once, and never let a missing partition become an infinite requeue loop."""
@@ -438,6 +457,8 @@ class TestMissingPartitionSelfHeal:
         monkeypatch.setattr(
             drainer.db, "engine", types.SimpleNamespace(connect=Landing), raising=False,
         )
+        instance.clock = FakeMonotonic()
+        monkeypatch.setattr(drainer.time, "monotonic", instance.clock)
         monkeypatch.setattr(drainer, "_last_repair_attempt", [0.0])
         #
         return instance
@@ -496,6 +517,7 @@ class TestMissingPartitionSelfHeal:
         instance.usage_ensure_partitions = lambda: attempts.append(1) or 0
         #
         instance.usage_drain_one_batch()
+        instance.clock.advance(1)  # a second tick, still well inside the repair window
         instance.usage_drain_one_batch()
         #
         assert len(attempts) == 1
