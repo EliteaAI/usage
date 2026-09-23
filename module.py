@@ -120,7 +120,7 @@ class Module(module.ModuleModel):
             from .methods.admin_tasks import Method  # pylint: disable=C0415
             task = self._wrap_admin_task(Method, "usage_ensure_partitions_now_task", self)
             this.for_module("admin").module.register_admin_task(
-                "usage_ensure_partitions_now_task", task, group="R-2.0.7",
+                "usage_ensure_partitions_now_task", task,
             )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to register admin tasks: %s", exc)
