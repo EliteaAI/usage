@@ -52,8 +52,8 @@ class OpenAIChatDialect(ScannerDialect):
             self._reading, "cache_read_tokens",
             first_int(value.get("prompt_tokens_details"), "cached_tokens"),
         )
-        # LiteLLM's Bedrock/Anthropic normalisation reports cache writes here; priced at a
-        # premium, and not subtracted from input (they are full-price prompt tokens).
+        # LiteLLM's Bedrock/Anthropic normalisation reports cache writes here, already inside
+        # prompt_tokens; billable_input_tokens subtracts them so they are priced once.
         set_if_zero(
             self._reading, "cache_creation_tokens",
             first_int(value.get("prompt_tokens_details"), "cache_creation_tokens"),

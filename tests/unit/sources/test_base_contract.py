@@ -83,6 +83,16 @@ class TestBillableInputTokens:
         #
         assert base.billable_input_tokens(reading) == 128
 
+    def test_inclusive_subtracts_cache_writes_too(self):
+        # LiteLLM relaying Anthropic over chat/completions folds cache writes into
+        # prompt_tokens; they are priced separately, so must leave billable input.
+        reading = base.UsageReading(
+            input_tokens=6794, cache_creation_tokens=6761,
+            cache_convention=base.CACHE_INCLUSIVE,
+        )
+        #
+        assert base.billable_input_tokens(reading) == 33
+
     def test_exclusive_does_not_subtract_cached(self):
         # Anthropic/Bedrock report cached tokens on top of input. Subtracting here would
         # under-bill by the whole cache-read volume — often most of the prompt.
