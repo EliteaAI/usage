@@ -312,6 +312,42 @@ def cost_split_usd(row):
     return {key: cost_usd(row.get(f"{key}_micro")) for key in COST_SPLIT_COLUMNS}
 
 
+SUB_MICRO_KEYS = ("total_cost", "input_cost", "output_cost", "cache_read_cost", "cache_creation_cost")
+
+
+def _sub_micro_columns():
+    """Cost key -> (micro column, token bucket it prices); None means every bucket."""
+    return {
+        "total_cost": (UsageEvent.cost_micro_usd, None),
+        "input_cost": (UsageEvent.input_cost_micro_usd, UsageEvent.billable_input_tokens),
+        "output_cost": (UsageEvent.output_cost_micro_usd, UsageEvent.output_tokens),
+        "cache_read_cost": (UsageEvent.cache_read_cost_micro_usd, UsageEvent.cache_read_tokens),
+        "cache_creation_cost": (UsageEvent.cache_creation_cost_micro_usd, UsageEvent.cache_creation_tokens),
+    }
+
+
+def below_resolution_sums():
+    """Per cost key: priced calls with tokens whose cost was under 1 micro-USD, so stored as 0."""
+    priced = func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced"
+    return [
+        func.sum(case((and_(
+            priced,
+            func.coalesce(cost, 0) == 0,
+            (total_tokens_expr() if tokens is None else func.coalesce(tokens, 0)) > 0,
+        ), 1), else_=0)).label(f"{key}_sub_micro")
+        for key, (cost, tokens) in _sub_micro_columns().items()
+    ]
+
+
+def below_resolution(row, prefix=""):
+    """{response_key: True} for costs that are non-zero but too small to store."""
+    return {
+        (key if key == "total_cost" else f"{prefix}{key}"): True
+        for key in SUB_MICRO_KEYS
+        if int(row.get(f"{key}_sub_micro") or 0) > 0
+    }
+
+
 def rounded(value, digits=1):
     """ Helper """
     return round(float(value), digits) if value else 0

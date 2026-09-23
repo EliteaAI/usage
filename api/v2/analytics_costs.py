@@ -204,7 +204,7 @@ if _API_AVAILABLE:
                 ).label("total_cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.count().label("total_calls"),
-            ] + an.cost_split_sums()
+            ] + an.cost_split_sums() + an.below_resolution_sums()
 
             # An ungrouped aggregate always returns exactly one row; the fallback is belt-and-braces.
             row = an.fetch_one(select(*columns).where(*conditions)) or {}
@@ -224,6 +224,7 @@ if _API_AVAILABLE:
                     f"total_{key}": value
                     for key, value in an.cost_split_usd(row).items()
                 },
+                "below_resolution": an.below_resolution(row, prefix="total_"),
             }
 
         @staticmethod
@@ -238,7 +239,7 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + an.cost_split_sums()
+            ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
@@ -261,6 +262,7 @@ if _API_AVAILABLE:
                     "total_tokens": int(r["total_tokens"] or 0),
                     "total_cost": an.cost_usd(r["cost_micro"]),
                     **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
                 }
                 for r in rows
             ]
@@ -291,7 +293,7 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + an.cost_split_sums()
+            ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(
                 *conditions, an.is_agent_row(), UsageEvent.root_entity_id.isnot(None),
@@ -307,6 +309,7 @@ if _API_AVAILABLE:
                     "entity_id": r["root_entity_id"],
                     "total_cost": an.cost_usd(r["cost_micro"]),
                     **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
@@ -337,7 +340,7 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + an.cost_split_sums()
+            ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(*conditions).group_by(
                 UsageEvent.user_id,
@@ -356,6 +359,7 @@ if _API_AVAILABLE:
                     "user_email": emails.get(r["user_id"]),
                     "total_cost": an.cost_usd(r["cost_micro"]),
                     **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
@@ -378,7 +382,7 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
-            ] + an.cost_split_sums()
+            ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(*conditions).group_by(day).order_by(day)
 
@@ -389,6 +393,7 @@ if _API_AVAILABLE:
                     "date": r["day"].isoformat() if r["day"] else None,
                     "total_cost": an.cost_usd(r["cost_micro"]),
                     **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
