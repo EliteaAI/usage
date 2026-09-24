@@ -78,11 +78,11 @@ class TestInputTokens:
         assert estimate.input_tokens_of(value) == 0
 
 
-class TestEstimateMicro:
-    def test_prices_the_call_in_micro_usd(self):
+class TestEstimateNano:
+    def test_prices_the_call_in_nano_usd(self):
         instance, calls = build(cost=0.25)
         #
-        assert instance.usage_estimate_micro("gpt-5", 1000, 400) == 250_000
+        assert instance.usage_estimate_nano("gpt-5", 1000, 400) == 250_000_000
         assert calls == [{
             "model_name": "gpt-5", "input_tokens": 100, "output_tokens": 1000,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
@@ -93,29 +93,29 @@ class TestEstimateMicro:
         # clamp one absurd max_tokens would make the bound meaningless
         instance, _ = build(cost=50.0, reservation={"max_call_cost_usd": 2.0})
         #
-        assert instance.usage_estimate_micro("gpt-5", 10 ** 7, 0) == 2_000_000
+        assert instance.usage_estimate_nano("gpt-5", 10 ** 7, 0) == 2_000_000_000
 
     def test_an_unpriced_model_reserves_nothing(self):
         instance, _ = build(cost=None)
         #
-        assert instance.usage_estimate_micro("mystery", 1000, 400) == 0
+        assert instance.usage_estimate_nano("mystery", 1000, 400) == 0
 
     def test_a_missing_model_name_never_reaches_the_catalog(self):
         instance, calls = build(cost=1.0)
         #
-        assert instance.usage_estimate_micro(None, 1000, 400) == 0
+        assert instance.usage_estimate_nano(None, 1000, 400) == 0
         assert calls == []
 
     def test_an_unreachable_catalog_reserves_nothing(self):
         instance, _ = build(raises=True)
         #
-        assert instance.usage_estimate_micro("gpt-5", 1000, 400) == 0
+        assert instance.usage_estimate_nano("gpt-5", 1000, 400) == 0
 
     def test_the_default_ceiling_applies_when_unconfigured(self):
         instance, _ = build(cost=99.0)
         #
-        expected = int(estimate.DEFAULT_MAX_CALL_COST_USD * 1_000_000)
-        assert instance.usage_estimate_micro("gpt-5", 1000, 0) == expected
+        expected = int(estimate.DEFAULT_MAX_CALL_COST_USD * estimate.NANO)
+        assert instance.usage_estimate_nano("gpt-5", 1000, 0) == expected
 
     def test_reports_the_configured_default_output_ceiling(self):
         instance, _ = build(reservation={"default_output_tokens": 128})

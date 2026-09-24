@@ -88,7 +88,7 @@ class TestWarningForScope:
 
 
 class TestResolveWarning:
-    LIMITS = {"enabled": True, "project_limit_micro": 1000, "member_limit_micro": 1000}
+    LIMITS = {"enabled": True, "project_limit_nano": 1000, "member_limit_nano": 1000}
 
     def test_observe_mode_never_warns(self):
         instance = module_with(
@@ -147,7 +147,7 @@ class TestResolveWarning:
         monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
         instance = module_with(
             {"mode": "enforce"},
-            {"enabled": True, "project_limit_micro": None},
+            {"enabled": True, "project_limit_nano": None},
             {"P": {"counter": "999999"}},
         )
         #
@@ -166,7 +166,7 @@ class TestCaching:
         monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
         instance = module_with(
             {"mode": "enforce"},
-            {"enabled": True, "project_limit_micro": 1000},
+            {"enabled": True, "project_limit_nano": 1000},
             {"P": {"counter": "850"}},
         )
         calls = []
@@ -184,7 +184,7 @@ class TestCaching:
         monkeypatch.setattr(warning_module, "member_hash_key", lambda pid, uid, moment: "M")
         instance = module_with(
             {"mode": "enforce"},
-            {"enabled": True, "project_limit_micro": 1000, "member_limit_micro": 1000},
+            {"enabled": True, "project_limit_nano": 1000, "member_limit_nano": 1000},
             {"P": {"counter": "100"}, "M": {"counter": "850"}},
         )
         #

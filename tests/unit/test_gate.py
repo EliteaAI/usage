@@ -45,7 +45,7 @@ def build(limits, redis=None, persisted=0):
 
 def enabled(project=None, member=None):
     return {
-        "project_limit_micro": project, "member_limit_micro": member,
+        "project_limit_nano": project, "member_limit_nano": member,
         "enabled": True, "is_personal_project": False,
     }
 
@@ -307,6 +307,49 @@ class TestKeys:
         assert gate.as_limit(None) == gate.UNLIMITED
         assert gate.as_limit(0) == 0
         assert gate.as_limit(-5) == 0
+
+    def test_a_limit_past_double_precision_is_unlimited(self):
+        # Lua compares in doubles; past 2**53 nano (~$9M) the comparison would be inexact
+        assert gate.as_limit(2 ** 53) == gate.UNLIMITED
+        assert gate.as_limit(10 ** 18) == gate.UNLIMITED
+        assert gate.as_limit(2 ** 53 - 1) == 2 ** 53 - 1
+
+
+class TestNanoLimits:
+    """Limits arrive in dollars from elitea_core; the gate converts them to nano-USD itself."""
+
+    def test_dollars_convert_to_nano(self):
+        assert gate.to_nano(10) == 10 * gate.NANO
+        assert gate.to_nano(0.000001) == 1000
+        assert gate.to_nano("2.5") == 2_500_000_000
+
+    def test_unlimited_stays_none_rather_than_zero(self):
+        assert gate.to_nano(None) is None
+
+    def test_the_ladder_answer_gains_nano_keys_derived_from_dollars(self, monkeypatch):
+        # The *_limit_micro keys elitea_core still sends must not set the gate's scale
+        answer = {
+            "enabled": True, "project_limit": 5.0, "member_limit": None,
+            "project_limit_micro": 5_000_000, "member_limit_micro": None,
+        }
+
+        class Rpc:
+            def timeout(self, _seconds):
+                return self
+
+            def elitea_core_get_effective_budget_limits(self, project_id, user_id):  # pylint: disable=W0613
+                return answer
+
+        monkeypatch.setattr(gate.context, "rpc_manager", Rpc(), raising=False)
+        instance = fake_module(config={"usage": {}})
+        bind(instance, gate.Method)
+        instance.usage_config = lambda: {}
+        #
+        limits = instance.usage_gate_limits(42, 7)
+        #
+        assert limits["project_limit_nano"] == 5 * gate.NANO
+        assert limits["member_limit_nano"] is None
+        assert "project_limit_nano" not in answer  # the RPC's own dict is not mutated
 
 
 class TestDoorCheck:

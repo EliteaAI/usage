@@ -201,7 +201,7 @@ if _API_AVAILABLE:
             # Cost and its split are both meter-time columns on the row: no price-catalog join
             # anywhere here, so a later price edit cannot restate what these runs cost. Also
             # not error-filtered, unlike the audit_events port (D1).
-            cost_micro_col = func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro")
+            cost_nano_col = func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano")
             llm_calls_col = an.llm_calls_expr().label("llm_calls")
 
             columns = [
@@ -210,9 +210,9 @@ if _API_AVAILABLE:
                 events_col, users_col, avg_dur_col, errors_col,
                 input_tokens_col, output_tokens_col,
                 cache_read_tokens_col, cache_creation_tokens_col,
-                total_tokens_col, cost_micro_col, llm_calls_col,
+                total_tokens_col, cost_nano_col, llm_calls_col,
             ] + [
-                func.sum(func.coalesce(column, 0)).label(f"{key}_micro")
+                func.sum(func.coalesce(column, 0)).label(f"{key}_nano")
                 for key, column in an.COST_SPLIT_COLUMNS.items()
             ]
 
@@ -230,7 +230,7 @@ if _API_AVAILABLE:
                 "errors": errors_col,
                 "entity_name": entity_name_expr,
                 "total_tokens": total_tokens_col,
-                "llm_cost": cost_micro_col,
+                "llm_cost": cost_nano_col,
             }
             order_fn = desc if sort_order == "desc" else asc
             rows = an.fetch_all(
@@ -250,8 +250,8 @@ if _API_AVAILABLE:
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
                     "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
                     "total_tokens": int(r["total_tokens"] or 0),
-                    "llm_cost": an.cost_usd(r["cost_micro"]),
-                    **{key: an.cost_usd(r[f"{key}_micro"]) for key in an.COST_SPLIT_COLUMNS},
+                    "llm_cost": an.cost_usd(r["cost_nano"]),
+                    **{key: an.cost_usd(r[f"{key}_nano"]) for key in an.COST_SPLIT_COLUMNS},
                     # int() on both operands: sum() over bigint columns comes back as Decimal,
                     # and a single Decimal anywhere in the payload makes the whole response
                     # unserializable — the endpoint 500s instead of rendering any row.

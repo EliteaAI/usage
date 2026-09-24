@@ -70,8 +70,8 @@ def build(monkeypatch):
     return make
 
 
-# (input, output, cost_micro, calls) as the counter select projects it
-COUNTER_ROW = (120, 40, 1_500_000, 2)
+# (input, output, cost_nano, calls) as the counter select projects it
+COUNTER_ROW = (120, 40, 1_500_000_000, 2)
 
 
 class TestProjectSpend:
@@ -137,14 +137,14 @@ class TestUserSpend:
 
 class TestMapReads:
     def test_every_requested_project_is_keyed_even_without_data(self, build):
-        instance, _ = build(Engine([(1, 2_000_000)]))
+        instance, _ = build(Engine([(1, 2_000_000_000)]))
         #
         spend_map = instance.usage_read_projects_spend(project_ids=[1, 2], period=PERIOD)
         #
         assert spend_map == {1: 2.0, 2: 0.0}
 
     def test_every_requested_member_is_keyed_even_without_data(self, build):
-        instance, _ = build(Engine([(4, 500_000)]))
+        instance, _ = build(Engine([(4, 500_000_000)]))
         #
         spend_map = instance.usage_read_users_spend(
             project_id=7, user_ids=[4, 5], period=PERIOD,
@@ -162,7 +162,7 @@ class TestMapReads:
         # not be handed back looking like a complete answer
         class HalfBroken(Engine):
             def __init__(self):
-                super().__init__([(1, 2_000_000)])
+                super().__init__([(1, 2_000_000_000)])
                 self.seen = 0
                 outer = self
 
@@ -170,7 +170,7 @@ class TestMapReads:
                     outer.seen += 1
                     if outer.seen > 1:
                         raise RuntimeError("connection reset")
-                    return Result([(1, 2_000_000)])
+                    return Result([(1, 2_000_000_000)])
 
                 self.connection.execute = execute
         #
@@ -193,8 +193,8 @@ class TestMapReads:
 
 class TestMemberSpendListing:
     def test_the_sentinel_row_becomes_the_project_total(self, build):
-        # (user_id, cost_micro, call_count); user_id 0 is the project aggregate
-        instance, _ = build(Engine([(0, 3_000_000, 10), (42, 1_000_000, 4)]))
+        # (user_id, cost_nano, call_count); user_id 0 is the project aggregate
+        instance, _ = build(Engine([(0, 3_000_000_000, 10), (42, 1_000_000_000, 4)]))
         #
         result = instance.usage_read_member_spend_listing(project_id=7, period=PERIOD)
         #
@@ -219,9 +219,9 @@ class TestMemberSpendListing:
 # totals carry their own total_tokens column: it is total_tokens_expr, not input+output, so
 # the Usage page and Analytics report one number for the same rows
 DETAIL_RESULTS = (
-    [(120, 40, 5, 7, 1_500_000, 2, 172)],
-    [("gpt-4o", 1_500_000, 172, 2)],
-    [(DAY, 1_500_000, 172, 2)],
+    [(120, 40, 5, 7, 1_500_000_000, 2, 172)],
+    [("gpt-4o", 1_500_000_000, 172, 2)],
+    [(DAY, 1_500_000_000, 172, 2)],
 )
 
 

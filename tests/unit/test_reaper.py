@@ -26,7 +26,7 @@ def build():
     """A Module with the gate and the reaper bound over one fake Redis."""
     client = RecordingRedis()
     limits = {
-        "project_limit_micro": 100 * MILLION, "member_limit_micro": None,
+        "project_limit_nano": 100 * MILLION, "member_limit_nano": None,
         "enabled": True, "is_personal_project": False,
     }
     instance = fake_module(config={"usage": {}})

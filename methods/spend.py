@@ -30,7 +30,7 @@ from tools import db  # pylint: disable=E0401
 
 from ._analytics import total_tokens_expr
 from ._counters import (
-    ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
+    ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, NANO, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
 )
 from .reconcile import current_period, period_bounds
 from ..models.usage_counter import UsageCounter
@@ -39,8 +39,6 @@ from ..rpc.facade import empty_spend, empty_usage_detail
 
 # Defensive: callers page far below this, but an IN () list must not grow unbounded
 ID_CHUNK = 1000
-
-MICRO = 1_000_000
 
 
 def _resolve(period):
@@ -51,9 +49,9 @@ def _resolve(period):
     return period, start, end, period_start(start, PERIOD_MONTH)
 
 
-def _dollars(micro):
-    """Integer micro-dollars to float, divided once on the final sum."""
-    return float(int(micro or 0)) / MICRO
+def _dollars(nano):
+    """Integer nano-dollars to float, divided once on the final sum."""
+    return int(nano or 0) / NANO
 
 
 def _chunks(ids):
@@ -66,7 +64,7 @@ def _counter_measures(period_day, *where):
     """Summed counter measures for whatever slice the caller pins down."""
     return select(
         func.sum(UsageCounter.input_tokens), func.sum(UsageCounter.output_tokens),
-        func.sum(UsageCounter.cost_micro_usd), func.sum(UsageCounter.call_count),
+        func.sum(UsageCounter.cost_nano_usd), func.sum(UsageCounter.call_count),
     ).where(
         UsageCounter.period_kind == PERIOD_MONTH,
         UsageCounter.period_start == period_day,
@@ -167,7 +165,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             with db.engine.connect() as connection:
                 for chunk in chunks:
                     statement = select(
-                        UsageCounter.project_id, func.sum(UsageCounter.cost_micro_usd),
+                        UsageCounter.project_id, func.sum(UsageCounter.cost_nano_usd),
                     ).where(
                         UsageCounter.period_kind == PERIOD_MONTH,
                         UsageCounter.period_start == period_day,
@@ -202,7 +200,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             with db.engine.connect() as connection:
                 for chunk in chunks:
                     statement = select(
-                        UsageCounter.user_id, func.sum(UsageCounter.cost_micro_usd),
+                        UsageCounter.user_id, func.sum(UsageCounter.cost_nano_usd),
                     ).where(
                         UsageCounter.period_kind == PERIOD_MONTH,
                         UsageCounter.period_start == period_day,
@@ -225,7 +223,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         _period, _start, _end, period_day = _resolve(period)
         #
         statement = select(
-            UsageCounter.user_id, UsageCounter.cost_micro_usd, UsageCounter.call_count,
+            UsageCounter.user_id, UsageCounter.cost_nano_usd, UsageCounter.call_count,
         ).where(
             UsageCounter.period_kind == PERIOD_MONTH,
             UsageCounter.period_start == period_day,
@@ -283,24 +281,24 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         totals = select(
             func.sum(UsageEvent.input_tokens), func.sum(UsageEvent.output_tokens),
             func.sum(UsageEvent.cache_read_tokens), func.sum(UsageEvent.cache_creation_tokens),
-            func.sum(UsageEvent.cost_micro_usd), func.count(),
+            func.sum(UsageEvent.cost_nano_usd), func.count(),
             func.sum(total_tokens_expr()),
         ).where(*where)
         #
         # The table ranks rows and draws share bars in payload order, so the sort is the server's
         by_model = select(
             UsageEvent.model_name,
-            func.sum(UsageEvent.cost_micro_usd),
+            func.sum(UsageEvent.cost_nano_usd),
             func.sum(total_tokens_expr()),
             func.count(),
         ).where(*where).group_by(UsageEvent.model_name).order_by(
-            func.sum(UsageEvent.cost_micro_usd).desc(), UsageEvent.model_name,
+            func.sum(UsageEvent.cost_nano_usd).desc(), UsageEvent.model_name,
         )
         #
         day = func.date_trunc("day", UsageEvent.ts)
         # tokens and calls too: the chart's own "has data" check reads api_requests
         by_day = select(
-            day, func.sum(UsageEvent.cost_micro_usd),
+            day, func.sum(UsageEvent.cost_nano_usd),
             func.sum(total_tokens_expr()),
             func.count(),
         ).where(*where).group_by(day).order_by(day)

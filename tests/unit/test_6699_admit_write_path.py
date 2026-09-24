@@ -38,14 +38,14 @@ class Recorder:
     def usage_enqueue_event(self, row):  # pylint: disable=W0613
         return False
 
-    def usage_estimate_micro(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
+    def usage_estimate_nano(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
         return 0
 
-    def usage_gate_acquire(self, project_id, user_id, estimate_micro, moment):  # pylint: disable=W0613
+    def usage_gate_acquire(self, project_id, user_id, estimate_nano, moment):  # pylint: disable=W0613
         self.acquire_calls += 1
         return {"allowed": True, "scope": None, "reservation": None, "healthy": True}
 
-    def usage_gate_settle(self, reservation, actual_micro):  # pylint: disable=W0613
+    def usage_gate_settle(self, reservation, actual_nano):  # pylint: disable=W0613
         return True
 
     def usage_resolve_project_id(self, user_id, user_name, headers):  # pylint: disable=W0613

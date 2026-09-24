@@ -74,21 +74,22 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
         BigInteger, nullable=False, server_default="0",
     )
 
-    # Integer micro-dollars, never float: money must not accumulate rounding error
-    cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    # The four components cost_micro_usd is the sum of, priced at meter time and never
+    # Integer nano-dollars, never float: money must not accumulate rounding error, and micro
+    # rounded cheap embedding calls to 0
+    cost_nano_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # The four components cost_nano_usd is the sum of, priced at meter time and never
     # recomputed. Editing a model's price in the costs catalog must change what the next call
     # costs, not what a call already made cost — so the split is stored, not derived on read.
-    input_cost_micro_usd: Mapped[int] = mapped_column(
+    input_cost_nano_usd: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0",
     )
-    output_cost_micro_usd: Mapped[int] = mapped_column(
+    output_cost_nano_usd: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0",
     )
-    cache_read_cost_micro_usd: Mapped[int] = mapped_column(
+    cache_read_cost_nano_usd: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0",
     )
-    cache_creation_cost_micro_usd: Mapped[int] = mapped_column(
+    cache_creation_cost_nano_usd: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0",
     )
     # Wide enough for the costs catalog's own tags, e.g. 'estimated:costs-catalog'

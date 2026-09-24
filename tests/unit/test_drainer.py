@@ -20,7 +20,7 @@ def event(key, project_id=42, user_id=7, cost=1000, event_type="llm"):
     """One usage_event row as the queue carries it."""
     row = {
         "idempotency_key": key, "ts": TS, "project_id": project_id, "user_id": user_id,
-        "input_tokens": 10, "output_tokens": 20, "cost_micro_usd": cost,
+        "input_tokens": 10, "output_tokens": 20, "cost_nano_usd": cost,
         "event_type": event_type,
     }
     #
@@ -131,7 +131,7 @@ class TestCounterDeltas:
         ] == [dict(wanted[0]), {**wanted[0], **{
             column: value for column, value in wanted[1].items() if column in wanted[0]
         }}]
-        assert all(delta["cost_micro_usd"] == 1000 for delta in deltas)
+        assert all(delta["cost_nano_usd"] == 1000 for delta in deltas)
 
     def test_an_event_without_a_user_writes_the_project_row_only(self):
         deltas = drainer.counter_deltas([event("a", user_id=None)])
@@ -143,7 +143,7 @@ class TestCounterDeltas:
         #
         assert len(deltas) == 2
         assert all(delta["call_count"] == 2 for delta in deltas)
-        assert all(delta["cost_micro_usd"] == 2000 for delta in deltas)
+        assert all(delta["cost_nano_usd"] == 2000 for delta in deltas)
 
     def test_an_empty_landing_produces_no_upserts(self):
         assert drainer.counter_deltas([]) == []
@@ -168,7 +168,7 @@ class TestInsertEvents:
         landed = insert(instance, connection, [event("a"), event("b", cost=5000)])
         #
         assert [row["idempotency_key"] for row in landed] == ["b"]
-        assert {delta["cost_micro_usd"] for delta in connection.upserts} == {5000}
+        assert {delta["cost_nano_usd"] for delta in connection.upserts} == {5000}
 
     def test_a_tool_row_lands_as_a_fact_but_never_touches_the_counters(self):
         # It carries no cost, so only call_count drifted -- against facts reconcile filters out,
@@ -328,9 +328,9 @@ class TestEventValues:
         assert all(values[0][column] == 0 for column in drainer.COST_SPLIT_COLUMNS)
 
     def test_a_stored_split_is_kept(self):
-        values = drainer.event_values([{**event("a"), "input_cost_micro_usd": 900}])
+        values = drainer.event_values([{**event("a"), "input_cost_nano_usd": 900}])
         #
-        assert values[0]["input_cost_micro_usd"] == 900
+        assert values[0]["input_cost_nano_usd"] == 900
 
 
 class TestPoisonRow:

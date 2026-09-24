@@ -68,13 +68,13 @@ class Recorder:
         # False on purpose: these tests assert on the synchronous fallback path
         return False
 
-    def usage_estimate_micro(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
+    def usage_estimate_nano(self, model_name, max_output_tokens, input_size_bytes):  # pylint: disable=W0613
         return 0
 
-    def usage_gate_acquire(self, project_id, user_id, estimate_micro, moment):  # pylint: disable=W0613
+    def usage_gate_acquire(self, project_id, user_id, estimate_nano, moment):  # pylint: disable=W0613
         return {"allowed": True, "scope": None, "reservation": None, "healthy": True}
 
-    def usage_gate_settle(self, reservation, actual_micro):  # pylint: disable=W0613
+    def usage_gate_settle(self, reservation, actual_nano):  # pylint: disable=W0613
         return True
 
     def usage_resolve_project_id(self, user_id, user_name, headers):  # pylint: disable=W0613
@@ -434,14 +434,14 @@ class TestAttribution:
         # whitelist stops it a second time. Both matter: the header is caller-supplied.
         drain(
             self.attributed(attribution={
-                **ATTRIBUTION, "project_id": 999, "user_id": 999, "cost_micro_usd": 0,
+                **ATTRIBUTION, "project_id": 999, "user_id": 999, "cost_nano_usd": 0,
             }),
             [OPENAI_JSON],
         )
         #
         row = metering.rows[0]
         assert (row["project_id"], row["user_id"]) == (7, 42)
-        assert row["cost_micro_usd"] == 500
+        assert row["cost_nano_usd"] == 500_000
 
 
 class TestProviderNarrowsTheDialect:
@@ -473,11 +473,11 @@ class TestPricing:
         #
         assert metering.prices.calls[0]["input_tokens"] == 100
 
-    def test_cost_is_integer_micro_dollars(self, metering):
+    def test_cost_is_integer_nano_dollars(self, metering):
         drain(begin(), [OPENAI_JSON])
         #
-        assert metering.rows[0]["cost_micro_usd"] == 500
-        assert isinstance(metering.rows[0]["cost_micro_usd"], int)
+        assert metering.rows[0]["cost_nano_usd"] == 500_000
+        assert isinstance(metering.rows[0]["cost_nano_usd"], int)
 
     def test_an_unpriced_model_is_marked_never_a_silent_zero(self, metering):
         metering.prices.cost = None
@@ -485,7 +485,7 @@ class TestPricing:
         #
         row, = metering.rows
         assert row["cost_source"] == "unpriced"
-        assert row["cost_micro_usd"] == 0
+        assert row["cost_nano_usd"] == 0
 
     def test_a_pricing_failure_does_not_lose_the_row(self, metering, monkeypatch):
         def explode(**kwargs):
@@ -496,6 +496,33 @@ class TestPricing:
         #
         assert metering.rows[0]["cost_source"] == "unpriced"
         assert metering.rows[0]["token_source"] == "provider"
+
+
+class TestCostSplit:
+    """The split always sums to the total, and the total is the true cost rounded once."""
+
+    def test_a_one_token_embedding_is_not_rounded_to_zero(self):
+        # $2e-8 per token is a cheap embedding rate: micro-USD stored this as 0, nano keeps it
+        total, split = hooks._cost_nanos(2e-8, {"input_cost": 2e-8})  # pylint: disable=W0212
+        #
+        assert total == 20
+        assert split["input_cost_nano_usd"] == 20
+
+    def test_the_total_is_the_true_cost_rounded_not_the_sum_of_rounded_parts(self):
+        # Each part is 0.4 nano and rounds to 0 alone; summed first they would lose a whole nano
+        parts = {"input_cost": 4e-10, "output_cost": 4e-10, "cache_read_cost": 4e-10}
+        cost = sum(parts.values())
+        #
+        total, split = hooks._cost_nanos(cost, parts)  # pylint: disable=W0212
+        #
+        assert total == round(cost * 1_000_000_000) == 1
+        assert sum(split.values()) == total
+
+    def test_no_breakdown_leaves_the_split_empty(self):
+        total, split = hooks._cost_nanos(0.0005, None)  # pylint: disable=W0212
+        #
+        assert total == 500_000
+        assert set(split.values()) == {0}
 
 
 class TestCacheConventions:
