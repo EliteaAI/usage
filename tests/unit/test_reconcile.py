@@ -5,6 +5,7 @@ was added for was invisible from the class: a plain staticmethod is never bound 
 Module, so `self._accumulate(...)` raised AttributeError only once the cron fired.
 """
 import datetime
+import json
 import time
 import types
 
@@ -540,3 +541,200 @@ class TestReconcileRecordRunAndHistory:
         instance.usage_reconcile_record_run({"period": "202609"})
         #
         assert instance.usage_reconcile_history() == [{"period": "202609"}]
+
+
+class TestRedisDrift:
+    """The gate reads Redis, not usage_counter. Postgres can agree with itself while Redis has
+    drifted — a worker killed between queueing its fact and settling leaves Redis low, a fact
+    lost after settle leaves it high — and only this pass can see either."""
+
+    PROJECT_KEY = "usage:ctr:p:42:202609"
+    MEMBER_KEY = "usage:ctr:u:42:7:202609"
+
+    def _instance(self, monkeypatch, facts, redis_counters, queued=()):
+        instance = build()
+        instance.usage_config = lambda: {"redis": {"lease_seconds": 0}}
+        for key, counter in redis_counters.items():
+            instance.redis.hset(key, "counter", counter)
+        for payload in queued:
+            instance.redis.rpush(gate.QUEUE_KEY, payload)
+        #
+        cutoffs = []
+        #
+        def fact_totals(_connection, _start, end):
+            cutoffs.append(end)
+            return facts() if callable(facts) else facts
+        #
+        instance.usage_fact_totals = fact_totals
+        instance.cutoffs = cutoffs
+        monkeypatch.setattr(
+            reconcile.db, "engine",
+            types.SimpleNamespace(connect=lambda: FakeLockConnection()), raising=False,
+        )
+        monkeypatch.setattr(reconcile.time, "sleep", lambda _seconds: None)
+        #
+        return instance
+
+    def _cost(self, cost):
+        return {"input_tokens": 0, "output_tokens": 0, "cost_nano_usd": cost, "call_count": 1}
+
+    def test_redis_agreeing_with_the_facts_is_not_drift(self, monkeypatch):
+        facts = {(42, 0): self._cost(1000), (42, 7): self._cost(1000)}
+        instance = self._instance(
+            monkeypatch, facts, {self.PROJECT_KEY: 1000, self.MEMBER_KEY: 1000},
+        )
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+
+    def test_redis_low_while_postgres_agrees_with_itself_is_found(self, monkeypatch):
+        # Project 25 shape: facts landed, the settle never did
+        facts = {(42, 0): self._cost(3000), (42, 7): self._cost(3000)}
+        instance = self._instance(
+            monkeypatch, facts, {self.PROJECT_KEY: 1998, self.MEMBER_KEY: 1998},
+        )
+        #
+        drift = instance.usage_redis_counter_drift(START, END)
+        #
+        assert [(row["project_id"], row["user_id"]) for row in drift] == [(42, 0), (42, 7)]
+        assert all(row["expected"]["cost_nano_usd"] - row["actual"]["cost_nano_usd"] == 1002
+                   for row in drift)
+
+    def test_redis_high_on_the_project_hash_only_is_found(self, monkeypatch):
+        # Project 3 shape: members exact, project hash over-charged
+        facts = {(42, 0): self._cost(1000), (42, 7): self._cost(1000)}
+        instance = self._instance(
+            monkeypatch, facts, {self.PROJECT_KEY: 1333, self.MEMBER_KEY: 1000},
+        )
+        #
+        drift = instance.usage_redis_counter_drift(START, END)
+        #
+        assert len(drift) == 1
+        assert drift[0]["user_id"] == reconcile.PROJECT_USER_SENTINEL
+        assert drift[0]["actual"]["cost_nano_usd"] == 1333
+
+    def test_a_live_hash_with_no_facts_at_all_is_drift(self, monkeypatch):
+        instance = self._instance(monkeypatch, {}, {self.PROJECT_KEY: 500})
+        #
+        assert instance.usage_redis_counter_drift(START, END)[0]["expected"]["cost_nano_usd"] == 0
+
+    def test_a_cold_key_is_not_judged(self, monkeypatch):
+        # No hash to correct: the gate primes it from the already-correct Postgres row
+        instance = self._instance(monkeypatch, {(42, 0): self._cost(1000)}, {})
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+
+    def test_other_periods_and_non_counter_keys_are_ignored(self, monkeypatch):
+        instance = self._instance(monkeypatch, {}, {
+            "usage:ctr:p:42:202608": 999, "usage:reconcile:history": 1,
+        })
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+
+    def test_a_gap_that_moves_between_samples_is_not_repaired(self, monkeypatch):
+        # A busy project: a settle straddled the first sample, so the two gaps differ and
+        # nothing is judged this run rather than repairing a transient
+        samples = iter([
+            {(42, 0): self._cost(1000)},
+            {(42, 0): self._cost(1500)},
+        ])
+        instance = self._instance(monkeypatch, lambda: next(samples), {self.PROJECT_KEY: 1200})
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+
+    def test_a_busy_project_with_a_standing_gap_is_still_repaired(self, monkeypatch):
+        # Spend keeps moving on both sides between samples, the gap does not
+        state = {"facts": 5000}
+        instance = self._instance(monkeypatch, None, {self.PROJECT_KEY: 4000})
+        #
+        def fact_totals(_connection, _start, _end):
+            facts = {(42, 0): self._cost(state["facts"])}
+            state["facts"] += 700
+            instance.redis.hincrby(self.PROJECT_KEY, "counter", 700)
+            return facts
+        #
+        instance.usage_fact_totals = fact_totals
+        #
+        drift = instance.usage_redis_counter_drift(START, END)
+        #
+        assert len(drift) == 1
+        assert drift[0]["expected"]["cost_nano_usd"] - drift[0]["actual"]["cost_nano_usd"] == 1000
+
+    def test_facts_are_cut_off_at_the_redis_read_not_the_period_end(self, monkeypatch):
+        instance = self._instance(monkeypatch, {}, {self.PROJECT_KEY: 0})
+        #
+        instance.usage_redis_counter_drift(START, END)
+        #
+        assert instance.cutoffs and all(cutoff < END for cutoff in instance.cutoffs)
+
+    def test_a_queued_fact_from_before_the_cutoff_is_waited_for(self, monkeypatch):
+        old = json.dumps({"ts": str(START)})
+        instance = self._instance(monkeypatch, {}, {self.PROJECT_KEY: 0}, queued=[old])
+        monkeypatch.setattr(reconcile, "DEFAULT_DRAIN_WAIT_SECONDS", 0)
+        #
+        # Never drains: the gate side is left unjudged, not reported as zero drift
+        assert instance.usage_redis_counter_drift(START, END) is None
+
+    def test_a_queue_holding_only_newer_facts_does_not_block(self, monkeypatch):
+        new = json.dumps({"ts": str(END)})
+        instance = self._instance(monkeypatch, {}, {self.PROJECT_KEY: 0}, queued=[new])
+        monkeypatch.setattr(reconcile, "DEFAULT_DRAIN_WAIT_SECONDS", 0)
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+
+    def test_no_live_hashes_touches_neither_postgres_nor_the_clock(self, monkeypatch):
+        instance = self._instance(monkeypatch, {}, {})
+        monkeypatch.setattr(
+            reconcile.time, "sleep", lambda _s: (_ for _ in ()).throw(AssertionError("slept")),
+        )
+        #
+        assert instance.usage_redis_counter_drift(START, END) == []
+        assert instance.cutoffs == []
+
+    def test_apply_pushes_the_confirmed_gap_into_the_gate_counter(self, monkeypatch):
+        facts = {(42, 0): self._cost(3000), (42, 7): self._cost(1000)}
+        instance = self._instance(
+            monkeypatch, facts, {self.PROJECT_KEY: 1998, self.MEMBER_KEY: 1333},
+        )
+        instance.usage_counter_drift = lambda *_a, **_k: []
+        recorded = []
+        instance.usage_reconcile_record_run = recorded.append
+        #
+        result = instance.usage_reconcile_counters(period="202609", apply=True)
+        #
+        assert instance.redis.counter(self.PROJECT_KEY) == 3000
+        assert instance.redis.counter(self.MEMBER_KEY) == 1000
+        assert result["redis_repaired"] == 2
+        assert recorded[0]["redis_drift"] == 2 and recorded[0]["redis_repaired"] == 2
+
+    def test_a_second_apply_after_the_repair_finds_nothing(self, monkeypatch):
+        facts = {(42, 0): self._cost(3000)}
+        instance = self._instance(monkeypatch, facts, {self.PROJECT_KEY: 1998})
+        instance.usage_counter_drift = lambda *_a, **_k: []
+        instance.usage_reconcile_record_run = lambda _summary: None
+        #
+        instance.usage_reconcile_counters(period="202609", apply=True)
+        again = instance.usage_reconcile_counters(period="202609", apply=True)
+        #
+        assert again["redis_drift"] == [] and again["redis_repaired"] == 0
+
+    def test_report_only_lists_the_gap_but_never_writes(self, monkeypatch):
+        instance = self._instance(monkeypatch, {(42, 0): self._cost(3000)}, {self.PROJECT_KEY: 1998})
+        instance.usage_counter_drift = lambda *_a, **_k: []
+        #
+        result = instance.usage_reconcile_counters(period="202609", apply=False)
+        #
+        assert len(result["redis_drift"]) == 1
+        assert instance.redis.counter(self.PROJECT_KEY) == 1998
+
+    def test_a_broken_redis_comparison_does_not_fail_the_postgres_repair(self, monkeypatch):
+        instance = self._instance(monkeypatch, {}, {})
+        instance.usage_counter_drift = lambda *_a, **_k: []
+        instance.usage_redis_counter_drift = \
+            lambda *_a: (_ for _ in ()).throw(RuntimeError("redis down"))
+        recorded = []
+        instance.usage_reconcile_record_run = recorded.append
+        #
+        result = instance.usage_reconcile_counters(period="202609", apply=True)
+        #
+        assert result["applied"] is True and result["redis_drift"] is None
+        assert recorded[0]["redis_drift"] is None
