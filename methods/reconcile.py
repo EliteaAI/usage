@@ -154,7 +154,9 @@ def _redis_drift_or_none(self, period, start, end):
     """None when the gate side could not be judged this run; it is retried on the next one."""
     try:
         redis_drift = self.usage_redis_counter_drift(start, end)
-    except:  # pylint: disable=W0702
+    except Exception:  # pylint: disable=W0703
+        # Not bare except: this wraps a blocking drain-wait loop, and on gevent a bare except
+        # also swallows cooperative-cancellation exceptions (GreenletExit/Timeout), not just errors
         log.exception("usage: reconcile failed to compare gate counters for period %s", period)
         return None
     #
