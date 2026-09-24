@@ -1,7 +1,7 @@
 """below_resolution_sums()/below_resolution() flag costs that were priced but too small to store (#6682).
 
-Costs are stored as integer micro-USD, so a priced call under $0.0000005 (e.g. a 7-token
-text-embedding-3-small query) is written as 0. The dashboard must tell that apart from a truly
+Costs are stored as integer nano-USD, so a priced call under $0.0000000005 (e.g. a few tokens
+of a sub-nano-rate image model) is written as 0. The dashboard must tell that apart from a truly
 free call and from an unpriced model — both of which also store 0. The real SQL expression runs
 against an in-memory table so a regression in the CASE predicate fails here.
 """
@@ -16,11 +16,11 @@ FAKE_TABLE = Table(
     "usage_event", METADATA,
     Column("seq", Integer, primary_key=True, autoincrement=True),
     Column("cost_source", String),
-    Column("cost_micro_usd", BigInteger, default=0),
-    Column("input_cost_micro_usd", BigInteger, default=0),
-    Column("output_cost_micro_usd", BigInteger, default=0),
-    Column("cache_read_cost_micro_usd", BigInteger, default=0),
-    Column("cache_creation_cost_micro_usd", BigInteger, default=0),
+    Column("cost_nano_usd", BigInteger, default=0),
+    Column("input_cost_nano_usd", BigInteger, default=0),
+    Column("output_cost_nano_usd", BigInteger, default=0),
+    Column("cache_read_cost_nano_usd", BigInteger, default=0),
+    Column("cache_creation_cost_nano_usd", BigInteger, default=0),
     Column("billable_input_tokens", BigInteger, default=0),
     Column("output_tokens", BigInteger, default=0),
     Column("cache_read_tokens", BigInteger, default=0),
@@ -58,7 +58,7 @@ class TestBelowResolution:
         return _analytics.below_resolution(dict(row), prefix=prefix)
 
     def test_tiny_priced_embedding_is_flagged_on_total_and_input(self):
-        # The #6682 case: 7 input tokens at $2e-8 = $1.4e-7, stored as 0 micro-USD.
+        # 7 input tokens at $2e-11 = $1.4e-10, still stored as 0 nano-USD.
         self._insert(cost_source="estimated:costs-catalog", billable_input_tokens=7)
         assert self._flags() == {"total_cost": True, "input_cost": True}
 
@@ -77,7 +77,7 @@ class TestBelowResolution:
 
     def test_priced_call_with_stored_cost_is_not_flagged(self):
         self._insert(cost_source="estimated:costs-catalog", billable_input_tokens=1000,
-                     cost_micro_usd=20, input_cost_micro_usd=20)
+                     cost_nano_usd=20, input_cost_nano_usd=20)
         assert self._flags() == {}
 
     def test_component_without_tokens_is_not_flagged(self):
@@ -87,9 +87,18 @@ class TestBelowResolution:
 
     def test_tiny_component_on_a_normal_call_flags_only_that_component(self):
         self._insert(cost_source="estimated:costs-catalog", billable_input_tokens=1000,
-                     cache_creation_tokens=3, cost_micro_usd=20, input_cost_micro_usd=20)
+                     cache_creation_tokens=3, cost_nano_usd=20, input_cost_nano_usd=20)
         assert self._flags() == {"cache_creation_cost": True}
 
     def test_zero_token_row_is_not_flagged(self):
         self._insert(cost_source="estimated:costs-catalog")
         assert self._flags() == {}
+
+
+class TestCostUsd:
+    def test_one_nano_survives_the_dollar_conversion(self):
+        # Rounding to 6 decimals, as micro-USD did, would turn every sub-micro call back into 0
+        assert _analytics.cost_usd(1) == 1e-9
+
+    def test_nothing_is_zero(self):
+        assert _analytics.cost_usd(None) == 0

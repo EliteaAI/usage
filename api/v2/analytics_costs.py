@@ -195,7 +195,7 @@ if _API_AVAILABLE:
         def _kpis(conditions):
             """One scan for every headline number."""
             columns = [
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("total_input_tokens"),
                 func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("total_output_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("total_cache_read_tokens"),
@@ -209,7 +209,7 @@ if _API_AVAILABLE:
             # An ungrouped aggregate always returns exactly one row; the fallback is belt-and-braces.
             row = an.fetch_one(select(*columns).where(*conditions)) or {}
 
-            total_cost = an.cost_usd(row.get("cost_micro"))
+            total_cost = an.cost_usd(row.get("cost_nano"))
             total_calls = row.get("total_calls") or 0
 
             return {
@@ -238,13 +238,13 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
             ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
             ).group_by(UsageEvent.model_name).order_by(
-                func.sum(UsageEvent.cost_micro_usd).desc(),
+                func.sum(UsageEvent.cost_nano_usd).desc(),
             ).limit(_MODEL_LIMIT)
 
             rows = an.fetch_all(statement)
@@ -260,7 +260,7 @@ if _API_AVAILABLE:
                     "cache_read_tokens": int(r["cache_read_tokens"] or 0),
                     "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
                     "total_tokens": int(r["total_tokens"] or 0),
-                    "total_cost": an.cost_usd(r["cost_micro"]),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
                 }
@@ -292,14 +292,14 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
             ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(
                 *conditions, an.is_agent_row(), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type, UsageEvent.root_entity_id,
-            ).order_by(func.sum(UsageEvent.cost_micro_usd).desc()).limit(_AGENT_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
 
             rows = an.fetch_all(statement)
 
@@ -307,7 +307,7 @@ if _API_AVAILABLE:
                 {
                     "entity_name": r["entity_name"] or f"Agent #{r['root_entity_id']}",
                     "entity_id": r["root_entity_id"],
-                    "total_cost": an.cost_usd(r["cost_micro"]),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),
@@ -317,8 +317,8 @@ if _API_AVAILABLE:
                     "total_tokens": int(r["total_tokens"] or 0),
                     "calls": r["calls"] or 0,
                     "avg_cost": (
-                        round(an.cost_usd(r["cost_micro"]) / r["calls"], 6)
-                        if r["cost_micro"] and r["calls"] else 0.0
+                        round(an.cost_usd(r["cost_nano"]) / r["calls"], 9)
+                        if r["cost_nano"] and r["calls"] else 0.0
                     ),
                 }
                 for r in rows
@@ -339,12 +339,12 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
             ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(*conditions).group_by(
                 UsageEvent.user_id,
-            ).order_by(func.sum(UsageEvent.cost_micro_usd).desc()).limit(_USER_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_USER_LIMIT)
 
             rows = an.fetch_all(statement)
 
@@ -357,7 +357,7 @@ if _API_AVAILABLE:
                 {
                     "user_id": r["user_id"],
                     "user_email": emails.get(r["user_id"]),
-                    "total_cost": an.cost_usd(r["cost_micro"]),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),
@@ -381,7 +381,7 @@ if _API_AVAILABLE:
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
             ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(*conditions).group_by(day).order_by(day)
@@ -391,7 +391,7 @@ if _API_AVAILABLE:
             return [
                 {
                     "date": r["day"].isoformat() if r["day"] else None,
-                    "total_cost": an.cost_usd(r["cost_micro"]),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
                     "input_tokens": int(r["input_tokens"] or 0),

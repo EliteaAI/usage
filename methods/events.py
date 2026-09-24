@@ -41,7 +41,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         statement = insert(UsageEvent).values(**payload).on_conflict_do_nothing(
             index_elements=["idempotency_key", "ts"],
         ).returning(UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
-                    UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd)
+                    UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_nano_usd)
         #
         try:
             with db.engine.connect() as connection:

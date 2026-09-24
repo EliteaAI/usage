@@ -26,6 +26,8 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import context  # pylint: disable=E0401
 
+from ._counters import NANO
+
 DEFAULT_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_CALL_COST_USD = 2.0
 
@@ -62,8 +64,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
 
     @web.method()
-    def usage_estimate_micro(self, model_name, max_output_tokens, input_size_bytes):
-        """Micro-USD to reserve for one call. 0 when it cannot be priced, so it never refuses."""
+    def usage_estimate_nano(self, model_name, max_output_tokens, input_size_bytes):
+        """Nano-USD to reserve for one call. 0 when it cannot be priced, so it never refuses."""
         if not model_name:
             return 0
         #
@@ -88,7 +90,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         ceiling = float(reservation.get("max_call_cost_usd", DEFAULT_MAX_CALL_COST_USD))
         #
-        return int(round(min(float(cost), ceiling) * 1_000_000))
+        return int(round(min(float(cost), ceiling) * NANO))
 
     @web.method()
     def usage_default_output_tokens(self):

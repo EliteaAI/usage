@@ -31,9 +31,15 @@ from tools import db  # pylint: disable=E0401
 
 from ._counters import EVENT_TYPE_LLM, member_key, project_key
 from .gate import DEAD_QUEUE_KEY, QUEUE_KEY
-from .schema import COST_SPLIT_COLUMNS
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
+
+COST_SPLIT_COLUMNS = (
+    "input_cost_nano_usd",
+    "output_cost_nano_usd",
+    "cache_read_cost_nano_usd",
+    "cache_creation_cost_nano_usd",
+)
 
 DEFAULT_BATCH_SIZE = 500
 
@@ -69,11 +75,11 @@ def is_missing_partition(exc):
 COUNTER_INDEX = ["project_id", "user_id", "period_kind", "period_start", "model_name"]
 
 # What the counters accumulate; the RETURNING projection is the same list plus the row's identity
-MEASURES = ("input_tokens", "output_tokens", "cost_micro_usd")
+MEASURES = ("input_tokens", "output_tokens", "cost_nano_usd")
 
 RETURNING_COLUMNS = (
     UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
-    UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_micro_usd,
+    UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_nano_usd,
     UsageEvent.event_type,
 )
 
@@ -138,7 +144,7 @@ def counter_upsert(delta):
         set_={
             "input_tokens": UsageCounter.input_tokens + statement.excluded.input_tokens,
             "output_tokens": UsageCounter.output_tokens + statement.excluded.output_tokens,
-            "cost_micro_usd": UsageCounter.cost_micro_usd + statement.excluded.cost_micro_usd,
+            "cost_nano_usd": UsageCounter.cost_nano_usd + statement.excluded.cost_nano_usd,
             "call_count": UsageCounter.call_count + statement.excluded.call_count,
             "updated_at": func.now(),
         },

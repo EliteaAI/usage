@@ -32,6 +32,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from tools import context, this  # pylint: disable=E0401
 
+from .methods._counters import NANO
 from .methods.gate import SCOPE_MEMBER, SCOPE_PROJECT
 from .methods.mode import MODE_ENFORCE, MODE_OFF, normalize_mode
 from .sources import base, registry
@@ -104,7 +105,7 @@ class UsageContext:  # pylint: disable=R0902
     idempotency_key: str = None
     start_time_ns: int = None
     reservation: str = None
-    estimate_micro: int = 0
+    estimate_nano: int = 0
     # usage_event columns, already named as such; see ATTRIBUTION_KEYS
     attribution: dict = None
 
@@ -160,7 +161,7 @@ def _admit(ctx, mode, max_output_tokens, input_size_bytes):
         #
         return
     #
-    ctx.estimate_micro = _estimate_micro(ctx, max_output_tokens, input_size_bytes)
+    ctx.estimate_nano = _estimate_nano(ctx, max_output_tokens, input_size_bytes)
     verdict = _acquire(ctx)
     #
     if not verdict.get("healthy"):
@@ -204,7 +205,7 @@ def _acquire(ctx):
     """{"allowed", "scope", "reservation", "healthy"}; unhealthy when the gate cannot answer."""
     try:
         return this.module.usage_gate_acquire(
-            ctx.project_id, ctx.user_id, ctx.estimate_micro,
+            ctx.project_id, ctx.user_id, ctx.estimate_nano,
             datetime.datetime.now(datetime.timezone.utc),
         ) or {}
     except:  # pylint: disable=W0702
@@ -212,10 +213,10 @@ def _acquire(ctx):
         return {"healthy": False}
 
 
-def _estimate_micro(ctx, max_output_tokens, input_size_bytes):
+def _estimate_nano(ctx, max_output_tokens, input_size_bytes):
     """0 whenever the call cannot be priced, which never refuses anything."""
     try:
-        return int(this.module.usage_estimate_micro(
+        return int(this.module.usage_estimate_nano(
             ctx.model_name, max_output_tokens, input_size_bytes,
         ) or 0)
     except:  # pylint: disable=W0702
@@ -407,7 +408,7 @@ def _settle(ctx, row):
         )
     #
     try:
-        this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_micro_usd") or 0)
+        this.module.usage_gate_settle(ctx.reservation, (row or {}).get("cost_nano_usd") or 0)
     except:  # pylint: disable=W0702
         log.exception("usage: failed to settle a reservation; the reaper will reclaim it")
 
@@ -478,7 +479,7 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
         ctx.model_name, billable, reading.output_tokens,
         reading.cache_read_tokens, reading.cache_creation_tokens,
     )
-    cost_micro, split_micro = _cost_micros(cost, breakdown)
+    cost_nano, split_nano = _cost_nanos(cost, breakdown)
     now = datetime.datetime.now(datetime.timezone.utc)
     #
     return {
@@ -501,9 +502,9 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
         "reasoning_tokens": reading.reasoning_tokens or 0,
         "billable_input_tokens": billable or 0,
         # 0 only ever alongside cost_source='unpriced', so a zero is never mistaken for free
-        "cost_micro_usd": cost_micro,
+        "cost_nano_usd": cost_nano,
         "cost_source": cost_source,
-        **split_micro,
+        **split_nano,
         "token_source": reading.token_source,
         "duration_ms": _elapsed_ms(ctx),
         "is_error": status >= 400,
@@ -511,33 +512,30 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
 
 
 COST_SPLIT_COLUMNS = {
-    "input_cost": "input_cost_micro_usd",
-    "output_cost": "output_cost_micro_usd",
-    "cache_read_cost": "cache_read_cost_micro_usd",
-    "cache_creation_cost": "cache_creation_cost_micro_usd",
+    "input_cost": "input_cost_nano_usd",
+    "output_cost": "output_cost_nano_usd",
+    "cache_read_cost": "cache_read_cost_nano_usd",
+    "cache_creation_cost": "cache_creation_cost_nano_usd",
 }
 
 
-def _cost_micros(cost, breakdown):
-    """(total_micro_usd, {column: micro_usd}) — the split stored beside the total.
-
-    The parts are summed into the total rather than the total being rounded on its own, so a
-    breakdown always adds up to exactly the figure it breaks down. The two differ by at most a
-    couple of micro-dollars, and a split that reconciles is worth more than that.
-
-    No breakdown means either an unpriced model or a costs plugin that predates the breakdown
-    key; both keep the previous behaviour — the authoritative total, and zeros for the split.
-    """
+def _cost_nanos(cost, breakdown):
+    """(total_nano_usd, {column: nano_usd}); the total is the true cost rounded once."""
+    total = 0 if cost is None else int(round(cost * NANO))
+    #
     if not breakdown:
-        return (
-            0 if cost is None else int(round(cost * 1_000_000)),
-            {column: 0 for column in COST_SPLIT_COLUMNS.values()},
-        )
+        return total, {column: 0 for column in COST_SPLIT_COLUMNS.values()}
     #
     split = {
-        column: int(round((breakdown.get(key) or 0) * 1_000_000))
+        column: int(round((breakdown.get(key) or 0) * NANO))
         for key, column in COST_SPLIT_COLUMNS.items()
     }
+    #
+    if cost is None:
+        return sum(split.values()), split
+    # Parts rounded apart miss the total by a nano or two; the largest part absorbs it
+    largest = max(split, key=split.get)
+    split[largest] = max(0, split[largest] + total - sum(split.values()))
     #
     return sum(split.values()), split
 

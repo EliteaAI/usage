@@ -49,8 +49,8 @@ class TestFactTotals:
         #
         totals = build().usage_fact_totals(connection, START, END)
         #
-        assert totals[(42, reconcile.PROJECT_USER_SENTINEL)]["cost_micro_usd"] == 1000
-        assert totals[(42, 7)]["cost_micro_usd"] == 1000
+        assert totals[(42, reconcile.PROJECT_USER_SENTINEL)]["cost_nano_usd"] == 1000
+        assert totals[(42, 7)]["cost_nano_usd"] == 1000
 
     def test_two_members_sum_into_one_project_total(self):
         connection = Rows([(42, 7, 10, 20, 1000, 1), (42, 8, 5, 5, 250, 2)])
@@ -58,7 +58,7 @@ class TestFactTotals:
         totals = build().usage_fact_totals(connection, START, END)
         #
         project = totals[(42, reconcile.PROJECT_USER_SENTINEL)]
-        assert project["cost_micro_usd"] == 1250
+        assert project["cost_nano_usd"] == 1250
         assert project["call_count"] == 3
 
     def test_only_llm_facts_are_summed(self):
@@ -83,14 +83,14 @@ class TestRepairRow:
         row = {
             "project_id": 42, "user_id": 7, "period_start": START.date(),
             "expected": {"input_tokens": 10, "output_tokens": 20,
-                         "cost_micro_usd": 1000, "call_count": 3},
+                         "cost_nano_usd": 1000, "call_count": 3},
             "actual": {"input_tokens": 4, "output_tokens": 5,
-                       "cost_micro_usd": 400, "call_count": 1},
+                       "cost_nano_usd": 400, "call_count": 1},
         }
         #
         repair = reconcile._repair_row(row)  # pylint: disable=W0212
         #
-        assert repair["cost_micro_usd"] == 600
+        assert repair["cost_nano_usd"] == 600
         assert repair["call_count"] == 2
         assert repair["model_name"] == reconcile.ALL_MODELS_SENTINEL
 
@@ -106,7 +106,7 @@ class TestDrift:
         return instance
 
     def _totals(self, cost):
-        return {"input_tokens": 0, "output_tokens": 0, "cost_micro_usd": cost, "call_count": 1}
+        return {"input_tokens": 0, "output_tokens": 0, "cost_nano_usd": cost, "call_count": 1}
 
     def test_agreement_is_not_drift(self):
         totals = {(42, 7): self._totals(1000)}
@@ -121,8 +121,8 @@ class TestDrift:
         drift = instance.usage_counter_drift(None, START, END)
         #
         assert len(drift) == 1
-        assert drift[0]["expected"]["cost_micro_usd"] == 0
-        assert drift[0]["actual"]["cost_micro_usd"] == 1000
+        assert drift[0]["expected"]["cost_nano_usd"] == 0
+        assert drift[0]["actual"]["cost_nano_usd"] == 1000
 
     def test_an_inflated_counter_repairs_by_a_negative_delta(self):
         instance = self._instance({(42, 7): self._totals(400)}, {(42, 7): self._totals(1000)})
@@ -131,12 +131,12 @@ class TestDrift:
             instance.usage_counter_drift(None, START, END)[0],
         )
         #
-        assert repair["cost_micro_usd"] == -600
+        assert repair["cost_nano_usd"] == -600
 
     def test_a_missing_counter_row_is_still_drift(self):
         instance = self._instance({(42, 7): self._totals(1000)}, {})
         #
-        assert instance.usage_counter_drift(None, START, END)[0]["actual"]["cost_micro_usd"] == 0
+        assert instance.usage_counter_drift(None, START, END)[0]["actual"]["cost_nano_usd"] == 0
 
 
 class FakeLockConnection:
@@ -251,8 +251,8 @@ class TestReconcileCountersConcurrency:
 def drift_row(project_id, user_id=7, cost=100):
     return {
         "project_id": project_id, "user_id": user_id, "period_start": START.date(),
-        "expected": {"input_tokens": 0, "output_tokens": 0, "cost_micro_usd": cost, "call_count": 1},
-        "actual": {"input_tokens": 0, "output_tokens": 0, "cost_micro_usd": 0, "call_count": 0},
+        "expected": {"input_tokens": 0, "output_tokens": 0, "cost_nano_usd": cost, "call_count": 1},
+        "actual": {"input_tokens": 0, "output_tokens": 0, "cost_nano_usd": 0, "call_count": 0},
     }
 
 
@@ -371,7 +371,7 @@ class TestRepairReachesTheGateCounter:
     def over_counted(self, project_id=1, user_id=7, expected=100, actual=900):
         """A row the reconciler lowers: the counters sit above the facts behind them."""
         row = drift_row(project_id, user_id=user_id, cost=expected)
-        row["actual"]["cost_micro_usd"] = actual
+        row["actual"]["cost_nano_usd"] = actual
         row["actual"]["call_count"] = 1
         #
         return row
@@ -429,7 +429,7 @@ class TestRepairReachesTheGateCounter:
         instance.redis.hset(hash_key, "counter", 900)
         instance.redis.expire(hash_key, 5)
         row = drift_row(1, cost=100)
-        row["actual"]["cost_micro_usd"] = 100  # only call_count drifts
+        row["actual"]["cost_nano_usd"] = 100  # only call_count drifts
         #
         instance.usage_reconcile_repair([row])
         #
@@ -465,7 +465,7 @@ class TestRepairReachesTheGateCounter:
         instance = build()
         patch_repair_engine(monkeypatch, instance)
         row = drift_row(1, cost=100)
-        row["actual"]["cost_micro_usd"] = 100
+        row["actual"]["cost_nano_usd"] = 100
         #
         instance.usage_reconcile_repair([row])
         #

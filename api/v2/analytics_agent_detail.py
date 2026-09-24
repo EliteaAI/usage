@@ -192,7 +192,7 @@ if _API_AVAILABLE:
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 # No error-row exclusion (D1): a provider that charged for a failed call still
                 # spent the tokens.
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 an.llm_calls_expr().label("llm_calls"),
             ] + an.cost_split_sums()
 
@@ -203,7 +203,7 @@ if _API_AVAILABLE:
             total_events = int(row["total_events"] or 0) if row else 0
             errors = int(row["errors"] or 0) if row else 0
             llm_calls = int(row["llm_calls"] or 0) if row else 0
-            llm_cost = an.cost_usd(row["cost_micro"] if row else 0)
+            llm_cost = an.cost_usd(row["cost_nano"] if row else 0)
             #
             entity_name = (row["entity_name"] if row else None) or f"Agent #{entity_id}"
             #

@@ -157,7 +157,7 @@ if _API_AVAILABLE:
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr().label("agent_runs"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 # nullif so a blank name is not its own distinct value
                 func.count(distinct(func.nullif(UsageEvent.tool_name, ""))).label("unique_tools"),
                 func.count(distinct(func.nullif(UsageEvent.model_name, ""))).label("unique_models"),
@@ -188,7 +188,7 @@ if _API_AVAILABLE:
                 "tool_runs": int(row["tool_runs"] or 0) if row else 0,
                 "agent_runs": int(row["agent_runs"] or 0) if row else 0,
                 "total_tokens": int(row["total_tokens"] or 0) if row else 0,
-                "total_llm_cost": an.cost_usd(row["cost_micro"] if row else 0),
+                "total_llm_cost": an.cost_usd(row["cost_nano"] if row else 0),
                 "unique_tools": int(row["unique_tools"] or 0) if row else 0,
                 "unique_models": int(row["unique_models"] or 0) if row else 0,
             }

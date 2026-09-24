@@ -213,7 +213,7 @@ if _API_AVAILABLE:
                 func.sum(
                     func.coalesce(UsageEvent.cache_creation_tokens, 0),
                 ).label("cache_creation_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_micro_usd, 0)).label("cost_micro"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 *an.cost_split_sums(),
             ).where(*conditions)
 
@@ -222,7 +222,7 @@ if _API_AVAILABLE:
                 return None
 
             llm_events = int(row["llm_events"] or 0)
-            llm_cost = an.cost_usd(row["cost_micro"])
+            llm_cost = an.cost_usd(row["cost_nano"])
 
             return {
                 "total_events": row["total_events"],

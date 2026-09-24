@@ -17,7 +17,7 @@
 
 """ Admission gate — reservation-based, one Redis round trip per decision
 
-available = limit - (counter + reserved). Micro-USD integers throughout, so no float
+available = limit - (counter + reserved). Nano-USD integers throughout, so no float
 math ever decides whether a call is refused.
 """
 
@@ -35,13 +35,16 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import context, db  # pylint: disable=E0401
 
-from ._counters import PERIOD_MONTH, member_key, period_start, project_key
+from ._counters import NANO, PERIOD_MONTH, member_key, period_start, project_key
 from ..models.usage_counter import UsageCounter
 
 SCOPE_PROJECT = "project"
 SCOPE_MEMBER = "member"
 
 UNLIMITED = -1
+
+# Lua compares in doubles, exact only below 2^53 nano (~$9M); a limit that high is unlimited
+MAX_EXACT_LIMIT = 2 ** 53
 
 KEY_PREFIX = "usage"
 RESV_INDEX_KEY = f"{KEY_PREFIX}:resv:index"
@@ -208,11 +211,19 @@ def partition_health_cache(ttl_seconds):
 
 
 def as_limit(value):
-    """Micro-USD limit as the Lua expects it: -1 for unlimited, otherwise a non-negative int."""
-    if value is None:
+    """Nano-USD limit as the Lua expects it: -1 for unlimited, otherwise a non-negative int."""
+    if value is None or int(value) >= MAX_EXACT_LIMIT:
         return UNLIMITED
     #
     return max(0, int(value))
+
+
+def to_nano(dollars):
+    """USD to nano-USD int; None stays None so "unlimited" never becomes 0."""
+    if dollars is None:
+        return None
+    #
+    return int(round(float(dollars) * NANO))
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -220,7 +231,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_gate_limits(self, project_id, user_id=None):
-        """Effective limits in micro-USD from the one canonical ladder, cached briefly.
+        """Effective limits from the one canonical ladder, plus *_limit_nano, cached briefly.
 
         None anywhere means unlimited; the caller cannot tell an unlimited limit from a
         failed read, which is why a failure raises instead of answering.
@@ -239,13 +250,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         limits = context.rpc_manager.timeout(10).elitea_core_get_effective_budget_limits(
             project_id=project_id, user_id=user_id,
         ) or {}
+        # Converted from the dollar figures here, so the ladder's micro keys never set our scale
+        limits = dict(
+            limits,
+            project_limit_nano=to_nano(limits.get("project_limit")),
+            member_limit_nano=to_nano(limits.get("member_limit")),
+        )
         #
         cache[cache_key] = limits
         #
         return limits
 
     @web.method()
-    def usage_gate_acquire(self, project_id, user_id, estimate_micro, moment):  # pylint: disable=R0914
+    def usage_gate_acquire(self, project_id, user_id, estimate_nano, moment):  # pylint: disable=R0914
         """Reserve an estimate, or refuse. {"allowed", "scope", "reservation", "healthy"}.
 
         healthy=False means the decision could not be made at all — the caller decides what
@@ -264,7 +281,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         project_key_name = project_hash_key(project_id, moment)
         member_key_name = "" if not user_id else member_hash_key(project_id, user_id, moment)
-        estimate = max(0, int(estimate_micro or 0))
+        estimate = max(0, int(estimate_nano or 0))
         #
         reservation = json.dumps({
             "id": self.usage_reservation_id(),
@@ -287,8 +304,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 project_key_name, member_key_name,
                 resv_key(project_id, moment), RESV_INDEX_KEY,
                 estimate,
-                as_limit(limits.get("project_limit_micro")),
-                as_limit(limits.get("member_limit_micro")),
+                as_limit(limits.get("project_limit_nano")),
+                as_limit(limits.get("member_limit_nano")),
                 self.usage_reservation_deadline_ms(),
                 resv_index_member(project_id, moment),
                 reservation,
@@ -325,13 +342,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         scopes = [(
             SCOPE_PROJECT, project_hash_key(project_id, moment),
-            limits.get("project_limit_micro"),
+            limits.get("project_limit_nano"),
         )]
         #
         if user_id:
             scopes.append((
                 SCOPE_MEMBER, member_hash_key(project_id, user_id, moment),
-                limits.get("member_limit_micro"),
+                limits.get("member_limit_nano"),
             ))
         #
         try:
@@ -354,7 +371,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"closed": False, "scope": None, "healthy": True}
 
     @web.method()
-    def usage_gate_settle(self, reservation, actual_micro):
+    def usage_gate_settle(self, reservation, actual_nano):
         """Release a reservation and accrue what the call really cost. True when released."""
         try:
             parsed = json.loads(reservation)
@@ -366,7 +383,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             removed = self.usage_redis_client().eval(
                 SETTLE_LUA, 3,
                 parsed["rk"], parsed["pk"], parsed.get("mk") or "",
-                reservation, int(parsed.get("est") or 0), max(0, int(actual_micro or 0)),
+                reservation, int(parsed.get("est") or 0), max(0, int(actual_nano or 0)),
             )
             #
             return bool(int(removed))
@@ -443,8 +460,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_counter_of(self, counter_key):
-        """Persisted cost for one counter row, in micro-USD. 0 when there is no row yet."""
-        statement = select(UsageCounter.cost_micro_usd).where(*(
+        """Persisted cost for one counter row, in nano-USD. 0 when there is no row yet."""
+        statement = select(UsageCounter.cost_nano_usd).where(*(
             getattr(UsageCounter, column) == value for column, value in counter_key.items()
         ))
         #

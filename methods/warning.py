@@ -114,13 +114,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 scopes.append((
                     SCOPE_MEMBER, "user",
                     member_hash_key(project_id, user_id, moment),
-                    limits.get("member_limit_micro"),
+                    limits.get("member_limit_nano"),
                 ))
             #
             scopes.append((
                 SCOPE_PROJECT, "personal_project" if personal else "project",
                 project_hash_key(project_id, moment),
-                limits.get("project_limit_micro"),
+                limits.get("project_limit_nano"),
             ))
             #
             client = self.usage_redis_client()
@@ -148,12 +148,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return NO_WARNING
 
     @web.method()
-    def usage_warning_for_scope(self, scope, used_micro, limit_micro, threshold_pct):
+    def usage_warning_for_scope(self, scope, used_nano, limit_nano, threshold_pct):
         """Warning state for one scope, or None when that scope has nothing to warn about."""
-        if limit_micro <= 0:
+        if limit_nano <= 0:
             return None
         #
-        pct = used_micro / limit_micro * 100
+        pct = used_nano / limit_nano * 100
         #
         # At or over the limit the refusal itself is the message, so this banner stays out of
         # the way -- and a stale reading cannot contradict a rejection the user just saw

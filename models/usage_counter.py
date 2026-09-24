@@ -43,7 +43,7 @@ class UsageCounter(db.Base):  # pylint: disable=R0903
 
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    cost_nano_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     call_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),

@@ -216,9 +216,9 @@ if _API_AVAILABLE:
                 cache_creation_tokens_col = func.sum(
                     func.coalesce(UsageEvent.cache_creation_tokens, 0),
                 ).label("cache_creation_tokens")
-                cost_micro_col = func.sum(
-                    func.coalesce(UsageEvent.cost_micro_usd, 0),
-                ).label("cost_micro")
+                cost_nano_col = func.sum(
+                    func.coalesce(UsageEvent.cost_nano_usd, 0),
+                ).label("cost_nano")
 
                 statement = select(
                     UsageEvent.user_id,
@@ -234,7 +234,7 @@ if _API_AVAILABLE:
                     output_tokens_col,
                     cache_read_tokens_col,
                     cache_creation_tokens_col,
-                    cost_micro_col,
+                    cost_nano_col,
                     *an.cost_split_sums(),
                 ).where(*conditions).group_by(UsageEvent.user_id)
 
@@ -250,7 +250,7 @@ if _API_AVAILABLE:
                     "errors": errors_col,
                     "user_email": email_col,
                     "total_tokens": total_tokens_col,
-                    "llm_cost": cost_micro_col,
+                    "llm_cost": cost_nano_col,
                 }
                 col = sort_map.get(sort_by, total_events_col)
                 order_fn = desc if sort_order == "desc" else asc
@@ -283,7 +283,7 @@ if _API_AVAILABLE:
                             "output_tokens": int(r["output_tokens"] or 0),
                             "cache_read_tokens": int(r["cache_read_tokens"] or 0),
                             "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
-                            "llm_cost": an.cost_usd(r["cost_micro"]),
+                            "llm_cost": an.cost_usd(r["cost_nano"]),
                             **an.cost_split_usd(r),
                         }
                         for r in rows

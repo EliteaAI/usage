@@ -35,7 +35,7 @@ from .gate import KEY_PREFIX, member_hash_key, project_hash_key
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
-MEASURES = ("input_tokens", "output_tokens", "cost_micro_usd", "call_count")
+MEASURES = ("input_tokens", "output_tokens", "cost_nano_usd", "call_count")
 
 DEFAULT_REPAIR_BATCH_SIZE = 500
 
@@ -270,7 +270,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return self.usage_gate_push_counter_deltas([
             (
                 _repair_hash_key(row),
-                row["expected"]["cost_micro_usd"] - row["actual"]["cost_micro_usd"],
+                row["expected"]["cost_nano_usd"] - row["actual"]["cost_nano_usd"],
             )
             for row in rows
         ])
@@ -340,7 +340,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         statement = select(
             UsageEvent.project_id, UsageEvent.user_id,
             func.sum(UsageEvent.input_tokens), func.sum(UsageEvent.output_tokens),
-            func.sum(UsageEvent.cost_micro_usd), func.count(),
+            func.sum(UsageEvent.cost_nano_usd), func.count(),
         ).where(
             UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.event_type == EVENT_TYPE_LLM,
         ).group_by(
@@ -352,7 +352,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         for project_id, user_id, inputs, outputs, cost, calls in connection.execute(statement):
             measured = {
                 "input_tokens": int(inputs or 0), "output_tokens": int(outputs or 0),
-                "cost_micro_usd": int(cost or 0), "call_count": int(calls or 0),
+                "cost_nano_usd": int(cost or 0), "call_count": int(calls or 0),
             }
             #
             _accumulate(totals, (project_id, PROJECT_USER_SENTINEL), measured)
@@ -368,7 +368,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         statement = select(
             UsageCounter.project_id, UsageCounter.user_id,
             UsageCounter.input_tokens, UsageCounter.output_tokens,
-            UsageCounter.cost_micro_usd, UsageCounter.call_count,
+            UsageCounter.cost_nano_usd, UsageCounter.call_count,
         ).where(
             UsageCounter.period_kind == PERIOD_MONTH,
             UsageCounter.period_start == period_day,
@@ -378,7 +378,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {
             (project_id, user_id): {
                 "input_tokens": int(inputs or 0), "output_tokens": int(outputs or 0),
-                "cost_micro_usd": int(cost or 0), "call_count": int(calls or 0),
+                "cost_nano_usd": int(cost or 0), "call_count": int(calls or 0),
             }
             for project_id, user_id, inputs, outputs, cost, calls
             in connection.execute(statement)
