@@ -142,12 +142,13 @@ class Module(module.ModuleModel):
     request_usage_frame = staticmethod(request_usage_frame)
 
     def _report_interfaces(self):
-        """An unmetered interface keeps serving, so enforcement gaps are only visible in the log."""
+        """Undeclared interfaces are refused per request in enforce; this makes it unmissable."""
         refused = self.usage_report_interfaces() or []
         #
         if refused and self.usage_get_mode() == MODE_ENFORCE:
-            log.error(
-                "usage: mode is enforce but %s interface(s) are unmetered and ungated: %s",
+            log.critical(
+                "usage: mode is enforce; %s interface(s) without usage hooks are BLOCKED "
+                "(every request answered 503): %s",
                 len(refused), ", ".join(refused),
             )
 

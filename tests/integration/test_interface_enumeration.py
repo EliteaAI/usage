@@ -7,7 +7,11 @@ though nothing is metered yet.
 Enumeration reads the loaded descriptors rather than asking interfaces to register themselves —
 an opt-in list would silently under-report whichever plugin forgot to join it.
 """
+import json
 import types
+
+import flask
+import pytest
 
 from fixtures.helpers import bind, fake_module
 from usage.methods import interfaces, mode as mode_module
@@ -22,11 +26,12 @@ def fake_descriptor(name, url_prefix=None, usage_hooks=False):
     )
 
 
-def build(config=None, **descriptors):
+def build(config=None, app=None, **descriptors):
     """A Module stand-in with the mode and interfaces mixins bound, as pylon binds them."""
     instance = fake_module(config={"usage": config if config is not None else {}})
     instance.context = types.SimpleNamespace(
         module_manager=types.SimpleNamespace(descriptors=descriptors),
+        app=app if app is not None else flask.Flask("usage-test"),
     )
     #
     return bind(instance, mode_module.Method, interfaces.Method)
@@ -108,7 +113,7 @@ class TestHookDeclaration:
         )
         #
         assert instance.usage_report_interfaces() == ["runtime_interface_custom"]
-        assert any("unmetered and ungated" in message
+        assert any("refused with 503" in message
                    for message in recording_log.messages("error"))
 
     def test_off_mode_is_informational_only(self, recording_log):
@@ -148,3 +153,106 @@ class TestNoInterfaces:
             "no runtime interfaces loaded" in message
             for message in recording_log.messages("info")
         )
+
+
+def serving_app(*names):
+    """A Flask app with one catch-all blueprint per interface, registered the way pylon does it."""
+    app = flask.Flask("usage-test")
+    #
+    for name in names:
+        blueprint = flask.Blueprint(name, __name__, url_prefix=f"/{name}")
+        blueprint.add_url_rule(
+            "/<path:url>", f"{name}_route", lambda url: ("served", 200), methods=["GET", "POST"],
+        )
+        app.register_blueprint(blueprint)
+    #
+    # Pylon has already served requests by the time usage reports, so late setup must still work
+    app.test_client().get("/")
+    return app
+
+
+class TestEnforceBlocksUndeclaredInterfaces:
+    """The refused list must stop traffic, not just be logged (#6768)."""
+
+    def test_enforce_refuses_predicts_through_the_undeclared_interface(self):
+        app = serving_app("runtime_interface_custom")
+        instance = build(
+            {"mode": "enforce"}, app=app,
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        #
+        instance.usage_report_interfaces()
+        response = app.test_client().post("/runtime_interface_custom/v1/chat/completions", json={})
+        #
+        assert response.status_code == 503
+        error = json.loads(response.data)["error"]
+        assert error["code"] == "interface_unmetered"
+        assert error["interface"] == "runtime_interface_custom"
+
+    def test_the_declared_interface_keeps_serving_in_enforce(self):
+        app = serving_app("runtime_interface_litellm", "runtime_interface_custom")
+        instance = build(
+            {"mode": "enforce"}, app=app,
+            runtime_interface_litellm=fake_descriptor(
+                "runtime_interface_litellm", "/llm", usage_hooks=True,
+            ),
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        #
+        instance.usage_report_interfaces()
+        client = app.test_client()
+        #
+        assert client.post("/runtime_interface_litellm/v1/chat/completions").status_code == 200
+        assert client.post("/runtime_interface_custom/v1/chat/completions").status_code == 503
+
+    @pytest.mark.parametrize("mode", ["observe", "off"])
+    def test_observe_and_off_keep_serving(self, mode):
+        app = serving_app("runtime_interface_custom")
+        instance = build(
+            {"mode": mode}, app=app,
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        #
+        instance.usage_report_interfaces()
+        #
+        assert app.test_client().get("/runtime_interface_custom/v1/models").status_code == 200
+
+    def test_switching_to_enforce_at_runtime_blocks_without_a_restart(self):
+        """Mode is a requires_restart:false setting; the guard must follow it live."""
+        app = serving_app("runtime_interface_custom")
+        instance = build(
+            {"mode": "observe"}, app=app,
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        instance.usage_report_interfaces()
+        client = app.test_client()
+        assert client.get("/runtime_interface_custom/x").status_code == 200
+        #
+        instance.descriptor.config["usage"]["mode"] = "enforce"
+        assert client.get("/runtime_interface_custom/x").status_code == 503
+        #
+        instance.descriptor.config["usage"]["mode"] = "observe"
+        assert client.get("/runtime_interface_custom/x").status_code == 200
+
+    def test_repeated_reports_install_one_guard(self):
+        """ready() and every reconfig() report again; guards must not pile up."""
+        app = serving_app("runtime_interface_custom")
+        instance = build(
+            {"mode": "enforce"}, app=app,
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        #
+        for _ in range(3):
+            instance.usage_report_interfaces()
+        #
+        assert len(app.before_request_funcs["runtime_interface_custom"]) == 1
+
+    def test_no_web_app_is_logged_as_critical(self, recording_log):
+        instance = build(
+            {"mode": "enforce"},
+            runtime_interface_custom=fake_descriptor("runtime_interface_custom", "/custom"),
+        )
+        instance.context.app = None
+        #
+        assert instance.usage_report_interfaces() == ["runtime_interface_custom"]
+        assert any("no web app" in message for message in recording_log.messages("critical"))

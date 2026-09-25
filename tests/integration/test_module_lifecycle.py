@@ -238,17 +238,17 @@ class TestReady:
         assert not recording_log.messages("warning")
         assert not recording_log.messages("error")
 
-    def test_enforce_errors_when_an_interface_is_unmetered(self, recording_log):
-        # Decision 5: the interface keeps serving, so the enforcement gap is only ever
-        # visible in the log. Silence here would mean silently ungated traffic.
+    def test_enforce_is_critical_when_an_interface_is_unmetered(self, recording_log):
+        # The interface is blocked per request (#6768); the startup line must say so
+        # unmissably, so an operator sees why its traffic is answered 503.
         instance, _ = build(config={"mode": "enforce"})
         instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.ready()
         #
         assert any(
-            "unmetered and ungated" in message
-            for message in recording_log.messages("error")
+            "BLOCKED" in message
+            for message in recording_log.messages("critical")
         )
         assert any(
             "runtime_interface_legacy" in record[2] for record in recording_log.records
@@ -294,8 +294,8 @@ class TestReconfig:
         instance.reconfig()
         #
         assert any(
-            "unmetered and ungated" in message
-            for message in recording_log.messages("error")
+            "BLOCKED" in message
+            for message in recording_log.messages("critical")
         )
 
     def test_flipping_back_to_off_is_quiet(self, recording_log):

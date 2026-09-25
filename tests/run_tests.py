@@ -104,6 +104,9 @@ def install_pylon_stubs():
 if __name__ == '__main__':
     install_pylon_stubs()
 
+    # The sibling `secrets` plugin would shadow the stdlib module werkzeug imports
+    import secrets  # pylint: disable=W0611,C0415
+
     # The plugin is imported as the package `usage`, so relative imports resolve
     sys.path.insert(0, PLUGINS_DIR)
 
