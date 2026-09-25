@@ -28,7 +28,6 @@ from tools import this  # pylint: disable=E0401
 
 from .hooks import begin_llm_call, meter_llm_response
 from .interface import meter_llm_call, prepare_llm_call, request_usage_frame
-from .methods.mode import MODE_ENFORCE
 from .schedule_bindings import MANAGED_SCHEDULES
 from .sources import registry
 
@@ -56,7 +55,6 @@ class Module(module.ModuleModel):
         """ Ready callback """
         # After shared.ready() created the parent table — usage depends_on shared
         self.usage_ensure_partitions()
-        self._report_interfaces()
         self._register_cron()
         self._register_openapi()
         self._register_admin_tasks()
@@ -65,7 +63,6 @@ class Module(module.ModuleModel):
     def reconfig(self):
         """ Re-config """
         log.info("usage reconfigured: mode=%s", self.usage_get_mode())
-        self._report_interfaces()
 
     def deinit(self):
         """ De-initialize module """
@@ -140,16 +137,6 @@ class Module(module.ModuleModel):
     begin_llm_call = staticmethod(begin_llm_call)
     meter_llm_response = staticmethod(meter_llm_response)
     request_usage_frame = staticmethod(request_usage_frame)
-
-    def _report_interfaces(self):
-        """An unmetered interface keeps serving, so enforcement gaps are only visible in the log."""
-        refused = self.usage_report_interfaces() or []
-        #
-        if refused and self.usage_get_mode() == MODE_ENFORCE:
-            log.error(
-                "usage: mode is enforce but %s interface(s) are unmetered and ungated: %s",
-                len(refused), ", ".join(refused),
-            )
 
     def _register_cron(self):
         try:

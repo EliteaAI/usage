@@ -4,7 +4,7 @@ import types
 
 from fixtures.helpers import bind
 from usage import module as module_module
-from usage.methods import admin_tasks, interfaces, mode as mode_module, partitions
+from usage.methods import admin_tasks, mode as mode_module, partitions
 from usage.sources import registry
 
 
@@ -29,7 +29,7 @@ def build(config=None, rpc=None, descriptors=None):
     )
     #
     instance = module_module.Module(context, descriptor)
-    bind(instance, mode_module.Method, partitions.Method, interfaces.Method, admin_tasks.Method)
+    bind(instance, mode_module.Method, partitions.Method, admin_tasks.Method)
     #
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
     instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
@@ -173,14 +173,11 @@ class TestReady:
         #
         assert len(openapi_registry.registered) == 1
 
-    def test_enumerates_interfaces_and_registers_the_cron(self):
+    def test_registers_both_crons(self):
         instance, calls = build()
-        reported = []
-        instance.usage_report_interfaces = lambda: reported.append("reported") or []
         #
         instance.ready()
         #
-        assert reported == ["reported"]
         assert [name for name, _ in calls if name == "cron"] == ["cron", "cron"]
 
     def test_cron_targets_the_registered_rpc_name(self):
@@ -229,7 +226,7 @@ class TestReady:
             for message in recording_log.messages("warning")
         )
 
-    def test_observe_says_nothing_when_every_interface_is_metered(self, recording_log):
+    def test_observe_says_nothing_at_startup(self, recording_log):
         """Metering and gating both work now, so a healthy mode is a quiet mode."""
         instance, _ = build(config={"mode": "observe"})
         #
@@ -238,33 +235,10 @@ class TestReady:
         assert not recording_log.messages("warning")
         assert not recording_log.messages("error")
 
-    def test_enforce_errors_when_an_interface_is_unmetered(self, recording_log):
-        # Decision 5: the interface keeps serving, so the enforcement gap is only ever
-        # visible in the log. Silence here would mean silently ungated traffic.
-        instance, _ = build(config={"mode": "enforce"})
-        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
-        #
-        instance.ready()
-        #
-        assert any(
-            "unmetered and ungated" in message
-            for message in recording_log.messages("error")
-        )
-        assert any(
-            "runtime_interface_legacy" in record[2] for record in recording_log.records
-        )
 
-    def test_enforce_is_quiet_when_every_interface_declares_hooks(self, recording_log):
-        instance, _ = build(config={"mode": "enforce"})
-        instance.usage_report_interfaces = lambda: []
-        #
-        instance.ready()
-        #
-        assert not recording_log.messages("error")
 
     def test_off_mode_says_nothing_at_all(self, recording_log):
         instance, _ = build(config={"mode": "off"})
-        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
         #
         instance.ready()
         #
@@ -284,28 +258,7 @@ class TestReconfig:
         assert instance.usage_get_mode() == "enforce"
         assert any("usage reconfigured" in message for message in recording_log.messages("info"))
 
-    def test_flipping_to_enforce_at_runtime_reports_unmetered_interfaces(self, recording_log):
-        # The admin flag flips without a restart, so ready()'s one-shot report would never
-        # be seen by the operator who actually flipped it.
-        instance, _ = build(config={"mode": "off"})
-        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
-        #
-        instance.descriptor.config["usage"]["mode"] = "enforce"
-        instance.reconfig()
-        #
-        assert any(
-            "unmetered and ungated" in message
-            for message in recording_log.messages("error")
-        )
 
-    def test_flipping_back_to_off_is_quiet(self, recording_log):
-        instance, _ = build(config={"mode": "enforce"})
-        instance.usage_report_interfaces = lambda: ["runtime_interface_legacy"]
-        #
-        instance.descriptor.config["usage"]["mode"] = "off"
-        instance.reconfig()
-        #
-        assert not recording_log.messages("error")
 
     def test_does_not_raise_on_an_empty_config(self):
         instance, _ = build(config=None)
