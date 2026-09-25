@@ -33,6 +33,29 @@ iterator = usage_hooks.meter_llm_response(usage_ctx, response, iterator)
 The hooks are resolved lazily at call time, so there is no `init_after` coupling in either direction.
 `model_name` is the raw requested name, before any interface-side rewriting.
 
+## Request headers metering relies on
+
+Agent runs from pylon_indexer reach `/llm/v1` with these headers. Any proxy between the indexer
+and pylon_main (customer ingress, WAF, API gateway) must pass them through unchanged:
+
+| Header | Sent by | Used for | If it is stripped |
+|---|---|---|---|
+| `X-Project-Id` | indexer | project the call is billed to | billed to the caller's resolved project instead |
+| `X-Elitea-Run-Id` | indexer | groups the LLM and tool rows of one run | rows carry no run id |
+| `X-Elitea-Attribution` | indexer | conversation and agent (leaf/root) of the call | row is billed, but agent analytics show nothing for it |
+
+Nothing is logged when a header is simply absent: a script calling `/llm/v1` directly never
+sends them, so absence is normal. If a customer reports "the predict ran but agent analytics show
+0", check first that these headers survive their proxies.
+
+`X-Elitea-Attribution` is base64url JSON carrying a `sig` field:
+HMAC-SHA256 over `"<billed project id>\n<canonical JSON of the other fields>"`. The key is
+`HMAC(event_node.hmac_key, "usage-attribution-v1")`, i.e. derived from `INDEXER_HMAC_KEY`, which
+both pylons already share and no user can read. A missing or bad signature drops the agent
+labels (the row and its cost are kept) and logs a warning — this is what stops a caller from
+billing its spend to someone else's agent. The two pylons must therefore run with the same
+`INDEXER_HMAC_KEY`, set to a real random value.
+
 ## Aggregation SQL lives here
 
 All SQL against `usage_event` and `usage_counter` lives in this plugin and is exposed as named RPCs

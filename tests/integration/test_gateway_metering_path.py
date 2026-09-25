@@ -7,6 +7,8 @@ defects that mattered most: a caller header used to skip the ledger, and an ordi
 predict used to be excluded from it.
 """
 import base64
+import hashlib
+import hmac
 import json
 import types
 
@@ -29,8 +31,13 @@ ATTRIBUTION = {
     "root_entity_id": 1,
     "root_entity_version_id": 2,
 }
+SIGNING_KEY = b"k" * 32
+_CANONICAL = json.dumps(ATTRIBUTION, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+SIGNED = {**ATTRIBUTION, "sig": hmac.new(
+    SIGNING_KEY, f"7\n{_CANONICAL}".encode("utf-8"), hashlib.sha256,
+).hexdigest()}
 ATTRIBUTION_BLOB = base64.urlsafe_b64encode(
-    json.dumps(ATTRIBUTION, separators=(",", ":")).encode("utf-8"),
+    json.dumps(SIGNED, separators=(",", ":")).encode("utf-8"),
 ).decode("ascii").rstrip("=")
 
 # A DIAL body is indistinguishable from an OpenAI one; only the credential says otherwise
@@ -96,6 +103,7 @@ def _gateway(monkeypatch, mode):
         descriptor=types.SimpleNamespace(config={"usage": {"mode": mode}}), module=recorder,
     ))
     monkeypatch.setattr(hooks, "context", types.SimpleNamespace(rpc_manager=Prices()))
+    monkeypatch.setattr(hooks, "_signing_key", lambda: SIGNING_KEY)
     monkeypatch.setattr(
         interface, "context", types.SimpleNamespace(rpc_manager=ProviderLookup()),
     )
