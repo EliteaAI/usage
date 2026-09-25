@@ -5,6 +5,8 @@ lands rather than about internal state: an unmetered call must become a visible 
 instead of nothing, which is the defect this replaces.
 """
 import base64
+import hashlib
+import hmac
 import inspect
 import json
 import types
@@ -114,6 +116,7 @@ def metering(monkeypatch):
         module=recorder,
     ))
     monkeypatch.setattr(hooks, "context", types.SimpleNamespace(rpc_manager=prices))
+    monkeypatch.setattr(hooks, "_signing_key", lambda: SIGNING_KEY)
     #
     return types.SimpleNamespace(rows=recorder.rows, prices=prices, recorder=recorder)
 
@@ -130,6 +133,19 @@ def begin(provider=None, model_name="gpt-4o", endpoint="/v1/chat/completions", h
         project_id=7, user_id=42, model_name=model_name, endpoint=endpoint,
         headers={} if headers is None else headers, provider=provider,
     )
+
+
+SIGNING_KEY = b"k" * 32
+# HMAC-SHA256 of '7\\n{"conversation_id":"c","entity_id":1}' under SIGNING_KEY
+VECTOR_SIG = "7951aabd37cfed494032f17d7facdb8cf1ecfb5d4d35f91c312f36c719f85659"
+
+
+def signed(columns, project_id=7, key=SIGNING_KEY):
+    """What pylon_indexer signs: the billed project plus the canonical JSON of every column."""
+    canonical = json.dumps(columns, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+    message = f"{project_id}\n{canonical}".encode("utf-8")
+    #
+    return {**columns, "sig": hmac.new(key, message, hashlib.sha256).hexdigest()}
 
 
 def packed(columns):
@@ -325,7 +341,7 @@ class TestTheRowThatLands:
 
 
 class TestAttribution:
-    """Which conversation and which agent the call belongs to — a caller's header, so untrusted.
+    """Which conversation and which agent the call belongs to — kept only when the indexer signed it.
 
     The columns are named as in usage_event so neither side maps anything; the tool rows of the
     same run are written from pylon_indexer with identical values.
@@ -338,7 +354,7 @@ class TestAttribution:
         )
 
     def test_the_header_is_decoded_onto_the_row(self, metering):
-        drain(self.attributed({hooks.ATTRIBUTION_HEADER: packed(ATTRIBUTION)}), [OPENAI_JSON])
+        drain(self.attributed({hooks.ATTRIBUTION_HEADER: packed(signed(ATTRIBUTION))}), [OPENAI_JSON])
         #
         row = metering.rows[0]
         assert {key: row[key] for key in ATTRIBUTION} == ATTRIBUTION
@@ -346,13 +362,13 @@ class TestAttribution:
     def test_an_explicitly_passed_attribution_is_used(self, metering):
         # The interface must strip the header before the request leaves — these ids are ours,
         # not the upstream's — so by metering time the parked value is all there is.
-        drain(self.attributed(attribution=dict(ATTRIBUTION)), [OPENAI_JSON])
+        drain(self.attributed(attribution=signed(ATTRIBUTION)), [OPENAI_JSON])
         #
         assert metering.rows[0]["conversation_id"] == ATTRIBUTION["conversation_id"]
 
     def test_a_packed_string_is_accepted_where_a_dict_is(self, metering):
         # An interface may park the raw header value rather than decode it itself.
-        drain(self.attributed(attribution=packed(ATTRIBUTION)), [OPENAI_JSON])
+        drain(self.attributed(attribution=packed(signed(ATTRIBUTION))), [OPENAI_JSON])
         #
         assert metering.rows[0]["entity_id"] == 1
 
@@ -366,7 +382,7 @@ class TestAttribution:
         # A newer producer must not be able to insert into a column this reader has never heard
         # of, and an older reader must not fail on one.
         drain(
-            self.attributed(attribution={**ATTRIBUTION, "tenant_id": 3, "entity_kind": "x"}),
+            self.attributed(attribution=signed({**ATTRIBUTION, "tenant_id": 3, "entity_kind": "x"})),
             [OPENAI_JSON],
         )
         #
@@ -376,12 +392,12 @@ class TestAttribution:
 
     def test_the_id_columns_are_coerced_to_int(self, metering):
         # JSON from a header may carry them as text; these are integer columns.
-        drain(self.attributed(attribution={**ATTRIBUTION, "entity_id": "11"}), [OPENAI_JSON])
+        drain(self.attributed(attribution=signed({**ATTRIBUTION, "entity_id": "11"})), [OPENAI_JSON])
         #
         assert metering.rows[0]["entity_id"] == 11
 
     def test_an_unparseable_id_is_dropped_rather_than_failing_the_insert(self, metering):
-        drain(self.attributed(attribution={**ATTRIBUTION, "entity_id": "nope"}), [OPENAI_JSON])
+        drain(self.attributed(attribution=signed({**ATTRIBUTION, "entity_id": "nope"})), [OPENAI_JSON])
         #
         row = metering.rows[0]
         assert "entity_id" not in row
@@ -392,7 +408,7 @@ class TestAttribution:
         eval_attribution = {
             **ATTRIBUTION, "entity_type": "evaluation", "entity_id": 42, "entity_version_id": None,
         }
-        drain(self.attributed(headers={hooks.ATTRIBUTION_HEADER: packed(eval_attribution)}),
+        drain(self.attributed(headers={hooks.ATTRIBUTION_HEADER: packed(signed(eval_attribution))}),
               [OPENAI_JSON])
         #
         row = metering.rows[0]
@@ -402,9 +418,8 @@ class TestAttribution:
 
     def test_text_is_truncated_to_the_column_width(self, metering):
         drain(
-            self.attributed(attribution={
-                **ATTRIBUTION, "entity_name": "n" * 900, "entity_type": "t" * 90,
-            }),
+            self.attributed(attribution=signed({**ATTRIBUTION, "entity_name": "n" * 900, "entity_type": "t" * 90,
+            })),
             [OPENAI_JSON],
         )
         #
@@ -414,7 +429,7 @@ class TestAttribution:
 
     def test_a_malformed_header_costs_the_labels_not_the_row(self, metering):
         # Half a header: whatever breaks first, base64 or json, the call is still recorded.
-        mangled = packed(ATTRIBUTION)[:20]
+        mangled = packed(signed(ATTRIBUTION))[:20]
         #
         drain(self.attributed({hooks.ATTRIBUTION_HEADER: mangled}), [OPENAI_JSON])
         #
@@ -433,15 +448,74 @@ class TestAttribution:
         # The row spreads attribution first precisely so this is unreachable, and the key
         # whitelist stops it a second time. Both matter: the header is caller-supplied.
         drain(
-            self.attributed(attribution={
-                **ATTRIBUTION, "project_id": 999, "user_id": 999, "cost_nano_usd": 0,
-            }),
+            self.attributed(attribution=signed({**ATTRIBUTION, "project_id": 999, "user_id": 999, "cost_nano_usd": 0,
+            })),
             [OPENAI_JSON],
         )
         #
         row = metering.rows[0]
         assert (row["project_id"], row["user_id"]) == (7, 42)
         assert row["cost_nano_usd"] == 500_000
+
+    def test_an_unsigned_header_costs_the_labels_not_the_row(self, metering):
+        # #6762: a script calling /llm/v1 can build the header by hand, but it cannot sign it.
+        drain(self.attributed({hooks.ATTRIBUTION_HEADER: packed(ATTRIBUTION)}), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert (row["project_id"], row["user_id"], row["cost_nano_usd"]) == (7, 42, 500_000)
+        assert not set(ATTRIBUTION) & set(row)
+
+    def test_a_forged_signature_is_rejected(self, metering):
+        forged = {**ATTRIBUTION, "sig": "0" * 64}
+        #
+        drain(self.attributed(attribution=forged), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_a_signed_header_cannot_be_edited(self, metering):
+        # Relabelling someone else's agent onto a real signed header breaks the signature.
+        tampered = {**signed(ATTRIBUTION), "entity_id": 999999, "entity_name": "FORGED"}
+        #
+        drain(self.attributed(attribution=tampered), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_a_header_signed_for_another_project_is_rejected(self, metering):
+        # The billed project is part of what is signed, so a header cannot be moved between projects.
+        drain(self.attributed(attribution=signed(ATTRIBUTION, project_id=8)), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_a_header_signed_with_another_key_is_rejected(self, metering):
+        drain(self.attributed(attribution=signed(ATTRIBUTION, key=b"x" * 32)), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
+    def test_no_configured_key_drops_every_label(self, metering, monkeypatch):
+        # Without the key nothing can be verified, so nothing is trusted.
+        monkeypatch.setattr(hooks, "_signing_key", lambda: None)
+        #
+        drain(self.attributed(attribution=signed(ATTRIBUTION)), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert row["input_tokens"] == 100
+        assert not set(ATTRIBUTION) & set(row)
+
+    def test_the_signing_key_is_derived_from_the_event_node_key(self, monkeypatch):
+        # Twinned with the indexer's attribution_signing_key: same base key, same derived key.
+        monkeypatch.setattr(hooks, "this", types.SimpleNamespace(
+            for_module=lambda name: types.SimpleNamespace(descriptor=types.SimpleNamespace(
+                config={"event_node": {"hmac_key": "base"}} if name == "worker_client" else {},
+            )),
+        ))
+        #
+        assert hooks._signing_key() == hmac.new(  # pylint: disable=W0212
+            b"base", b"usage-attribution-v1", hashlib.sha256,
+        ).digest()
+
+    def test_the_signature_matches_a_fixed_vector(self, metering):
+        # The same vector is asserted in indexer_worker's tests, so the two sides cannot drift.
+        assert signed({"entity_id": 1, "conversation_id": "c"}, key=b"k" * 32)["sig"] == VECTOR_SIG
 
 
 class TestProviderNarrowsTheDialect:

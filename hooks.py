@@ -23,6 +23,8 @@ Resolved lazily at call time (tools.usage_hooks), so neither side needs init_aft
 import base64
 import dataclasses
 import datetime
+import hashlib
+import hmac
 import json
 import time
 import typing
@@ -77,6 +79,9 @@ ATTRIBUTION_INT_KEYS = (
 ATTRIBUTION_HEADER_LIMIT = 4096
 ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32}
 ATTRIBUTION_TEXT_LIMIT = 512
+#: Signature field inside the header JSON; the indexer signs it with a key users never see (#6762)
+ATTRIBUTION_SIGNATURE_KEY = "sig"
+ATTRIBUTION_SIGNING_CONTEXT = b"usage-attribution-v1"
 
 # Enough for any provider's first frame; the dialects are incremental, so nothing else is kept
 HEAD_LIMIT = 8192
@@ -134,11 +139,12 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         endpoint=endpoint,
         provider=provider,
         run_id=_run_id(run_id if run_id else (headers or {}).get(RUN_ID_HEADER)),
-        attribution=_attribution(attribution, headers),
+        attribution=None,
         user_email=_user_email(user_email, user_id),
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
     )
+    ctx.attribution = _attribution(attribution, headers, ctx.project_id)
     #
     _admit(ctx, mode, max_output_tokens, input_size_bytes)
     #
@@ -269,17 +275,22 @@ def _notify_limit_reached(ctx, scope):
         log.exception("usage: failed to notify that a budget is exhausted")
 
 
-def _attribution(attribution, headers):
-    """The run's conversation and entity columns.
+def _attribution(attribution, headers, project_id):
+    """The run's conversation and entity columns, kept only when the indexer signed them.
 
-    An interface that strips the header before metering (as it must: these ids are ours, not the
-    upstream's) parks the value and passes it here; one that does not need not pass anything.
+    An interface that strips the header before metering parks the value and passes it here.
     """
     if attribution is None:
         attribution = (headers or {}).get(ATTRIBUTION_HEADER)
     #
+    if not attribution:
+        return {}
+    #
     if isinstance(attribution, str):
         attribution = _decode_attribution(attribution)
+    #
+    if not _signed(attribution, project_id):
+        return {}
     #
     return _clean_attribution(attribution)
 
@@ -323,6 +334,44 @@ def _clean_attribution(attribution):
             cleaned[key] = str(value)[:ATTRIBUTION_TEXT_LIMITS.get(key, ATTRIBUTION_TEXT_LIMIT)]
     #
     return cleaned
+
+
+def _signed(attribution, project_id):
+    """A caller cannot sign, so an unsigned or mismatched header loses its labels, never its row."""
+    if not isinstance(attribution, dict):
+        return False
+    #
+    columns = dict(attribution)
+    signature = columns.pop(ATTRIBUTION_SIGNATURE_KEY, None)
+    key = _signing_key()
+    #
+    if not signature or not key or not project_id:
+        log.warning("usage: unsigned %s header for project %s; labels dropped",
+                    ATTRIBUTION_HEADER, project_id)
+        return False
+    #
+    canonical = json.dumps(columns, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+    expected = hmac.new(key, f"{project_id}\n{canonical}".encode("utf-8"), hashlib.sha256).hexdigest()
+    #
+    if not hmac.compare_digest(str(signature), expected):
+        log.warning("usage: bad %s signature for project %s; labels dropped",
+                    ATTRIBUTION_HEADER, project_id)
+        return False
+    #
+    return True
+
+
+def _signing_key():
+    """Same derivation as the indexer, from the event-node key both pylons already share."""
+    try:
+        base_key = (this.for_module("worker_client").descriptor.config.get("event_node") or {}).get("hmac_key")
+    except:  # pylint: disable=W0702
+        base_key = None
+    #
+    if not base_key:
+        return None
+    #
+    return hmac.new(str(base_key).encode("utf-8"), ATTRIBUTION_SIGNING_CONTEXT, hashlib.sha256).digest()
 
 
 def _user_email(user_email, user_id):
