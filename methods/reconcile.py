@@ -19,6 +19,7 @@
 
 import datetime
 import json
+import time
 
 from sqlalchemy import func, select
 
@@ -31,7 +32,7 @@ from ._counters import (
     ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
 )
 from .drainer import counter_upsert
-from .gate import KEY_PREFIX, member_hash_key, project_hash_key
+from .gate import KEY_PREFIX, QUEUE_KEY, member_hash_key, period_of, project_hash_key
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
 
@@ -44,6 +45,12 @@ DEFAULT_REPAIR_BATCH_SIZE = 500
 # never both apply a repair. Arbitrary but must stay stable across deploys — changing it drops
 # mutual exclusion with any peer still running the old value.
 RECONCILE_ADVISORY_LOCK_KEY = 7965501001
+
+# Gate counters only move at settle, right after the fact is queued; once the drainer has passed a
+# cutoff, facts before it and the counter read at it must agree, however busy the project is
+DEFAULT_DRAIN_WAIT_SECONDS = 120
+DEFAULT_DRAIN_GRACE_SECONDS = 20
+DRAIN_POLL_SECONDS = 1
 
 RECONCILE_HISTORY_KEY = f"{KEY_PREFIX}:reconcile:history"
 RECONCILE_HISTORY_MAX = 168  # ~1 week of hourly runs
@@ -80,6 +87,36 @@ def _repair_hash_key(row):
     return member_hash_key(row["project_id"], row["user_id"], row["period_start"])
 
 
+def _redis_counter_owner(hash_key):
+    """(project_id, user_id) of a gate counter hash, or None for any other key."""
+    parts = str(hash_key).split(":")
+    #
+    try:
+        if len(parts) == 5 and parts[2] == "p":
+            return int(parts[3]), PROJECT_USER_SENTINEL
+        #
+        if len(parts) == 6 and parts[2] == "u":
+            return int(parts[3]), int(parts[4])
+    except ValueError:
+        pass
+    #
+    return None
+
+
+def _redis_repair_row(key, start, expected, actual):
+    return {
+        "project_id": key[0], "user_id": key[1], "period_start": start.date(),
+        "expected": {"cost_nano_usd": expected}, "actual": {"cost_nano_usd": actual},
+    }
+
+
+def _queued_ts(payload):
+    try:
+        return datetime.datetime.fromisoformat(str(json.loads(payload)["ts"]))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 def period_bounds(period):
     """[start, next_start) of a 'YYYYMM' period, as UTC datetimes."""
     year, month = int(str(period)[:4]), int(str(period)[4:6])
@@ -108,7 +145,28 @@ def _reconcile_report(self, period, start, end):
     if drift:
         log.warning("usage: %s counter row(s) drift in period %s", len(drift), period)
     #
-    return {"period": period, "applied": False, "drift": drift}
+    redis_drift = _redis_drift_or_none(self, period, start, end)
+    #
+    return {"period": period, "applied": False, "drift": drift, "redis_drift": redis_drift}
+
+
+def _redis_drift_or_none(self, period, start, end):
+    """None when the gate side could not be judged this run; it is retried on the next one."""
+    try:
+        redis_drift = self.usage_redis_counter_drift(start, end)
+    except Exception:  # pylint: disable=W0703
+        # Not bare except: this wraps a blocking drain-wait loop, and on gevent a bare except
+        # also swallows cooperative-cancellation exceptions (GreenletExit/Timeout), not just errors
+        log.exception("usage: reconcile failed to compare gate counters for period %s", period)
+        return None
+    #
+    if redis_drift:
+        log.warning(
+            "usage: %s gate counter(s) in Redis drift from the facts in period %s: %s",
+            len(redis_drift), period, redis_drift,
+        )
+    #
+    return redis_drift
 
 
 def _reconcile_apply(self, period, start, end):
@@ -134,18 +192,26 @@ def _reconcile_apply(self, period, start, end):
             len(failed), len(drift), period, failed,
         )
     #
+    # After the Postgres repair, which pushes its own deltas into Redis: measured first, the
+    # same gap would be closed twice
+    redis_drift = _redis_drift_or_none(self, period, start, end)
+    redis_repaired = self.usage_reconcile_push_repairs(redis_drift) if redis_drift else 0
+    #
     self.usage_reconcile_record_run({
         "period": period,
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "drift": len(drift),
         "repaired": repaired,
         "failed": len(failed),
+        "redis_drift": None if redis_drift is None else len(redis_drift),
+        "redis_repaired": redis_repaired,
         "queue_depth": self.usage_queue_depth(),
     })
     #
     return {
         "period": period, "applied": not failed, "drift": drift,
         "repaired": repaired, "failed": failed,
+        "redis_drift": redis_drift, "redis_repaired": redis_repaired,
     }
 
 
@@ -329,6 +395,107 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 })
         #
         return drift
+
+    @web.method()
+    def usage_redis_counter_drift(self, start, end):
+        """Gate counters in Redis that disagree with the facts, confirmed by two samples.
+
+        A standing gap reads the same both times; a call settling across a sample boundary
+        does not, so only an identical delta is reported and repaired.
+        """
+        first = self.usage_redis_drift_sample(start, end)
+        #
+        if not first:
+            return None if first is None else []
+        #
+        second = self.usage_redis_drift_sample(start, end)
+        #
+        if second is None:
+            return None
+        #
+        return [
+            _redis_repair_row(key, start, *second[key])
+            for key in sorted(first)
+            if key in second and first[key][0] - first[key][1] == second[key][0] - second[key][1]
+        ]
+
+    @web.method()
+    def usage_redis_drift_sample(self, start, end):
+        """{key: (facts, redis)} where they differ, or None when the drainer is too far behind."""
+        live = self.usage_redis_counter_totals(start)
+        #
+        if not live:
+            return {}
+        # Taken after the read: every settle Redis has seen was queued before this instant
+        cutoff = datetime.datetime.now(datetime.timezone.utc)
+        #
+        if not self.usage_wait_drained_past(cutoff):
+            log.warning("usage: drainer is behind; gate counters not compared this run")
+            return None
+        #
+        with db.engine.connect() as connection:
+            facts = self.usage_fact_totals(connection, start, min(end, cutoff))
+        #
+        sample = {}
+        #
+        # Live keys only: a cold one is primed from the repaired Postgres row on its next call
+        for key, actual in live.items():
+            expected = (facts.get(key) or {}).get("cost_nano_usd", 0)
+            #
+            if expected != actual:
+                sample[key] = (expected, actual)
+        #
+        return sample
+
+    @web.method()
+    def usage_redis_counter_totals(self, start):
+        """{(project_id, user_id): counter} for every live gate hash of the period."""
+        client = self.usage_redis_client()
+        keys = [
+            key for key in client.scan_iter(
+                match=f"{KEY_PREFIX}:ctr:*:{period_of(start)}", count=1000,
+            )
+            if _redis_counter_owner(key) is not None
+        ]
+        #
+        if not keys:
+            return {}
+        #
+        pipe = client.pipeline(transaction=False)
+        #
+        for key in keys:
+            pipe.hget(key, "counter")
+        #
+        return {
+            _redis_counter_owner(key): int(counter)
+            for key, counter in zip(keys, pipe.execute())
+            if counter is not None
+        }
+
+    @web.method()
+    def usage_wait_drained_past(self, cutoff):
+        """True once no fact from before the cutoff can still be queued or mid-insert."""
+        redis_config = self.usage_config().get("redis") or {}
+        grace = int(redis_config.get("lease_seconds", DEFAULT_DRAIN_GRACE_SECONDS))
+        deadline = time.monotonic() + DEFAULT_DRAIN_WAIT_SECONDS
+        client = self.usage_redis_client()
+        #
+        while True:
+            head = client.lindex(QUEUE_KEY, 0)
+            head_ts = None if head is None else _queued_ts(head)
+            #
+            if head is None or (head_ts is not None and head_ts >= cutoff):
+                break
+            #
+            if time.monotonic() >= deadline:
+                return False
+            #
+            time.sleep(DRAIN_POLL_SECONDS)
+        #
+        # A batch popped before the cutoff commits within one drain tick, bounded by the lease
+        time.sleep(max(0, grace))
+        #
+        return True
 
     @web.method()
     def usage_fact_totals(self, connection, start, end):

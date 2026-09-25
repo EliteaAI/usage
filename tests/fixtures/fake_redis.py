@@ -4,6 +4,7 @@ The real scripts run inside Redis, so unit tests cannot execute them. They are r
 here against the same KEYS/ARGV contract, which is what the gate tests actually exercise:
 if the Python port and the Lua ever disagree the port is wrong, so keep them side by side.
 """
+import fnmatch
 import time
 
 from usage.methods import gate
@@ -21,9 +22,15 @@ class RecordingPipeline:
         #
         return self
 
+    def hget(self, key, field):
+        self.queued.append((None, key, (field,)))
+        #
+        return self
+
     def execute(self):
         results = [
-            self.client.eval(script, numkeys, *args)
+            self.client.hget(numkeys, args[0]) if script is None
+            else self.client.eval(script, numkeys, *args)
             for script, numkeys, args in self.queued
         ]
         self.client.pipelines_executed += 1
@@ -144,6 +151,14 @@ class RecordingRedis:
         taken, self.lists[key] = queue[:count], queue[count:]
         #
         return taken
+
+    def lindex(self, key, index):
+        queue = self.lists.get(key, [])
+        #
+        return queue[index] if -len(queue) <= index < len(queue) else None
+
+    def scan_iter(self, match="*", count=None):  # pylint: disable=W0613
+        return [key for key in list(self.hashes) if fnmatch.fnmatchcase(key, match)]
 
     def llen(self, key):
         return len(self.lists.get(key, []))
