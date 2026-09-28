@@ -40,3 +40,8 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         same bucket list as its own generic active-users count without the two drifting.
         """
         return an.ai_active_users_trend(project_id, date_from, date_to, granularity, roles)
+
+    @web.rpc("usage_event_type_health", "usage_event_type_health")
+    def usage_event_type_health(self, project_id, date_from=None, date_to=None, **kwargs):  # pylint: disable=W0613
+        """llm/tool health rows for elitea_core's Health tab, so it matches Overview's counts."""
+        return an.event_type_health(project_id, date_from, date_to)
