@@ -11,6 +11,7 @@ EXPECTED_PROPERTIES = {
     "usage_queue_flush_max_batches_per_tick",
     "usage_reaper_interval_seconds", "usage_lease_seconds", "usage_limits_cache_ttl_seconds",
     "usage_project_warning_pct", "usage_personal_project_warning_pct", "usage_user_warning_pct",
+    "usage_warnings_dismissible",
     "usage_reconcile_repair_batch_size",
 }
 
@@ -118,7 +119,7 @@ class TestAdminSchema:
     # the existing Cost Budgets page, which is the only section the admin UI declares for them.
     COST_BUDGETS_PROPERTIES = {
         "usage_mode", "usage_project_warning_pct", "usage_personal_project_warning_pct",
-        "usage_user_warning_pct",
+        "usage_user_warning_pct", "usage_warnings_dismissible",
     }
 
     def test_every_property_is_sectioned(self, admin_schema):

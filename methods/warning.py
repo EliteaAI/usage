@@ -45,10 +45,23 @@ WARNING_PCT_KEYS = {
 BUDGET_WARNING_TTL = 60.0
 
 NO_WARNING = {
-    "scope": None, "percent_used": None, "warning_pct": None, "should_warn": False,
+    "scope": None, "percent_used": None, "warning_pct": None, "level": None, "should_warn": False,
 }
 
+# Escalation points above the configured threshold; each one re-shows a dismissed banner
+WARNING_LEVELS = (90, 95)
+
 _warning_cache = cachetools.TTLCache(maxsize=8192, ttl=BUDGET_WARNING_TTL)
+
+
+def warning_level(pct, threshold_pct):
+    """Highest level reached (the threshold or an escalation above it), or None below it."""
+    if pct < threshold_pct:
+        return None
+    #
+    reached = [level for level in WARNING_LEVELS if threshold_pct < level <= pct]
+    #
+    return max(reached) if reached else threshold_pct
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -71,11 +84,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return value if 1 <= value <= 100 else DEFAULT_WARNING_PCT
 
     @web.method()
+    def usage_get_warnings_dismissible(self):
+        """Whether users may close the budget warning banner; on unless explicitly disabled."""
+        warnings = self.usage_config().get("warnings", None) or {}
+        #
+        return warnings.get("dismissible", True) is not False
+
+    @web.method()
     def usage_get_budget_warning_state(self, project_id, user_id=None):
         """Whether to warn this user that a budget is nearing its limit, and which one.
 
-        The member budget wins over the project budget and only one scope is ever returned,
-        so the UI has no precedence rule to get wrong.
+        Only one scope is ever returned: the highest level reached, member on a tie.
         """
         key = (int(project_id), None if user_id is None else int(user_id))
         #
@@ -107,7 +126,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             #
             personal = bool(limits.get("is_personal_project", False))
             #
-            # Member first: it is the one that stops this user specifically
+            # Member first so it wins ties: it is the one that stops this user specifically
             scopes = []
             #
             if user_id:
@@ -124,6 +143,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             ))
             #
             client = self.usage_redis_client()
+            best = None
             #
             for scope, threshold_scope, hash_key, limit in scopes:
                 if limit is None or int(limit) <= 0:
@@ -137,8 +157,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     scope, spent, int(limit), self.usage_get_warning_threshold(threshold_scope),
                 )
                 #
-                if state is not None:
-                    return state
+                # Highest level wins so a lower-scope dismissal can't hide an escalation; ties keep member
+                if state is not None and (best is None or state["level"] > best["level"]):
+                    best = state
+            #
+            if best is not None:
+                return best
         except:  # pylint: disable=W0702
             log.exception(
                 "usage: failed to resolve budget warning for project %s user %s",
@@ -154,15 +178,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return None
         #
         pct = used_nano / limit_nano * 100
+        level = warning_level(pct, threshold_pct)
         #
         # At or over the limit the refusal itself is the message, so this banner stays out of
         # the way -- and a stale reading cannot contradict a rejection the user just saw
-        if pct < threshold_pct or pct >= 100:
+        if level is None or pct >= 100:
             return None
         #
         return {
             "scope": scope,
-            "percent_used": round(pct),
+            # Truncated so the shown number never reads as a level not yet reached (94.6 -> 94)
+            "percent_used": int(pct),
             "warning_pct": threshold_pct,
+            "level": level,
             "should_warn": True,
         }

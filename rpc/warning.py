@@ -32,3 +32,8 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
     def usage_get_warning_threshold_rpc(self, scope, **kwargs):  # pylint: disable=W0613
         """Configured warning percentage for a budget scope."""
         return self.usage_get_warning_threshold(scope)
+
+    @web.rpc("usage_get_warnings_dismissible", "usage_warnings_dismissible_now")
+    def usage_get_warnings_dismissible_rpc(self, **kwargs):  # pylint: disable=W0613
+        """Whether users may dismiss the budget warning banner."""
+        return self.usage_get_warnings_dismissible()
