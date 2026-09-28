@@ -28,6 +28,14 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         """Current usage mode, so the UI can hide the feature when it is off."""
         return self.usage_get_mode()
 
+    @web.rpc("usage_mode_settings", "usage_mode_settings")
+    def usage_mode_settings_rpc(self, **kwargs):  # pylint: disable=W0613
+        """Mode plus warning-dismissibility in one hop; callers needing both should use this."""
+        return {
+            "mode": self.usage_get_mode(),
+            "warnings_dismissible": self.usage_get_warnings_dismissible(),
+        }
+
     @web.rpc("usage_ensure_partitions", "usage_ensure_partitions_now")
     def usage_ensure_partitions_rpc(self, **kwargs):  # pylint: disable=W0613
         """Create the current and upcoming usage_event partitions. Called by the daily cron."""
