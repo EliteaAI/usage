@@ -65,6 +65,12 @@ SYSTEM_USER_EMAIL_SUFFIX = "@centry.user"
 # Drops the synthetic actor from anything user-facing
 HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
+# Platform-managed roles that project creation copies into every project's role set (#6794):
+# super_admin is seeded into mode="default" and system is the pre-existing per-project role.
+# Neither is a role a user picks, so both are hidden from the analytics role filter — mirrors
+# admin/constants.py's RESTRICTED_ROLES.
+RESTRICTED_ROLES = {"super_admin", "system"}
+
 # Global super-admin verdicts, cached per user_id: {user_id: (monotonic_stamp, is_super_admin)}
 SUPER_ADMIN_TTL_SECONDS = 300
 SUPER_ADMIN_CACHE_MAX = 2048
@@ -634,7 +640,10 @@ def list_available_roles(project_id):
         log.exception("usage: role lookup failed for project %s", project_id)
         return []
     #
-    return sorted({r["name"] for r in project_roles if r.get("name")})
+    return sorted({
+        r["name"] for r in project_roles
+        if r.get("name") and r["name"] not in RESTRICTED_ROLES
+    })
 
 
 def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None):
