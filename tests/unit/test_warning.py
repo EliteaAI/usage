@@ -176,15 +176,37 @@ class TestResolveWarning:
         #
         assert instance.usage_resolve_budget_warning(7) == warning_module.NO_WARNING
 
-    def test_member_scope_wins_over_project_scope(self, monkeypatch):
+    def test_higher_level_scope_wins(self, monkeypatch):
+        # Member sits at 80 while the project escalates to 95: returning the member state would
+        # let a member-level dismissal hide the project escalation that is about to block them.
         monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
         monkeypatch.setattr(warning_module, "member_hash_key", lambda pid, uid, moment: "M")
         instance = module_with(
             {"mode": "enforce"}, self.LIMITS, {"P": {"counter": "990"}, "M": {"counter": "850"}},
         )
         #
-        # Only one scope is ever returned, so the UI has no precedence rule to get wrong.
+        state = instance.usage_resolve_budget_warning(7, 3)
+        assert state["scope"] == "project" and state["level"] == 95
+
+    def test_member_scope_wins_a_tie(self, monkeypatch):
+        # Same level on both: member is the budget that stops this user specifically.
+        monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
+        monkeypatch.setattr(warning_module, "member_hash_key", lambda pid, uid, moment: "M")
+        instance = module_with(
+            {"mode": "enforce"}, self.LIMITS, {"P": {"counter": "860"}, "M": {"counter": "850"}},
+        )
+        #
         assert instance.usage_resolve_budget_warning(7, 3)["scope"] == "member"
+
+    def test_member_alone_still_warns(self, monkeypatch):
+        monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")
+        monkeypatch.setattr(warning_module, "member_hash_key", lambda pid, uid, moment: "M")
+        instance = module_with(
+            {"mode": "enforce"}, self.LIMITS, {"P": {"counter": "100"}, "M": {"counter": "910"}},
+        )
+        #
+        state = instance.usage_resolve_budget_warning(7, 3)
+        assert state["scope"] == "member" and state["level"] == 90
 
     def test_personal_project_reads_its_own_threshold(self, monkeypatch):
         monkeypatch.setattr(warning_module, "project_hash_key", lambda pid, moment: "P")

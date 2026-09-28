@@ -94,8 +94,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_get_budget_warning_state(self, project_id, user_id=None):
         """Whether to warn this user that a budget is nearing its limit, and which one.
 
-        The member budget wins over the project budget and only one scope is ever returned,
-        so the UI has no precedence rule to get wrong.
+        Only one scope is ever returned: the highest level reached, member on a tie.
         """
         key = (int(project_id), None if user_id is None else int(user_id))
         #
@@ -127,7 +126,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             #
             personal = bool(limits.get("is_personal_project", False))
             #
-            # Member first: it is the one that stops this user specifically
+            # Member first so it wins ties: it is the one that stops this user specifically
             scopes = []
             #
             if user_id:
@@ -144,6 +143,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             ))
             #
             client = self.usage_redis_client()
+            best = None
             #
             for scope, threshold_scope, hash_key, limit in scopes:
                 if limit is None or int(limit) <= 0:
@@ -157,8 +157,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     scope, spent, int(limit), self.usage_get_warning_threshold(threshold_scope),
                 )
                 #
-                if state is not None:
-                    return state
+                # Highest level wins so a lower-scope dismissal can't hide an escalation; ties keep member
+                if state is not None and (best is None or state["level"] > best["level"]):
+                    best = state
+            #
+            if best is not None:
+                return best
         except:  # pylint: disable=W0702
             log.exception(
                 "usage: failed to resolve budget warning for project %s user %s",
