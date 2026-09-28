@@ -684,3 +684,28 @@ def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRAN
         "available_roles": list_available_roles(project_id),
         "buckets": buckets,
     }
+
+
+def event_type_health(project_id, dt_from=None, dt_to=None):
+    """Per event_type totals/errors/latency for llm and tool, on the same rows Overview counts."""
+    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    rows = fetch_all(
+        select_from(
+            [
+                UsageEvent.event_type,
+                func.count().label("total"),
+                count_where(UsageEvent.is_error.is_(True)).label("errors"),
+                func.avg(UsageEvent.duration_ms).label("avg_duration_ms"),
+            ],
+            base_filters(project_id, dt_from, dt_to),
+        ).group_by(UsageEvent.event_type)
+    )
+    return [
+        {
+            "event_type": row["event_type"],
+            "total": int(row["total"] or 0),
+            "errors": int(row["errors"] or 0),
+            "avg_duration_ms": float(row["avg_duration_ms"]) if row["avg_duration_ms"] is not None else None,
+        }
+        for row in rows
+    ]
