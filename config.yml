@@ -22,6 +22,10 @@ usage:
     personal_project_pct: 80
     user_pct: 80
   #
+  # Whether users may close the warning banner. A dismissal holds until the next level (90/95%).
+  warnings:
+    dismissible: true
+  #
   # Admission control. A reservation holds an estimate of a call's cost while it runs.
   reservation:
     # Upper bound on one call's estimate, so overspend stays (concurrency x this) + flush lag.

@@ -73,7 +73,8 @@ class TestWarningForScope:
         state = module_with({}).usage_warning_for_scope("project", 800, 1000, 80)
         #
         assert state == {
-            "scope": "project", "percent_used": 80, "warning_pct": 80, "should_warn": True,
+            "scope": "project", "percent_used": 80, "warning_pct": 80, "level": 80,
+            "should_warn": True,
         }
 
     def test_at_or_above_the_limit_is_silent(self):
@@ -85,6 +86,60 @@ class TestWarningForScope:
 
     def test_zero_limit_has_nothing_to_warn_about(self):
         assert module_with({}).usage_warning_for_scope("project", 0, 0, 80) is None
+
+
+class TestWarningLevels:
+    """Each level re-shows a banner the user dismissed at a lower one, so the steps matter."""
+
+    @pytest.mark.parametrize("pct,expected", [
+        (79.9, None), (80, 80), (89.9, 80), (90, 90), (94.9, 90), (95, 95), (99.9, 95),
+    ])
+    def test_default_threshold_escalates_at_ninety_and_ninety_five(self, pct, expected):
+        assert warning_module.warning_level(pct, 80) == expected
+
+    @pytest.mark.parametrize("pct,expected", [(91, None), (92, 92), (94, 92), (95, 95)])
+    def test_threshold_above_ninety_skips_the_ninety_level(self, pct, expected):
+        # 90 is below the configured threshold, so it must never surface as a level.
+        assert warning_module.warning_level(pct, 92) == expected
+
+    def test_threshold_above_ninety_five_is_the_only_level(self):
+        assert warning_module.warning_level(96, 97) is None
+        assert warning_module.warning_level(99, 97) == 97
+
+    def test_level_travels_in_the_payload(self):
+        state = module_with({}).usage_warning_for_scope("project", 960, 1000, 80)
+        #
+        assert state["level"] == 95 and state["percent_used"] == 96
+
+    def test_shown_percent_never_claims_an_unreached_level(self):
+        # Found in E2E: 94.55% rounded to "95%" while the banner stayed at the amber 90 level,
+        # and 99.6% would have read "100%" on a warning that only shows below the limit.
+        state = module_with({}).usage_warning_for_scope("project", 9455, 10000, 80)
+        assert state["level"] == 90 and state["percent_used"] == 94
+        near_limit = module_with({}).usage_warning_for_scope("project", 996, 1000, 80)
+        assert near_limit["percent_used"] == 99
+
+    def test_threshold_of_one_hundred_never_warns(self):
+        # At 100% the refusal is the message, so a 100% threshold is effectively "off".
+        assert module_with({}).usage_warning_for_scope("project", 999, 1000, 100) is None
+
+    def test_no_warning_carries_an_empty_level(self):
+        assert warning_module.NO_WARNING["level"] is None
+
+
+class TestDismissibleFlag:
+    def test_default_is_dismissible(self):
+        assert module_with({}).usage_get_warnings_dismissible() is True
+
+    def test_explicit_false_disables_dismissal(self):
+        instance = module_with({"warnings": {"dismissible": False}})
+        #
+        assert instance.usage_get_warnings_dismissible() is False
+
+    @pytest.mark.parametrize("warnings", [None, {}, {"dismissible": None}, {"dismissible": True}])
+    def test_anything_but_false_stays_dismissible(self, warnings):
+        # A malformed block must not strip the close button from every user's banner.
+        assert module_with({"warnings": warnings}).usage_get_warnings_dismissible() is True
 
 
 class TestResolveWarning:

@@ -226,6 +226,15 @@
         "maximum": 100
       }
     },
+    "usage_warnings_dismissible": {
+      "type": "boolean",
+      "title": "Allow users to dismiss budget warnings",
+      "description": "Show a close button on the budget warning banner. A dismissed warning returns at the next level (90% and 95%).",
+      "path": "usage.warnings.dismissible",
+      "section": "cost_budgets",
+      "default": true,
+      "requires_restart": false
+    },
     "usage_reconcile_repair_batch_size": {
       "type": "integer",
       "title": "Reconcile repair batch size",
