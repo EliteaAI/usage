@@ -64,6 +64,7 @@ if _API_AVAILABLE:
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -133,15 +134,18 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics/prompt_lib/<project_id>
             """
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
-                conditions = an.base_filters(project_id, dt_from, dt_to)
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
                 #
-                kpis = self._kpis(project_id, conditions)
+                kpis = self._kpis(project_id, conditions, run_scope)
                 #
                 return {
                     "kpis": kpis,
-                    "top_ai_users": self._top_ai_users(conditions),
-                    "daily_activity": self._daily_activity(conditions),
+                    "top_ai_users": self._top_ai_users(conditions, run_scope),
+                    "daily_activity": self._daily_activity(conditions, run_scope),
                     "models": self._models(project_id, conditions),
                 }, 200
             except Exception:  # pylint: disable=W0703
@@ -149,13 +153,13 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics"}, 500
 
         @staticmethod
-        def _kpis(project_id, conditions):
+        def _kpis(project_id, conditions, run_scope=None):
             """One scan for every headline number."""
             row = an.fetch_one(select(
                 func.count(distinct(UsageEvent.user_id)).label("unique_users"),
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
-                an.agent_runs_expr().label("agent_runs"),
+                an.agent_runs_expr(run_scope).label("agent_runs"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 # nullif so a blank name is not its own distinct value
@@ -194,7 +198,7 @@ if _API_AVAILABLE:
             }
 
         @staticmethod
-        def _top_ai_users(conditions):
+        def _top_ai_users(conditions, run_scope=None):
             """Top AI adopters.
 
             Grouped by user_id alone: user_email is null on rows written before the write path
@@ -206,7 +210,7 @@ if _API_AVAILABLE:
                 func.count().label("ai_events"),
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
-                an.agent_runs_expr().label("agent_runs"),
+                an.agent_runs_expr(run_scope).label("agent_runs"),
             ).where(*conditions).group_by(
                 UsageEvent.user_id,
             ).order_by(func.count().desc()).limit(_LEADERBOARD_LIMIT))
@@ -229,7 +233,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _daily_activity(conditions):
+        def _daily_activity(conditions, run_scope=None):
             """Daily AI activity. Error and total-event series stay on the tracing payload."""
             day = an.day_expr().label("day")
             #
@@ -237,7 +241,7 @@ if _API_AVAILABLE:
                 day,
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
-                an.agent_runs_expr().label("agent_runs"),
+                an.agent_runs_expr(run_scope).label("agent_runs"),
                 func.count(distinct(UsageEvent.user_id)).label("active_users"),
             ).where(*conditions).group_by(day).order_by(day))
             #

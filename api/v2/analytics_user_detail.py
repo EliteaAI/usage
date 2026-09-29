@@ -67,6 +67,7 @@ if _API_AVAILABLE:
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -158,12 +159,15 @@ if _API_AVAILABLE:
                 return {"error": "user_id must be an integer"}, 400
 
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
-                conditions = an.base_filters(project_id, dt_from, dt_to) + [
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
                     UsageEvent.user_id == user_id,
                 ]
 
-                kpi = self._kpis(conditions)
+                kpi = self._kpis(conditions, run_scope)
                 if not kpi or not kpi["total_events"]:
                     return {"error": "No data found for this user"}, 404
 
@@ -173,8 +177,8 @@ if _API_AVAILABLE:
                     "kpis": kpi["kpis"],
                     "models": self._models(project_id, conditions),
                     "tools": self._tools(conditions),
-                    "agents": self._agents(conditions),
-                    "daily_activity": self._daily_activity(conditions),
+                    "agents": self._agents(conditions, run_scope),
+                    "daily_activity": self._daily_activity(conditions, run_scope),
                 }, 200
 
             except Exception:
@@ -182,7 +186,7 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query user detail"}, 500
 
         @staticmethod
-        def _kpis(conditions):
+        def _kpis(conditions, run_scope=None):
             """One scan for every headline number.
 
             Not grouped: the caller has already pinned this to a single user_id, so grouping
@@ -196,7 +200,7 @@ if _API_AVAILABLE:
                 an.llm_calls_expr().label("llm_events"),
                 an.tool_runs_expr().label("tool_events"),
                 # D4 fix: distinct run_id, not a row count
-                an.agent_runs_expr().label("agent_events"),
+                an.agent_runs_expr(run_scope).label("agent_events"),
                 an.count_where(UsageEvent.is_error.is_(True)).label("errors"),
                 # D1 fix: no is_error filter/zeroing on tokens or cost below — tool-call rows
                 # naturally carry zero tokens/cost, so summing across the whole scan is safe
@@ -293,7 +297,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _agents(conditions):
+        def _agents(conditions, run_scope=None):
             """Agents (applications/pipelines) this user ran.
 
             usage_event tags every llm/tool row with its run's own root_entity_type/id, but
@@ -314,7 +318,7 @@ if _API_AVAILABLE:
                 func.count(distinct(UsageEvent.run_id)).label("runs"),
             ).where(
                 *conditions,
-                an.is_agent_row(),
+                an.is_agent_row(run_scope),
                 UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type,
@@ -331,7 +335,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _daily_activity(conditions):
+        def _daily_activity(conditions, run_scope=None):
             """ Daily activity by event type """
             day = an.day_expr().label("day")
 
@@ -339,7 +343,7 @@ if _API_AVAILABLE:
                 day,
                 an.llm_calls_expr().label("llm"),
                 an.tool_runs_expr().label("tool"),
-                an.agent_runs_expr().label("agent"),
+                an.agent_runs_expr(run_scope).label("agent"),
                 func.count().label("total"),
             ).where(*conditions).group_by(day).order_by(day))
 

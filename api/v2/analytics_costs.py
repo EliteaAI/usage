@@ -65,6 +65,7 @@ if _API_AVAILABLE:
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -172,17 +173,20 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_costs/prompt_lib/<project_id>
             """
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
                 # No is_error filter: a provider that reported tokens alongside a 4xx has still
                 # charged for them, so error rows stay in every sum below (#6574).
-                conditions = an.base_filters(project_id, dt_from, dt_to) + [
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
                     UsageEvent.event_type == an.EVENT_LLM,
                 ]
 
                 return {
                     "kpis": self._kpis(conditions),
                     "by_model": self._by_model(project_id, conditions),
-                    "by_agent": self._by_agent(conditions),
+                    "by_agent": self._by_agent(conditions, run_scope),
                     "by_user": self._by_user(conditions),
                     "daily": self._daily(conditions),
                 }, 200
@@ -268,7 +272,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _by_agent(conditions):
+        def _by_agent(conditions, run_scope=None):
             """Cost/token breakdown per agent run.
 
             Grouped by (root_entity_type, root_entity_id): every llm row already carries the
@@ -296,7 +300,7 @@ if _API_AVAILABLE:
             ] + an.cost_split_sums() + an.below_resolution_sums()
 
             statement = select(*columns).where(
-                *conditions, an.is_agent_row(), UsageEvent.root_entity_id.isnot(None),
+                *conditions, an.is_agent_row(run_scope), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type, UsageEvent.root_entity_id,
             ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)

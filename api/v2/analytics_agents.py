@@ -103,6 +103,7 @@ if _API_AVAILABLE:
                     "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
                     "description": "Sort direction.",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -145,9 +146,12 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_agents/prompt_lib/<project_id>
             """
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
-                conditions = an.base_filters(project_id, dt_from, dt_to) + [
-                    an.is_agent_row(),
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
+                    an.is_agent_row(run_scope),
                     UsageEvent.root_entity_id.isnot(None),
                 ]
 
@@ -160,7 +164,7 @@ if _API_AVAILABLE:
                 sort_order = request.args.get("sort_order", "desc")
                 search = request.args.get("search", "").strip()
 
-                total, rows = self._agents(conditions, search, sort_by, sort_order, limit, offset)
+                total, rows = self._agents(conditions, search, sort_by, sort_order, limit, offset, run_scope)
 
                 return {
                     "total": total,
@@ -175,7 +179,7 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics agents"}, 500
 
         @staticmethod
-        def _agents(conditions, search, sort_by, sort_order, limit, offset):
+        def _agents(conditions, search, sort_by, sort_order, limit, offset, run_scope=None):
             """Grouped-by-run agent rows, paginated and sorted."""
             # There is no root_entity_name column: the display name is read off whichever
             # row IS the run (entity_id == root_entity_id), never guessed from a child call.
@@ -184,11 +188,11 @@ if _API_AVAILABLE:
                 else_=None,
             ))
 
-            events_col = an.agent_runs_expr().label("events")
+            events_col = an.agent_runs_expr(run_scope).label("events")
             users_col = func.count(func.distinct(UsageEvent.user_id)).label("users")
             avg_dur_col = func.avg(UsageEvent.duration_ms).label("avg_duration_ms")
             # Runs, not calls, to stay comparable with events above
-            errors_col = an.agent_error_runs_expr().label("errors")
+            errors_col = an.agent_error_runs_expr(run_scope).label("errors")
             input_tokens_col = func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens")
             output_tokens_col = func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens")
             cache_read_tokens_col = func.sum(

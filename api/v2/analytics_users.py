@@ -106,6 +106,7 @@ if _API_AVAILABLE:
                     "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
                     "description": "Sort direction.",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -166,7 +167,10 @@ if _API_AVAILABLE:
                 sort_order (str): "asc" or "desc", default "desc"
             """
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
 
                 limit = an.clamp_int(request.args.get("limit"), 20, maximum=100)
                 offset = an.clamp_int(request.args.get("offset"), 0, minimum=0)
@@ -177,7 +181,7 @@ if _API_AVAILABLE:
                 sort_order = request.args.get("sort_order", "desc")
                 search = request.args.get("search", "").strip()
 
-                conditions = an.base_filters(project_id, dt_from, dt_to)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
                 if search:
                     # The stored email is null on rows written before the write path filled it,
                     # so the directory's matching ids are searched alongside the column
@@ -199,7 +203,7 @@ if _API_AVAILABLE:
                 llm_col = an.llm_calls_expr().label("llm_events")
                 tool_col = an.tool_runs_expr().label("tool_events")
                 # D4 fix: distinct run_id, not a row count — an agent run makes many calls
-                agent_col = an.agent_runs_expr().label("agent_events")
+                agent_col = an.agent_runs_expr(run_scope).label("agent_events")
                 errors_col = an.count_where(UsageEvent.is_error.is_(True)).label("errors")
                 # D1 fix: no is_error zeroing — a provider that charged for an errored call
                 # is still owed that charge

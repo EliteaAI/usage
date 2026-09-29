@@ -67,6 +67,7 @@ if _API_AVAILABLE:
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -133,8 +134,11 @@ if _API_AVAILABLE:
                 return {"error": "tool_name is required"}, 400
 
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
-                conditions = an.base_filters(project_id, dt_from, dt_to) + [
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
                     UsageEvent.tool_name == tool_name,
                 ]
 
@@ -161,7 +165,7 @@ if _API_AVAILABLE:
                         "error_rate": round(errors / total_calls * 100, 2) if total_calls > 0 else 0,
                     },
                     "users": self._users(conditions),
-                    "agents": self._agents(conditions),
+                    "agents": self._agents(conditions, run_scope),
                     "daily_usage": self._daily_usage(conditions),
                 }, 200
 
@@ -203,7 +207,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _agents(conditions):
+        def _agents(conditions, run_scope=None):
             """Agents (applications/pipelines) that ran this tool, by call volume.
 
             usage_event tags every tool row with the run's own root_entity_type/id directly
@@ -230,7 +234,7 @@ if _API_AVAILABLE:
                 func.count().label("calls"),
             ).where(
                 *conditions,
-                an.is_agent_row(),
+                an.is_agent_row(run_scope),
                 UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type,
