@@ -86,6 +86,7 @@ if _API_AVAILABLE:
                         "returns all-zero buckets rather than an unfiltered query."
                     ),
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -131,11 +132,15 @@ if _API_AVAILABLE:
                     comma-separated. Omitted/empty means all roles.
             """
             try:
-                dt_from, dt_to = an.parse_date_range(request.args)
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
 
                 return an.ai_active_users_trend(
                     project_id, dt_from, dt_to,
                     an.parse_granularity(request.args), self._role_params(),
+                    run_scope=run_scope,
                 ), 200
 
             except Exception:  # pylint: disable=W0703

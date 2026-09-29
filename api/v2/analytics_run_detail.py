@@ -39,18 +39,11 @@ if _API_AVAILABLE:
                     "description": "Project ID.",
                     "example": 1,
                 },
-                {
-                    "name": "run_id",
-                    "in": "query",
-                    "required": True,
-                    "schema": {"type": "string"},
-                    "description": "The run_id to trace.",
-                    "example": "3f2a1c9e-...",
-                },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {"description": "Run analytics detail"},
-                "400": {"description": "run_id is required"},
+                "400": {"description": "run_id or eval_run_id is required"},
                 "401": {"description": "Unauthorized"},
                 "404": {"description": "Run not found"},
                 "500": {"description": "Internal server error"},
@@ -69,14 +62,18 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_run_detail/prompt_lib/<project_id>
             """
             try:
-                run_id = (request.args.get("run_id") or "").strip()
-                if not run_id:
-                    return {"error": "run_id is required"}, 400
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                if run_scope is None:
+                    return {"error": "run_id or eval_run_id is required"}, 400
 
-                conditions = [
-                    UsageEvent.project_id == project_id,
-                    UsageEvent.run_id == run_id,
-                ]
+                conditions = [UsageEvent.project_id == project_id, *an.run_filters(run_scope)]
+                if run_scope.dt_from:
+                    conditions.append(UsageEvent.ts >= run_scope.dt_from)
+                if run_scope.dt_to:
+                    conditions.append(UsageEvent.ts <= run_scope.dt_to)
+                run_id = run_scope.run_id or run_scope.platform_run_id
 
                 rows = an.fetch_all(select(
                     UsageEvent.entity_type,

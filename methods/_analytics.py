@@ -29,6 +29,8 @@ agent_runs_expr counts runs instead of the calls inside them.
 
 import datetime
 import time
+import uuid
+from typing import NamedTuple, Optional
 
 from sqlalchemy import Date, and_, case, cast, distinct, func, or_, select
 
@@ -40,6 +42,7 @@ from ..models.usage_event import UsageEvent
 DEFAULT_DATE_RANGE_DAYS = 7
 # One row per calendar day, so an unbounded span is unbounded cardinality
 MAX_DATE_RANGE_DAYS = 366
+RUN_SCOPE_MARGIN = datetime.timedelta(minutes=5)
 
 # A platform-initiated call is recorded under a synthetic actor with no email. It is not a
 # project member and must never reach a leaderboard or an adoption denominator.
@@ -94,10 +97,11 @@ def as_utc(value):
     return value.astimezone(datetime.timezone.utc)
 
 
-def parse_date_range(args):
+def parse_date_range(args, run_scope=None):
     """[from, to) bounds from date_from/date_to, defaulted and clamped, always aware UTC.
 
-    A single supplied bound anchors the other rather than widening to everything.
+    A single supplied bound anchors the other rather than widening to everything. A run-scoped
+    query with no explicit bounds is not windowed to the last week: the run is the window.
     """
     date_from = args.get("date_from")
     date_to = args.get("date_to")
@@ -112,7 +116,144 @@ def parse_date_range(args):
     except (ValueError, TypeError):
         dt_to = None
     #
+    if run_scope is not None and not dt_from and not dt_to:
+        return run_scope.dt_from, run_scope.dt_to
+    #
     return clamp_date_range(dt_from, dt_to)
+
+
+class RunScope(NamedTuple):
+    """One run to scope analytics to: a usage run_id, an eval run, or both."""
+    run_id: Optional[str] = None
+    eval_run_id: Optional[int] = None
+    # usage_event.run_id the eval run stamped on its rows; None for runs launched before it was stored
+    platform_run_id: Optional[str] = None
+    dt_from: Optional[datetime.datetime] = None
+    dt_to: Optional[datetime.datetime] = None
+
+
+def parse_run_scope(project_id, args):
+    """RunScope from run_id/eval_run_id, or None when neither is given.
+
+    Raises ValueError on a malformed id and LookupError when the eval run is not in the project.
+    """
+    raw_run_id = (args.get("run_id") or "").strip()
+    raw_eval_run_id = (args.get("eval_run_id") or "").strip()
+    #
+    if not raw_run_id and not raw_eval_run_id:
+        return None
+    #
+    run_id = None
+    if raw_run_id:
+        try:
+            run_id = str(uuid.UUID(raw_run_id))
+        except ValueError as exc:
+            raise ValueError("run_id must be a UUID") from exc
+    #
+    if not raw_eval_run_id:
+        return RunScope(run_id=run_id)
+    #
+    try:
+        eval_run_id = int(raw_eval_run_id)
+    except ValueError as exc:
+        raise ValueError("eval_run_id must be an integer") from exc
+    #
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    eval_run = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_eval_run_usage_scope(
+        project_id, eval_run_id,
+    )
+    if not eval_run:
+        raise LookupError(f"Eval run {eval_run_id} not found")
+    #
+    dt_from = _parse_utc(eval_run.get("started_at"))
+    dt_to = _parse_utc(eval_run.get("finished_at"))
+    # Margin for clock skew between the eval worker and the rows it metered
+    if dt_from is not None:
+        dt_from -= RUN_SCOPE_MARGIN
+    if dt_to is not None:
+        dt_to += RUN_SCOPE_MARGIN
+    #
+    platform_run_id = eval_run.get("platform_run_id")
+    try:
+        platform_run_id = str(uuid.UUID(platform_run_id)) if platform_run_id else None
+    except (TypeError, ValueError):
+        platform_run_id = None
+    #
+    return RunScope(
+        run_id=run_id,
+        eval_run_id=eval_run_id,
+        platform_run_id=platform_run_id,
+        dt_from=dt_from,
+        dt_to=dt_to,
+    )
+
+
+def request_run_scope(project_id, args):
+    """(run_scope, None), or (None, (error_body, status)) for a malformed or unknown run."""
+    try:
+        return parse_run_scope(project_id, args), None
+    except ValueError as exc:
+        return None, ({"error": str(exc)}, 400)
+    except LookupError as exc:
+        return None, ({"error": str(exc)}, 404)
+
+
+# OpenAPI query params every run-scopable analytics endpoint accepts
+RUN_SCOPE_PARAMETERS = [
+    {
+        "name": "run_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string", "format": "uuid"},
+        "description": (
+            "Scope to one agent/pipeline run (usage run id). Without date_from/date_to the "
+            "7-day default window is not applied."
+        ),
+    },
+    {
+        "name": "eval_run_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "integer"},
+        "description": (
+            "Scope to one evaluation run. Without date_from/date_to the window is the eval "
+            "run's own start/finish."
+        ),
+    },
+]
+
+
+def _parse_utc(value):
+    if not value:
+        return None
+    #
+    try:
+        return as_utc(datetime.datetime.fromisoformat(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def run_filters(run_scope):
+    """Conditions restricting usage_event to the scoped run."""
+    if run_scope is None:
+        return []
+    #
+    conditions = []
+    #
+    if run_scope.run_id:
+        conditions.append(UsageEvent.run_id == run_scope.run_id)
+    #
+    if run_scope.eval_run_id is not None:
+        if run_scope.platform_run_id:
+            conditions.append(UsageEvent.run_id == run_scope.platform_run_id)
+        else:
+            # Runs from before the platform run id was stored: every judge and case call of an
+            # eval run is attributed to it as the evaluation entity (#6677)
+            conditions.append(UsageEvent.entity_type == ENTITY_TYPE_EVALUATION)
+            conditions.append(UsageEvent.entity_id == run_scope.eval_run_id)
+    #
+    return conditions
 
 
 def clamp_date_range(dt_from, dt_to):
@@ -135,8 +276,12 @@ def clamp_date_range(dt_from, dt_to):
     return dt_from, dt_to
 
 
-def base_filters(project_id, dt_from, dt_to, human_only=True):
-    """Project and date conditions, leading with (project_id, ts) so the index applies."""
+def base_filters(project_id, dt_from, dt_to, human_only=True, run_scope=None):
+    """Project and date conditions, leading with (project_id, ts) so the index applies.
+
+    A run-scoped query keeps every row of the run, system actors included, so its totals are
+    the run's real totals.
+    """
     conditions = [UsageEvent.project_id == project_id]
     #
     if dt_from is not None:
@@ -145,7 +290,9 @@ def base_filters(project_id, dt_from, dt_to, human_only=True):
     if dt_to is not None:
         conditions.append(UsageEvent.ts <= dt_to)
     #
-    if human_only:
+    if run_scope is not None:
+        conditions.extend(run_filters(run_scope))
+    elif human_only:
         conditions.append(HUMAN_ACTOR)
         # HUMAN_ACTOR only drops the user_id=0 sentinel; real system/service accounts have
         # genuine nonzero ids and a recognisable email, so they are dropped here instead.
@@ -195,19 +342,19 @@ def tool_runs_expr():
     return count_where(UsageEvent.event_type == EVENT_TOOL)
 
 
-def agent_runs_expr():
+def agent_runs_expr(run_scope=None):
     """Distinct runs, not the calls inside them.
 
     One agent run makes many llm and tool calls; summing rows reported each of them as a
     separate run and inflated the figure by whatever the agent's fan-out happened to be.
     """
     return func.count(distinct(case(
-        (is_agent_row(), UsageEvent.run_id),
+        (is_agent_row(run_scope), UsageEvent.run_id),
         else_=None,
     )))
 
 
-def agent_error_runs_expr():
+def agent_error_runs_expr(run_scope=None):
     """Runs that contained at least one failed call.
 
     Pairs with agent_runs_expr: counting failed calls against a run count would let an
@@ -215,15 +362,21 @@ def agent_error_runs_expr():
     """
     return func.count(distinct(case(
         (
-            and_(is_agent_row(), UsageEvent.is_error.is_(True)),
+            and_(is_agent_row(run_scope), UsageEvent.is_error.is_(True)),
             UsageEvent.run_id,
         ),
         else_=None,
     )))
 
 
-def is_agent_row():
-    """Agent/pipeline runs, excluding evaluation calls against them (#6677)."""
+def is_agent_row(run_scope=None):
+    """Agent/pipeline runs, excluding evaluation calls against them (#6677).
+
+    Scoped to one eval run, the evaluation calls are the run, so they are kept.
+    """
+    if run_scope is not None and run_scope.eval_run_id is not None:
+        return UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES)
+    #
     return and_(
         UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES),
         func.coalesce(UsageEvent.entity_type, "") != ENTITY_TYPE_EVALUATION,
@@ -646,7 +799,9 @@ def list_available_roles(project_id):
     })
 
 
-def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None):
+def ai_active_users_trend(
+        project_id, dt_from=None, dt_to=None, granularity=GRANULARITY_DAY, roles=None, run_scope=None,
+):
     """Distinct active vs AI-active users per calendar bucket, optionally restricted to project
     roles.
 
@@ -657,12 +812,13 @@ def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRAN
     active-users count (#5110), so the two can never disagree about a bucket's boundaries or its
     total.
     """
-    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    if run_scope is None:
+        dt_from, dt_to = clamp_date_range(dt_from, dt_to)
     granularity = granularity if granularity in _BUCKET_EXPRS else GRANULARITY_DAY
     wanted_roles = sorted({role for role in (roles or []) if role})
     #
     role_user_ids = resolve_role_filter(project_id, wanted_roles)
-    conditions = base_filters(project_id, dt_from, dt_to)
+    conditions = base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
     #
     if role_user_ids is not None:
         # Possibly empty: a selected role with no members is a legitimate zero
@@ -695,9 +851,10 @@ def ai_active_users_trend(project_id, dt_from=None, dt_to=None, granularity=GRAN
     }
 
 
-def event_type_health(project_id, dt_from=None, dt_to=None):
+def event_type_health(project_id, dt_from=None, dt_to=None, run_scope=None):
     """Per event_type totals/errors/latency for llm and tool, on the same rows Overview counts."""
-    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    if run_scope is None:
+        dt_from, dt_to = clamp_date_range(dt_from, dt_to)
     rows = fetch_all(
         select_from(
             [
@@ -706,7 +863,7 @@ def event_type_health(project_id, dt_from=None, dt_to=None):
                 count_where(UsageEvent.is_error.is_(True)).label("errors"),
                 func.avg(UsageEvent.duration_ms).label("avg_duration_ms"),
             ],
-            base_filters(project_id, dt_from, dt_to),
+            base_filters(project_id, dt_from, dt_to, run_scope=run_scope),
         ).group_by(UsageEvent.event_type)
     )
     return [

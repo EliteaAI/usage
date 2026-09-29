@@ -70,6 +70,7 @@ if _API_AVAILABLE:
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
                 },
+                *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
                 "200": {
@@ -140,17 +141,20 @@ if _API_AVAILABLE:
                 if entity_id is None:
                     return {"error": "entity_id is required"}, 400
 
-                dt_from, dt_to = an.parse_date_range(request.args)
-                conditions = an.base_filters(project_id, dt_from, dt_to) + [
-                    an.is_agent_row(),
+                run_scope, error = an.request_run_scope(project_id, request.args)
+                if error:
+                    return error
+                dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
+                    an.is_agent_row(run_scope),
                     UsageEvent.root_entity_id == entity_id,
                 ]
 
-                entity_name, kpis = self._kpis(conditions, entity_id)
+                entity_name, kpis = self._kpis(conditions, entity_id, run_scope)
                 if kpis["total_events"] == 0:
                     return {"error": "Agent not found in the selected range"}, 404
 
-                users_total, users_truncated, users = self._users(conditions)
+                users_total, users_truncated, users = self._users(conditions, run_scope)
 
                 return {
                     "entity_name": entity_name,
@@ -160,14 +164,14 @@ if _API_AVAILABLE:
                     "users_truncated": users_truncated,
                     "users": users,
                     "tools": self._tools(conditions),
-                    "daily_usage": self._daily_usage(conditions),
+                    "daily_usage": self._daily_usage(conditions, run_scope),
                 }, 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics agent detail query failed", exc_info=True)
                 return {"error": "Failed to query analytics agent detail"}, 500
 
         @staticmethod
-        def _kpis(conditions, entity_id):
+        def _kpis(conditions, entity_id, run_scope=None):
             """Display name plus the headline numbers, in one scan."""
             # No root_entity_name column: read the name off whichever row IS the run
             # (entity_id == root_entity_id).
@@ -178,11 +182,11 @@ if _API_AVAILABLE:
 
             columns = [
                 entity_name_expr.label("entity_name"),
-                an.agent_runs_expr().label("total_events"),
+                an.agent_runs_expr(run_scope).label("total_events"),
                 func.count(distinct(UsageEvent.user_id)).label("unique_users"),
                 func.avg(UsageEvent.duration_ms).label("avg_duration_ms"),
                 # Failed runs, so error_rate stays a percentage of total_events (also runs)
-                an.agent_error_runs_expr().label("errors"),
+                an.agent_error_runs_expr(run_scope).label("errors"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
                 func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens"),
                 func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
@@ -226,21 +230,21 @@ if _API_AVAILABLE:
             return entity_name, kpis
 
         @staticmethod
-        def _users(conditions):
+        def _users(conditions, run_scope=None):
             """Per-user breakdown, grouped by user_id alone.
 
             user_email is null on rows written before the write path populated it, and
             grouping by the (user_id, user_email) pair would split one person into several
             rows whenever both a null and a populated email exist for them.
             """
-            events_col = an.agent_runs_expr().label("events")
+            events_col = an.agent_runs_expr(run_scope).label("events")
             #
             rows = an.fetch_all(select(
                 UsageEvent.user_id,
                 func.max(UsageEvent.user_email).label("user_email"),
                 events_col,
                 func.avg(UsageEvent.duration_ms).label("avg_duration_ms"),
-                an.agent_error_runs_expr().label("errors"),
+                an.agent_error_runs_expr(run_scope).label("errors"),
             ).where(*conditions).group_by(
                 UsageEvent.user_id,
             ).order_by(events_col.desc()).limit(_USERS_LIMIT))
@@ -295,15 +299,15 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _daily_usage(conditions):
+        def _daily_usage(conditions, run_scope=None):
             """Daily run count and errors."""
             day = an.day_expr().label("day")
-            events_col = an.agent_runs_expr().label("events")
+            events_col = an.agent_runs_expr(run_scope).label("events")
             #
             rows = an.fetch_all(select(
                 day,
                 events_col,
-                an.agent_error_runs_expr().label("errors"),
+                an.agent_error_runs_expr(run_scope).label("errors"),
             ).where(*conditions).group_by(day).order_by(day))
             #
             return [
