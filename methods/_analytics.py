@@ -123,8 +123,10 @@ def parse_date_range(args, run_scope=None):
 
 
 class RunScope(NamedTuple):
-    """One run to scope analytics to: a usage run_id, an eval run, or both."""
+    """One run to scope analytics to: an agent/pipeline run, an eval run, or both."""
+    # Run History conversation uuid (usage_event.conversation_id), or a raw usage_event.run_id
     run_id: Optional[str] = None
+    # p_<pid>.eval_run.id, resolved from the eval run uuid the caller passed
     eval_run_id: Optional[int] = None
     # usage_event.run_id the eval run stamped on its rows; None for runs launched before it was stored
     platform_run_id: Optional[str] = None
@@ -154,17 +156,18 @@ def parse_run_scope(project_id, args):
         return RunScope(run_id=run_id)
     #
     try:
-        eval_run_id = int(raw_eval_run_id)
+        eval_run_uuid = str(uuid.UUID(raw_eval_run_id))
     except ValueError as exc:
-        raise ValueError("eval_run_id must be an integer") from exc
+        raise ValueError("eval_run_id must be a UUID") from exc
     #
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
     eval_run = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_eval_run_usage_scope(
-        project_id, eval_run_id,
+        project_id, eval_run_uuid,
     )
-    if not eval_run:
-        raise LookupError(f"Eval run {eval_run_id} not found")
+    if not eval_run or eval_run.get("id") is None:
+        raise LookupError(f"Eval run {eval_run_uuid} not found")
+    eval_run_id = int(eval_run["id"])
     #
     dt_from = _parse_utc(eval_run.get("started_at"))
     dt_to = _parse_utc(eval_run.get("finished_at"))
@@ -207,18 +210,18 @@ RUN_SCOPE_PARAMETERS = [
         "required": False,
         "schema": {"type": "string", "format": "uuid"},
         "description": (
-            "Scope to one agent/pipeline run (usage run id). Without date_from/date_to the "
-            "7-day default window is not applied."
+            "Scope to one agent/pipeline run: the Run History conversation uuid (a raw usage "
+            "run id also matches). Without date_from/date_to the 7-day default window is not applied."
         ),
     },
     {
         "name": "eval_run_id",
         "in": "query",
         "required": False,
-        "schema": {"type": "integer"},
+        "schema": {"type": "string", "format": "uuid"},
         "description": (
-            "Scope to one evaluation run. Without date_from/date_to the window is the eval "
-            "run's own start/finish."
+            "Scope to one evaluation run by its uuid. Without date_from/date_to the window is "
+            "the eval run's own start/finish."
         ),
     },
 ]
@@ -242,7 +245,12 @@ def run_filters(run_scope):
     conditions = []
     #
     if run_scope.run_id:
-        conditions.append(UsageEvent.run_id == run_scope.run_id)
+        # A Run History run is a conversation; usage_event.run_id is minted per message dispatch
+        # (utils/run_id.derived_run_id), so it never equals the conversation uuid
+        conditions.append(or_(
+            UsageEvent.conversation_id == run_scope.run_id,
+            UsageEvent.run_id == run_scope.run_id,
+        ))
     #
     if run_scope.eval_run_id is not None:
         if run_scope.platform_run_id:
