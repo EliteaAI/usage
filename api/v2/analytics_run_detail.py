@@ -43,7 +43,7 @@ if _API_AVAILABLE:
             ],
             responses={
                 "200": {"description": "Run analytics detail"},
-                "400": {"description": "run_id or eval_run_id is required"},
+                "400": {"description": "run_id is required"},
                 "401": {"description": "Unauthorized"},
                 "404": {"description": "Run not found"},
                 "500": {"description": "Internal server error"},
@@ -66,14 +66,14 @@ if _API_AVAILABLE:
                 if error:
                     return error
                 if run_scope is None:
-                    return {"error": "run_id or eval_run_id is required"}, 400
+                    return {"error": "run_id is required"}, 400
 
                 conditions = [UsageEvent.project_id == project_id, *an.run_filters(run_scope)]
                 if run_scope.dt_from:
                     conditions.append(UsageEvent.ts >= run_scope.dt_from)
                 if run_scope.dt_to:
                     conditions.append(UsageEvent.ts <= run_scope.dt_to)
-                run_id = run_scope.run_id or run_scope.platform_run_id
+                run_id = run_scope.run_id
 
                 rows = an.fetch_all(select(
                     UsageEvent.entity_type,
