@@ -123,8 +123,9 @@ def parse_date_range(args, run_scope=None):
 
 
 class RunScope(NamedTuple):
-    """One eval run to scope analytics to."""
-    run_id: int
+    """One run to scope analytics to: a usage run_id, an eval run, or both."""
+    run_id: Optional[str] = None
+    eval_run_id: Optional[int] = None
     # usage_event.run_id the eval run stamped on its rows; None for runs launched before it was stored
     platform_run_id: Optional[str] = None
     dt_from: Optional[datetime.datetime] = None
@@ -132,26 +133,38 @@ class RunScope(NamedTuple):
 
 
 def parse_run_scope(project_id, args):
-    """RunScope from run_id (an eval_run.id), or None when it is not given.
+    """RunScope from run_id/eval_run_id, or None when neither is given.
 
     Raises ValueError on a malformed id and LookupError when the eval run is not in the project.
     """
     raw_run_id = (args.get("run_id") or "").strip()
-    if not raw_run_id:
+    raw_eval_run_id = (args.get("eval_run_id") or "").strip()
+    #
+    if not raw_run_id and not raw_eval_run_id:
         return None
     #
+    run_id = None
+    if raw_run_id:
+        try:
+            run_id = str(uuid.UUID(raw_run_id))
+        except ValueError as exc:
+            raise ValueError("run_id must be a UUID") from exc
+    #
+    if not raw_eval_run_id:
+        return RunScope(run_id=run_id)
+    #
     try:
-        run_id = int(raw_run_id)
+        eval_run_id = int(raw_eval_run_id)
     except ValueError as exc:
-        raise ValueError("run_id must be an integer") from exc
+        raise ValueError("eval_run_id must be an integer") from exc
     #
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
     eval_run = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_eval_run_usage_scope(
-        project_id, run_id,
+        project_id, eval_run_id,
     )
     if not eval_run:
-        raise LookupError(f"Run {run_id} not found")
+        raise LookupError(f"Eval run {eval_run_id} not found")
     #
     dt_from = _parse_utc(eval_run.get("started_at"))
     dt_to = _parse_utc(eval_run.get("finished_at"))
@@ -169,6 +182,7 @@ def parse_run_scope(project_id, args):
     #
     return RunScope(
         run_id=run_id,
+        eval_run_id=eval_run_id,
         platform_run_id=platform_run_id,
         dt_from=dt_from,
         dt_to=dt_to,
@@ -191,10 +205,20 @@ RUN_SCOPE_PARAMETERS = [
         "name": "run_id",
         "in": "query",
         "required": False,
+        "schema": {"type": "string", "format": "uuid"},
+        "description": (
+            "Scope to one agent/pipeline run (usage run id). Without date_from/date_to the "
+            "7-day default window is not applied."
+        ),
+    },
+    {
+        "name": "eval_run_id",
+        "in": "query",
+        "required": False,
         "schema": {"type": "integer"},
         "description": (
-            "Scope to one evaluation run (eval_run.id). Without date_from/date_to the window "
-            "is the run's own start/finish."
+            "Scope to one evaluation run. Without date_from/date_to the window is the eval "
+            "run's own start/finish."
         ),
     },
 ]
@@ -215,14 +239,21 @@ def run_filters(run_scope):
     if run_scope is None:
         return []
     #
-    if run_scope.platform_run_id:
-        return [UsageEvent.run_id == run_scope.platform_run_id]
-    # Runs from before the platform run id was stored: every judge and case call of an
-    # eval run is attributed to it as the evaluation entity (#6677)
-    return [
-        UsageEvent.entity_type == ENTITY_TYPE_EVALUATION,
-        UsageEvent.entity_id == run_scope.run_id,
-    ]
+    conditions = []
+    #
+    if run_scope.run_id:
+        conditions.append(UsageEvent.run_id == run_scope.run_id)
+    #
+    if run_scope.eval_run_id is not None:
+        if run_scope.platform_run_id:
+            conditions.append(UsageEvent.run_id == run_scope.platform_run_id)
+        else:
+            # Runs from before the platform run id was stored: every judge and case call of an
+            # eval run is attributed to it as the evaluation entity (#6677)
+            conditions.append(UsageEvent.entity_type == ENTITY_TYPE_EVALUATION)
+            conditions.append(UsageEvent.entity_id == run_scope.eval_run_id)
+    #
+    return conditions
 
 
 def clamp_date_range(dt_from, dt_to):
@@ -343,7 +374,7 @@ def is_agent_row(run_scope=None):
 
     Scoped to one eval run, the evaluation calls are the run, so they are kept.
     """
-    if run_scope is not None:
+    if run_scope is not None and run_scope.eval_run_id is not None:
         return UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES)
     #
     return and_(
