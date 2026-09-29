@@ -42,6 +42,15 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         return an.ai_active_users_trend(project_id, date_from, date_to, granularity, roles)
 
     @web.rpc("usage_event_type_health", "usage_event_type_health")
-    def usage_event_type_health(self, project_id, date_from=None, date_to=None, **kwargs):  # pylint: disable=W0613
-        """llm/tool health rows for elitea_core's Health tab, so it matches Overview's counts."""
-        return an.event_type_health(project_id, date_from, date_to)
+    def usage_event_type_health(  # pylint: disable=R0913,R0917
+            self, project_id, date_from=None, date_to=None, run_id=None, eval_run_id=None, **kwargs,
+    ):  # pylint: disable=W0613
+        """llm/tool health rows for elitea_core's Health tab, so it matches Overview's counts.
+
+        run_id/eval_run_id scope it to one run (see _analytics.parse_run_scope); without explicit
+        bounds the run is the window. Raises ValueError/LookupError for a malformed/unknown run.
+        """
+        run_scope = an.parse_run_scope(project_id, {"run_id": run_id, "eval_run_id": eval_run_id})
+        if run_scope is not None and date_from is None and date_to is None:
+            date_from, date_to = run_scope.dt_from, run_scope.dt_to
+        return an.event_type_health(project_id, date_from, date_to, run_scope=run_scope)
