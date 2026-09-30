@@ -686,10 +686,14 @@ def resolve_role_filter(project_id, roles):
     return {ur["user_id"] for ur in user_roles if ur.get("role_id") in role_ids}
 
 
-# Role names snapshot cache, batched per project (#6796): {project_id: (stamp, {user_id: [names]})}.
+# Role names snapshot cache, batched per project (#6796):
+# {project_id: (stamp, {user_id: [names]}, ttl_seconds)}.
 # usage_event is written far more often than a project's roles change, so a fresh lookup happens
 # on cache expiry rather than once per drained batch.
 ROLE_SNAPSHOT_TTL_SECONDS = 60
+# Failed lookups (e.g. auth outage) are cached too, but briefly -- long enough to spare the
+# drainer's hot path from a synchronous RPC per row, short enough to notice auth recovering.
+ROLE_SNAPSHOT_FAILURE_TTL_SECONDS = 30
 ROLE_SNAPSHOT_CACHE_MAX = 512
 _role_snapshot_cache = {}
 
@@ -702,11 +706,15 @@ def _project_role_name_map(project_id):
     behaviour for that row -- role_filter_condition falls back to the live join for it. This is
     the write path, so it never logs; a lookup that fails on every call would otherwise log on
     every call.
+
+    Failures are cached too (briefly, per ROLE_SNAPSHOT_FAILURE_TTL_SECONDS): during an auth
+    outage, drainer.py's event_values() calls this once per drained row, and without negative
+    caching every row for the same project would retry the RPC synchronously.
     """
     now = time.monotonic()
     cached = _role_snapshot_cache.get(project_id)
     #
-    if cached is not None and now - cached[0] < ROLE_SNAPSHOT_TTL_SECONDS:
+    if cached is not None and now - cached[0] < cached[2]:
         return cached[1]
     #
     try:
@@ -715,6 +723,11 @@ def _project_role_name_map(project_id):
         project_roles = auth.list_project_roles(project_id) or []
         user_roles = auth.list_project_user_roles(project_id) or []
     except Exception:  # pylint: disable=W0703
+        if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+            _evict_expired_role_snapshots(now)
+        #
+        _role_snapshot_cache[project_id] = (now, {}, ROLE_SNAPSHOT_FAILURE_TTL_SECONDS)
+        #
         return {}
     #
     names_by_role_id = {r["id"]: r["name"] for r in project_roles if r.get("name")}
@@ -732,11 +745,30 @@ def _project_role_name_map(project_id):
     result = {user_id: sorted(names) for user_id, names in mapping.items()}
     #
     if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
-        _role_snapshot_cache.clear()
+        _evict_expired_role_snapshots(now)
     #
-    _role_snapshot_cache[project_id] = (now, result)
+    _role_snapshot_cache[project_id] = (now, result, ROLE_SNAPSHOT_TTL_SECONDS)
     #
     return result
+
+
+def _evict_expired_role_snapshots(now):
+    """Prune only expired entries from the role-snapshot cache (mirrors _is_super_admin's
+    eviction), never a blanket clear() -- that would wipe other projects' still-fresh entries
+    and trigger a synchronous auth RPC thundering-herd in the drainer's hot path.
+
+    If pruning expired entries still leaves the cache at or over the cap, fall back to evicting
+    the oldest entries (by stamp) until it fits, rather than leaving it unbounded.
+    """
+    for key, entry in list(_role_snapshot_cache.items()):
+        if now - entry[0] >= entry[2]:
+            _role_snapshot_cache.pop(key, None)
+    #
+    if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+        oldest_first = sorted(_role_snapshot_cache.items(), key=lambda item: item[1][0])
+        #
+        for key, _entry in oldest_first[:len(oldest_first) - ROLE_SNAPSHOT_CACHE_MAX + 1]:
+            _role_snapshot_cache.pop(key, None)
 
 
 def role_names_snapshot(project_id, user_id):
