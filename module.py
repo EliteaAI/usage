@@ -55,10 +55,6 @@ class Module(module.ModuleModel):
         """ Ready callback """
         # After shared.ready() created the parent table — usage depends_on shared
         self.usage_ensure_partitions()
-        try:
-            self.usage_ensure_role_snapshot_column()
-        except Exception as exc:  # pylint: disable=W0703
-            log.warning("usage: usage_ensure_role_snapshot_column failed during ready(): %s", exc)
         self._register_cron()
         self._register_openapi()
         self._register_admin_tasks()
