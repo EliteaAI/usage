@@ -32,7 +32,9 @@ if _API_AVAILABLE:
             name="Get Agent Analytics Detail",
             description=(
                 "Returns the full usage breakdown for one agent/pipeline: KPIs, its users, "
-                "the tools it called, and its daily activity trend."
+                "the tools it called, and its daily activity trend. Evaluation tokens and spend "
+                "are reported separately under evaluation (null for a single run) and are not "
+                "part of kpis."
             ),
             mcp_tool=True,
             mcp_description="Use this tool when you need the full drill-down for one specific agent or pipeline: its KPIs, which users ran it, which tools it called, and its daily trend. Do not use this tool for a leaderboard across agents — use List Agent Analytics. Do not use for project-wide KPIs — use Get Project AI Analytics.",
@@ -98,6 +100,15 @@ if _API_AVAILABLE:
                                     "cache_creation_cost": 0.0,
                                     "avg_cost_per_call": 0.0001,
                                 },
+                                "evaluation": {
+                                    "runs": 2,
+                                    "input_tokens": 12000,
+                                    "output_tokens": 3400,
+                                    "cache_read_tokens": 0,
+                                    "cache_creation_tokens": 0,
+                                    "total_tokens": 15400,
+                                    "cost": 0.00154,
+                                },
                                 "users_total": 5,
                                 "users_truncated": False,
                                 "users": [
@@ -156,10 +167,18 @@ if _API_AVAILABLE:
 
                 users_total, users_truncated, users = self._users(conditions, run_scope)
 
+                evaluation = None if run_scope else self._evaluation(
+                    an.base_filters(project_id, dt_from, dt_to) + [
+                        an.is_evaluation_row(),
+                        UsageEvent.root_entity_id == entity_id,
+                    ]
+                )
+
                 return {
                     "entity_name": entity_name,
                     "entity_id": entity_id,
                     "kpis": kpis,
+                    "evaluation": evaluation,
                     "users_total": users_total,
                     "users_truncated": users_truncated,
                     "users": users,
@@ -228,6 +247,31 @@ if _API_AVAILABLE:
             }
             #
             return entity_name, kpis
+
+        @staticmethod
+        def _evaluation(conditions):
+            """Tokens and spend of evaluations run against this agent (#6678), kept out of kpis."""
+            columns = [
+                func.count(distinct(UsageEvent.entity_id)).label("runs"),
+                func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
+                func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens"),
+                func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                func.sum(
+                    func.coalesce(UsageEvent.cache_creation_tokens, 0)
+                ).label("cache_creation_tokens"),
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ]
+            row = an.fetch_one(select(*columns).where(*conditions)) or {}
+            return {
+                "runs": int(row.get("runs") or 0),
+                "input_tokens": int(row.get("input_tokens") or 0),
+                "output_tokens": int(row.get("output_tokens") or 0),
+                "cache_read_tokens": int(row.get("cache_read_tokens") or 0),
+                "cache_creation_tokens": int(row.get("cache_creation_tokens") or 0),
+                "total_tokens": int(row.get("total_tokens") or 0),
+                "cost": an.cost_usd(row.get("cost_nano")),
+            }
 
         @staticmethod
         def _users(conditions, run_scope=None):

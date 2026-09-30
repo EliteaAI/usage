@@ -391,6 +391,38 @@ def is_agent_row(run_scope=None):
     )
 
 
+def is_evaluation_row():
+    """Judge/eval-batch calls (#6677): the spend is_agent_row() leaves out, but the totals keep."""
+    return UsageEvent.entity_type == ENTITY_TYPE_EVALUATION
+
+
+def entity_meta(project_id, application_ids=(), version_ids=()):
+    """({app_id: meta}, {version_id: meta}) with names and agent/pipeline kind (#6678).
+
+    usage_event carries no root name and root_entity_type is always 'application', so both
+    come from elitea_core. A failed lookup degrades to unlabelled rows, not a failed report.
+    """
+    application_ids = [i for i in application_ids if i is not None]
+    version_ids = [i for i in version_ids if i is not None]
+    if not application_ids and not version_ids:
+        return {}, {}
+    #
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    try:
+        response = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
+            project_id, application_ids=application_ids, version_ids=version_ids,
+        ) or {}
+    except:  # pylint: disable=W0702
+        log.warning("usage: entity names unavailable for project %s", project_id)
+        return {}, {}
+    #
+    return (
+        {item["id"]: item for item in response.get("applications") or []},
+        {item["id"]: item for item in response.get("versions") or []},
+    )
+
+
 def active_users_expr():
     """Distinct human actors."""
     return func.count(distinct(case((HUMAN_ACTOR, UsageEvent.user_id), else_=None)))

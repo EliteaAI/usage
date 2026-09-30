@@ -19,7 +19,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import case, func, select
+    from sqlalchemy import and_, case, distinct, func, select
 
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
@@ -34,8 +34,10 @@ if _API_AVAILABLE:
         @register_openapi(
             name="Get Analytics Cost Breakdown",
             description=(
-                "Returns cost and token KPIs plus per-model, per-agent, per-user and daily "
-                "breakdowns of LLM spend for a project, aggregated from usage_event."
+                "Returns cost and token KPIs plus per-model, per-agent, per-evaluation, per-user "
+                "and daily breakdowns of LLM spend for a project, aggregated from usage_event. "
+                "Evaluation spend is included in the totals, per-model, per-user and daily "
+                "figures, and excluded from per-agent."
             ),
             mcp_tool=True,
             mcp_description="Use this tool when you need LLM cost or token breakdowns by model, by agent, by user, or over time. Do not use this tool for AI adoption KPIs or a project's overall activity dashboard — use Get Project AI Analytics. Do not use for per-tool drill-downs — use the tool analytics endpoints. This endpoint is best for 'where is the money/tokens going.'",
@@ -85,6 +87,8 @@ if _API_AVAILABLE:
                                     "total_output_cost": 3.5,
                                     "total_cache_read_cost": 0.6,
                                     "total_cache_creation_cost": 0.35,
+                                    "total_evaluation_cost": 0.42,
+                                    "evaluation_calls": 60,
                                 },
                                 "by_model": [
                                     {
@@ -107,6 +111,7 @@ if _API_AVAILABLE:
                                     {
                                         "entity_name": "Code Review Bot",
                                         "entity_id": 7,
+                                        "entity_kind": "agent",
                                         "total_cost": 4.20,
                                         "input_cost": 2.9,
                                         "output_cost": 1.1,
@@ -119,6 +124,28 @@ if _API_AVAILABLE:
                                         "total_tokens": 2100000,
                                         "calls": 300,
                                         "avg_cost": 0.014,
+                                    }
+                                ],
+                                "by_evaluation": [
+                                    {
+                                        "entity_name": "Code Review Bot",
+                                        "entity_id": 7,
+                                        "entity_kind": "agent",
+                                        "version_id": 12,
+                                        "version_name": "base",
+                                        "eval_runs": 3,
+                                        "total_cost": 0.42,
+                                        "input_cost": 0.3,
+                                        "output_cost": 0.12,
+                                        "cache_read_cost": 0.0,
+                                        "cache_creation_cost": 0.0,
+                                        "input_tokens": 150000,
+                                        "output_tokens": 20000,
+                                        "cache_read_tokens": 0,
+                                        "cache_creation_tokens": 0,
+                                        "total_tokens": 170000,
+                                        "calls": 60,
+                                        "avg_cost": 0.007,
                                     }
                                 ],
                                 "by_user": [
@@ -186,7 +213,8 @@ if _API_AVAILABLE:
                 return {
                     "kpis": self._kpis(conditions),
                     "by_model": self._by_model(project_id, conditions),
-                    "by_agent": self._by_agent(conditions, run_scope),
+                    "by_agent": self._by_agent(project_id, conditions, run_scope),
+                    "by_evaluation": self._by_evaluation(project_id, conditions),
                     "by_user": self._by_user(conditions),
                     "daily": self._daily(conditions),
                 }, 200
@@ -197,8 +225,22 @@ if _API_AVAILABLE:
 
         @staticmethod
         def _kpis(conditions):
-            """One scan for every headline number."""
+            """One scan for every headline number.
+
+            Evaluation spend (#6678) is a subset of total_cost, not an addition to it.
+            """
+            evaluation = an.is_evaluation_row()
             columns = [
+                func.sum(case(
+                    (evaluation, func.coalesce(UsageEvent.cost_nano_usd, 0)), else_=0,
+                )).label("evaluation_cost_nano"),
+                an.count_where(evaluation).label("evaluation_calls"),
+                an.count_where(and_(
+                    evaluation,
+                    func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced",
+                    func.coalesce(UsageEvent.cost_nano_usd, 0) == 0,
+                    an.total_tokens_expr() > 0,
+                )).label("evaluation_sub_nano"),
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("total_input_tokens"),
                 func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("total_output_tokens"),
@@ -216,6 +258,10 @@ if _API_AVAILABLE:
             total_cost = an.cost_usd(row.get("cost_nano"))
             total_calls = row.get("total_calls") or 0
 
+            below_resolution = an.below_resolution(row, prefix="total_")
+            if int(row.get("evaluation_sub_nano") or 0) > 0:
+                below_resolution["total_evaluation_cost"] = True
+
             return {
                 "total_cost": total_cost,
                 "total_input_tokens": int(row.get("total_input_tokens") or 0),
@@ -228,7 +274,9 @@ if _API_AVAILABLE:
                     f"total_{key}": value
                     for key, value in an.cost_split_usd(row).items()
                 },
-                "below_resolution": an.below_resolution(row, prefix="total_"),
+                "total_evaluation_cost": an.cost_usd(row.get("evaluation_cost_nano")),
+                "evaluation_calls": int(row.get("evaluation_calls") or 0),
+                "below_resolution": below_resolution,
             }
 
         @staticmethod
@@ -272,7 +320,7 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _by_agent(conditions, run_scope=None):
+        def _by_agent(project_id, conditions, run_scope=None):
             """Cost/token breakdown per agent run.
 
             Grouped by (root_entity_type, root_entity_id): every llm row already carries the
@@ -282,6 +330,9 @@ if _API_AVAILABLE:
             entity_name names the node that made one call and there is no root_entity_name, so
             the label is read only off whichever row IS the run (entity_id == root_entity_id) —
             otherwise a nested run titles its parent with a sub-agent's name.
+
+            entity_kind (agent/pipeline) comes from elitea_core: root_entity_type is always
+            'application' on the row, pipelines included (#6678).
             """
             root_name = func.max(case(
                 (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
@@ -306,11 +357,17 @@ if _API_AVAILABLE:
             ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
 
             rows = an.fetch_all(statement)
+            applications, _ = an.entity_meta(project_id, application_ids=[r["root_entity_id"] for r in rows])
 
             return [
                 {
-                    "entity_name": r["entity_name"] or f"Agent #{r['root_entity_id']}",
+                    "entity_name": (
+                        r["entity_name"]
+                        or applications.get(r["root_entity_id"], {}).get("name")
+                        or f"Agent #{r['root_entity_id']}"
+                    ),
                     "entity_id": r["root_entity_id"],
+                    "entity_kind": applications.get(r["root_entity_id"], {}).get("kind"),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
@@ -327,6 +384,66 @@ if _API_AVAILABLE:
                 }
                 for r in rows
             ]
+
+        @staticmethod
+        def _by_evaluation(project_id, conditions):
+            """Evaluation spend (#6677) per evaluated agent/pipeline version.
+
+            Evaluation rows name the eval run as their leaf and the evaluated application as
+            their root, with no names on either, so labels and kind come from elitea_core.
+            """
+            columns = [
+                UsageEvent.root_entity_id,
+                UsageEvent.root_entity_version_id,
+                func.count(distinct(UsageEvent.entity_id)).label("eval_runs"),
+                func.count().label("calls"),
+                func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
+                func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens"),
+                func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ] + an.cost_split_sums() + an.below_resolution_sums()
+
+            statement = select(*columns).where(
+                *conditions, an.is_evaluation_row(), UsageEvent.root_entity_id.isnot(None),
+            ).group_by(
+                UsageEvent.root_entity_id, UsageEvent.root_entity_version_id,
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
+
+            rows = an.fetch_all(statement)
+            applications, versions = an.entity_meta(
+                project_id,
+                application_ids=[r["root_entity_id"] for r in rows],
+                version_ids=[r["root_entity_version_id"] for r in rows],
+            )
+
+            result = []
+            for r in rows:
+                application = applications.get(r["root_entity_id"], {})
+                version = versions.get(r["root_entity_version_id"], {})
+                result.append({
+                    "entity_name": application.get("name") or f"Agent #{r['root_entity_id']}",
+                    "entity_id": r["root_entity_id"],
+                    "entity_kind": version.get("kind") or application.get("kind"),
+                    "version_id": r["root_entity_version_id"],
+                    "version_name": version.get("name"),
+                    "eval_runs": r["eval_runs"] or 0,
+                    "total_cost": an.cost_usd(r["cost_nano"]),
+                    **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
+                    "input_tokens": int(r["input_tokens"] or 0),
+                    "output_tokens": int(r["output_tokens"] or 0),
+                    "cache_read_tokens": int(r["cache_read_tokens"] or 0),
+                    "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "calls": r["calls"] or 0,
+                    "avg_cost": (
+                        round(an.cost_usd(r["cost_nano"]) / r["calls"], 9)
+                        if r["cost_nano"] and r["calls"] else 0.0
+                    ),
+                })
+            return result
 
         @staticmethod
         def _by_user(conditions):
