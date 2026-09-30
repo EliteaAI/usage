@@ -660,6 +660,12 @@ def resolve_role_filter(project_id, roles):
     same shape admin/rpc/roles.py's get_users_roles_in_project already uses. A role that
     exists but has no members returns an empty set, which is a legitimate zero, not a reason
     to fall back to matching everyone.
+
+    Reflects project_user_role as it stands *right now*: a role change or removal rewrites or
+    deletes that row, so a row on the far side of that change is no longer in the returned set
+    even though its usage_event activity is unchanged (#6796). role_filter_condition is what a
+    reader actually wants; this is kept as the live half of that, and for whatever else in the
+    plugin still wants today's live-only membership.
     """
     wanted = {role for role in (roles or []) if role}
     #
@@ -678,6 +684,102 @@ def resolve_role_filter(project_id, roles):
     role_ids = {r["id"] for r in project_roles if r.get("name") in wanted}
     #
     return {ur["user_id"] for ur in user_roles if ur.get("role_id") in role_ids}
+
+
+# Role names snapshot cache, batched per project (#6796): {project_id: (stamp, {user_id: [names]})}.
+# usage_event is written far more often than a project's roles change, so a fresh lookup happens
+# on cache expiry rather than once per drained batch.
+ROLE_SNAPSHOT_TTL_SECONDS = 60
+ROLE_SNAPSHOT_CACHE_MAX = 512
+_role_snapshot_cache = {}
+
+
+def _project_role_name_map(project_id):
+    """{user_id: sorted role names} for every member of project_id, cached briefly.
+
+    Silent on any failure, including auth being unavailable at all: an unresolvable project
+    leaves every row of the batch with no snapshot, which is exactly today's (pre-#6796)
+    behaviour for that row -- role_filter_condition falls back to the live join for it. This is
+    the write path, so it never logs; a lookup that fails on every call would otherwise log on
+    every call.
+    """
+    now = time.monotonic()
+    cached = _role_snapshot_cache.get(project_id)
+    #
+    if cached is not None and now - cached[0] < ROLE_SNAPSHOT_TTL_SECONDS:
+        return cached[1]
+    #
+    try:
+        from tools import auth  # pylint: disable=C0415,E0401
+        #
+        project_roles = auth.list_project_roles(project_id) or []
+        user_roles = auth.list_project_user_roles(project_id) or []
+    except Exception:  # pylint: disable=W0703
+        return {}
+    #
+    names_by_role_id = {r["id"]: r["name"] for r in project_roles if r.get("name")}
+    mapping = {}
+    #
+    for user_role in user_roles:
+        name = names_by_role_id.get(user_role.get("role_id"))
+        user_id = user_role.get("user_id")
+        #
+        if name is None or user_id is None:
+            continue
+        #
+        mapping.setdefault(int(user_id), set()).add(name)
+    #
+    result = {user_id: sorted(names) for user_id, names in mapping.items()}
+    #
+    if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+        _role_snapshot_cache.clear()
+    #
+    _role_snapshot_cache[project_id] = (now, result)
+    #
+    return result
+
+
+def role_names_snapshot(project_id, user_id):
+    """This actor's current project role names, or None (unknown, none, or lookup failed).
+
+    Stamped onto a usage_event row at write time -- the one choke point every insert passes
+    through regardless of caller (methods/drainer.py event_values()) -- so that a later role
+    change or removal cannot make this row's activity disappear from a role-filtered Activity
+    trend (#6796). role_filter_condition is what reads it back.
+    """
+    if project_id is None or user_id is None:
+        return None
+    #
+    try:
+        names = _project_role_name_map(int(project_id)).get(int(user_id))
+    except (TypeError, ValueError):
+        return None
+    #
+    return names or None
+
+
+def role_filter_condition(project_id, roles):
+    """SQL condition scoping usage_event to rows whose actor held one of `roles`, or None for
+    "no filter" (today's behaviour, all roles).
+
+    Prefers each row's own role_snapshot over resolve_role_filter's live join (#6796): the live
+    join only ever reflects a user's *current* roles, so once a role changes or a user is
+    removed from the project, their already-recorded activity permanently vanished from any
+    role-filtered view even though the usage_event row itself was never touched. A row written
+    before role_snapshot existed has it NULL and falls back to the live join -- exactly today's
+    behaviour for every row already on disk, so nothing regresses for historical data.
+    """
+    wanted = sorted({role for role in (roles or []) if role})
+    #
+    if not wanted:
+        return None
+    #
+    live_user_ids = resolve_role_filter(project_id, wanted)
+    #
+    return or_(
+        and_(UsageEvent.role_snapshot.isnot(None), UsageEvent.role_snapshot.overlap(wanted)),
+        and_(UsageEvent.role_snapshot.is_(None), UsageEvent.user_id.in_(live_user_ids)),
+    )
 
 
 def label_users(rows_user_ids, stored_emails=None):
@@ -857,12 +959,11 @@ def ai_active_users_trend(
     granularity = granularity if granularity in _BUCKET_EXPRS else GRANULARITY_DAY
     wanted_roles = sorted({role for role in (roles or []) if role})
     #
-    role_user_ids = resolve_role_filter(project_id, wanted_roles)
+    role_condition = role_filter_condition(project_id, wanted_roles)
     conditions = base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
     #
-    if role_user_ids is not None:
-        # Possibly empty: a selected role with no members is a legitimate zero
-        conditions.append(UsageEvent.user_id.in_(role_user_ids))
+    if role_condition is not None:
+        conditions.append(role_condition)
     #
     bucket = bucket_expr(granularity).label("bucket")
     active_users = active_users_expr()

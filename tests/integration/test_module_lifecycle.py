@@ -4,7 +4,7 @@ import types
 
 from fixtures.helpers import bind
 from usage import module as module_module
-from usage.methods import admin_tasks, mode as mode_module, partitions
+from usage.methods import admin_tasks, mode as mode_module, partitions, schema
 from usage.sources import registry
 
 
@@ -29,9 +29,11 @@ def build(config=None, rpc=None, descriptors=None):
     )
     #
     instance = module_module.Module(context, descriptor)
-    bind(instance, mode_module.Method, partitions.Method, admin_tasks.Method)
+    bind(instance, mode_module.Method, partitions.Method, admin_tasks.Method, schema.Method)
     #
     instance.usage_ensure_partitions = lambda *a, **k: calls.append(("ensure_partitions", None))
+    instance.usage_ensure_role_snapshot_column = \
+        lambda *a, **k: calls.append(("ensure_role_snapshot_column", None))
     instance.usage_start_workers = lambda *a, **k: calls.append(("start_workers", None))
     #
     return instance, calls

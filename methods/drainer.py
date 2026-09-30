@@ -29,6 +29,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
+from . import _analytics as an
 from ._counters import EVENT_TYPE_LLM, member_key, project_key
 from .gate import DEAD_QUEUE_KEY, QUEUE_KEY
 from ..models.usage_counter import UsageCounter
@@ -101,6 +102,15 @@ def event_values(rows):
         # failing the whole batch
         for column in COST_SPLIT_COLUMNS:
             value.setdefault(column, 0)
+        #
+        # The one choke point every usage_event insert passes through regardless of caller, so
+        # stamping it here (rather than in whatever built the row) covers both llm and tool
+        # events. None on lookup failure/no roles, same as a pre-existing row: the reader falls
+        # back to the live project_user_role join for it (#6796).
+        if "role_snapshot" in columns and not value.get("role_snapshot"):
+            value["role_snapshot"] = an.role_names_snapshot(
+                value.get("project_id"), value.get("user_id"),
+            )
         #
         values.append(value)
     #
