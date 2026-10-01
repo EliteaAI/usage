@@ -144,7 +144,7 @@ if _API_AVAILABLE:
                 #
                 return {
                     "kpis": kpis,
-                    "top_ai_users": self._top_ai_users(conditions, run_scope),
+                    "top_ai_users": self._top_ai_users(project_id, conditions, run_scope),
                     "daily_activity": self._daily_activity(conditions, run_scope),
                     "models": self._models(project_id, conditions),
                 }, 200
@@ -198,12 +198,18 @@ if _API_AVAILABLE:
             }
 
         @staticmethod
-        def _top_ai_users(conditions, run_scope=None):
+        def _top_ai_users(project_id, conditions, run_scope=None):
             """Top AI adopters.
 
             Grouped by user_id alone: user_email is null on rows written before the write path
             populated it, and grouping by the pair would split one person into several rows.
+            A run-scoped view keeps every actor of the run, as base_filters does.
             """
+            if run_scope is None:
+                outsiders = an.outsider_admin_ids(project_id, conditions)
+                if outsiders:
+                    conditions = [*conditions, UsageEvent.user_id.notin_(outsiders)]
+            #
             rows = an.fetch_all(select(
                 UsageEvent.user_id,
                 func.max(UsageEvent.user_email).label("user_email"),

@@ -182,6 +182,10 @@ if _API_AVAILABLE:
                 search = request.args.get("search", "").strip()
 
                 conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
+                if run_scope is None:
+                    outsiders = an.outsider_admin_ids(project_id, conditions)
+                    if outsiders:
+                        conditions.append(UsageEvent.user_id.notin_(outsiders))
                 if search:
                     # The stored email is null on rows written before the write path filled it,
                     # so the directory's matching ids are searched alongside the column

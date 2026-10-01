@@ -765,6 +765,33 @@ def project_member_count(project_id, unique_users=0):
     return max(total, unique_users or 0)
 
 
+def outsider_admin_ids(project_id, conditions):
+    """Active user ids in the window who are global super-admins but not project members.
+
+    A super-admin can act in any project for oversight; that is not team adoption, so they are
+    kept off per-user listings. A member removed after the fact is not an outsider here — their
+    activity in the window is real and stays listed. A failed member lookup excludes no one.
+    """
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    try:
+        member_ids = {int(uid) for uid in (auth.list_project_users(project_id) or [])}
+    except:  # pylint: disable=W0702
+        log.exception("usage: project member lookup failed for project %s", project_id)
+        return set()
+    #
+    active_ids = {
+        int(r["user_id"]) for r in fetch_all(
+            select(distinct(UsageEvent.user_id).label("user_id")).where(*conditions)
+        ) if r["user_id"] is not None
+    }
+    #
+    return {
+        user_id for user_id in active_ids - member_ids
+        if _is_super_admin(user_id)
+    }
+
+
 def model_display_names(project_id):
     """model_name -> display name, from the project's configured models."""
     from tools import rpc_tools  # pylint: disable=C0415,E0401
