@@ -20,7 +20,7 @@
 import json
 import time
 
-from sqlalchemy import func
+from sqlalchemy import func, literal_column
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import CompileError, ProgrammingError
 
@@ -103,6 +103,13 @@ def event_values(rows):
             value.setdefault(column, 0)
         #
         values.append(value)
+    #
+    # A multi-row VALUES needs the same keys in every row; DEFAULT keeps NULL/server_default
+    present = set().union(*values)
+    #
+    for value in values:
+        for name in present - set(value):
+            value[name] = literal_column("DEFAULT")
     #
     if unknown:
         log.warning(
