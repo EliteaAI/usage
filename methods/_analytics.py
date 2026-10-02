@@ -68,6 +68,9 @@ SYSTEM_USER_EMAIL_SUFFIX = "@centry.user"
 # Drops the synthetic actor from anything user-facing
 HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
+# Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881)
+MANUAL_RUN = UsageEvent.trigger_source.is_(None)
+
 # Platform-managed roles that project creation copies into every project's role set (#6794):
 # super_admin is seeded into mode="default" and system is the pre-existing per-project role.
 # Neither is a role a user picks, so both are hidden from the analytics role filter — mirrors
@@ -425,7 +428,36 @@ def entity_meta(project_id, application_ids=(), version_ids=()):
 
 def active_users_expr():
     """Distinct human actors."""
-    return func.count(distinct(case((HUMAN_ACTOR, UsageEvent.user_id), else_=None)))
+    return func.count(distinct(case((and_(HUMAN_ACTOR, MANUAL_RUN), UsageEvent.user_id), else_=None)))
+
+
+def manual_users_expr():
+    """Distinct users of the rows in scope, automated runs aside."""
+    return func.count(distinct(case((MANUAL_RUN, UsageEvent.user_id), else_=None)))
+
+
+def automated_activity(conditions):
+    """Runs, calls and cost of automated runs, one entry per trigger_source."""
+    rows = fetch_all(select_from(
+        [
+            UsageEvent.trigger_source,
+            func.count(distinct(UsageEvent.run_id)).label("runs"),
+            llm_calls_expr().label("llm_calls"),
+            tool_runs_expr().label("tool_runs"),
+            func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+        ],
+        [*conditions, ~MANUAL_RUN],
+    ).group_by(UsageEvent.trigger_source).order_by(UsageEvent.trigger_source))
+    return [
+        {
+            "trigger_source": r["trigger_source"],
+            "runs": int(r["runs"] or 0),
+            "llm_calls": int(r["llm_calls"] or 0),
+            "tool_runs": int(r["tool_runs"] or 0),
+            "llm_cost": cost_usd(r["cost_nano"] or 0),
+        }
+        for r in rows
+    ]
 
 
 def day_expr():

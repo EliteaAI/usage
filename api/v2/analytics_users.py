@@ -183,6 +183,7 @@ if _API_AVAILABLE:
 
                 conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
                 if run_scope is None:
+                    conditions.append(an.MANUAL_RUN)
                     outsiders = an.outsider_admin_ids(project_id, conditions)
                     if outsiders:
                         conditions.append(UsageEvent.user_id.notin_(outsiders))
