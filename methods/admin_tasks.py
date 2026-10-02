@@ -15,7 +15,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Break-glass admin task: usage_event partitions """
+""" Break-glass admin tasks: usage_event partitions and schema """
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
@@ -31,3 +31,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.info("usage: admin task ensured %s usage_event partition(s)", created)
         #
         return created
+
+    @web.method()
+    def usage_ensure_role_snapshot_column_task(self, *args, **kwargs):  # pylint: disable=W0613
+        """Add usage_event.role_snapshot now, for a deployment where ready() ran before an
+        operator could apply it (#6796). A no-op once the column exists.
+        """
+        self.usage_ensure_role_snapshot_column()
+        log.info("usage: admin task ensured usage_event.role_snapshot")

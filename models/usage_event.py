@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c  # pylint: disable=E0401
@@ -41,6 +41,12 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The actor's project role names, captured once at write time (#6796): project_user_role
+    # is live and hard-deletes a row on a role change or removal, so a role-filtered read that
+    # joined against it lost a user's historical activity the moment their role changed. NULL
+    # on a row written before this column existed; resolve_role_filter's live join stays the
+    # fallback for exactly those rows -- see methods/_analytics.py role_filter_condition.
+    role_snapshot: Mapped[Optional[list]] = mapped_column(ARRAY(Text), nullable=True)
     # Text, not UUID/BIGINT: ids arrive as opaque strings from several entry points
     run_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     conversation_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
