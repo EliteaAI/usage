@@ -123,7 +123,7 @@ class Module(module.ModuleModel):
                 Method, "usage_ensure_role_snapshot_column_task", self,
             )
             this.for_module("admin").module.register_admin_task(
-                "usage_ensure_role_snapshot_column_task", snapshot_task,
+                "usage_ensure_role_snapshot_column_task", snapshot_task, group="R-2.0.7",
             )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to register admin tasks: %s", exc)
