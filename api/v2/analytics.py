@@ -147,6 +147,10 @@ if _API_AVAILABLE:
                     "top_ai_users": self._top_ai_users(project_id, conditions, run_scope),
                     "daily_activity": self._daily_activity(conditions, run_scope),
                     "models": self._models(project_id, conditions),
+                    # Unfiltered by actor: scheduled runs may bill a project system user
+                    "automated": an.automated_activity(
+                        an.base_filters(project_id, dt_from, dt_to, human_only=False, run_scope=run_scope),
+                    ),
                 }, 200
             except Exception:  # pylint: disable=W0703
                 log.error("Usage analytics query failed", exc_info=True)
@@ -156,7 +160,7 @@ if _API_AVAILABLE:
         def _kpis(project_id, conditions, run_scope=None):
             """One scan for every headline number."""
             row = an.fetch_one(select(
-                func.count(distinct(UsageEvent.user_id)).label("unique_users"),
+                an.manual_users_expr().label("unique_users"),
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
@@ -206,6 +210,7 @@ if _API_AVAILABLE:
             A run-scoped view keeps every actor of the run, as base_filters does.
             """
             if run_scope is None:
+                conditions = [*conditions, an.MANUAL_RUN]
                 outsiders = an.outsider_admin_ids(project_id, conditions)
                 if outsiders:
                     conditions = [*conditions, UsageEvent.user_id.notin_(outsiders)]
@@ -248,7 +253,7 @@ if _API_AVAILABLE:
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
-                func.count(distinct(UsageEvent.user_id)).label("active_users"),
+                an.manual_users_expr().label("active_users"),
             ).where(*conditions).group_by(day).order_by(day))
             #
             return [

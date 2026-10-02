@@ -71,13 +71,16 @@ ATTRIBUTION_KEYS = (
     "conversation_id",
     "entity_type", "entity_id", "entity_version_id", "entity_name",
     "root_entity_type", "root_entity_id", "root_entity_version_id",
+    "trigger_source",
 )
+#: Automated sources only; manual stays NULL, and an unknown value is dropped as manual (#6881)
+TRIGGER_SOURCES = ("scheduled", "webhook", "index")
 ATTRIBUTION_INT_KEYS = (
     "entity_id", "entity_version_id", "root_entity_id", "root_entity_version_id",
 )
 #: Column widths, and a cap on the header itself: this arrives from a caller.
 ATTRIBUTION_HEADER_LIMIT = 4096
-ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32}
+ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32, "trigger_source": 16}
 ATTRIBUTION_TEXT_LIMIT = 512
 #: Signature field inside the header JSON; the indexer signs it with a key users never see (#6762)
 ATTRIBUTION_SIGNATURE_KEY = "sig"
@@ -323,6 +326,9 @@ def _clean_attribution(attribution):
         value = attribution.get(key)
         #
         if value is None or value == "":
+            continue
+        #
+        if key == "trigger_source" and value not in TRIGGER_SOURCES:
             continue
         #
         if key in ATTRIBUTION_INT_KEYS:

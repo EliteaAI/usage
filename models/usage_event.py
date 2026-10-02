@@ -105,6 +105,8 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     tool_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # scheduled/webhook/index; NULL is a manual (UI/API) run
+    trigger_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
     # Sparse extras only. Nothing a report filters on goes here.
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
