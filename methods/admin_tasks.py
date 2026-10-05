@@ -34,8 +34,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_ensure_role_snapshot_column_task(self, *args, **kwargs):  # pylint: disable=W0613
-        """Add usage_event.role_snapshot now, for a deployment where ready() ran before an
-        operator could apply it (#6796). A no-op once the column exists.
+        """Add usage_event.role_snapshot if missing, then stamp current project roles onto rows
+        written before it existed (#6796). Safe to rerun: only NULL rows are touched. Rows of
+        users already removed from their project stay NULL -- their roles are gone.
         """
         self.usage_ensure_role_snapshot_column()
         log.info("usage: admin task ensured usage_event.role_snapshot")
+        #
+        return self.usage_backfill_role_snapshot()
