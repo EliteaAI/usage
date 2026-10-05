@@ -730,6 +730,30 @@ ROLE_SNAPSHOT_CACHE_MAX = 512
 _role_snapshot_cache = {}
 
 
+def fetch_project_role_name_map(project_id):
+    """{user_id: sorted role names} for every current member of project_id, uncached; raises
+    on a failed lookup so a caller that must not mistake an outage for "no roles" can tell.
+    """
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    project_roles = auth.list_project_roles(project_id) or []
+    user_roles = auth.list_project_user_roles(project_id) or []
+    #
+    names_by_role_id = {r["id"]: r["name"] for r in project_roles if r.get("name")}
+    mapping = {}
+    #
+    for user_role in user_roles:
+        name = names_by_role_id.get(user_role.get("role_id"))
+        user_id = user_role.get("user_id")
+        #
+        if name is None or user_id is None:
+            continue
+        #
+        mapping.setdefault(int(user_id), set()).add(name)
+    #
+    return {user_id: sorted(names) for user_id, names in mapping.items()}
+
+
 def _project_role_name_map(project_id):
     """{user_id: sorted role names} for every member of project_id, cached briefly.
 
@@ -750,10 +774,7 @@ def _project_role_name_map(project_id):
         return cached[1]
     #
     try:
-        from tools import auth  # pylint: disable=C0415,E0401
-        #
-        project_roles = auth.list_project_roles(project_id) or []
-        user_roles = auth.list_project_user_roles(project_id) or []
+        result = fetch_project_role_name_map(project_id)
     except Exception:  # pylint: disable=W0703
         if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
             _evict_expired_role_snapshots(now)
@@ -761,20 +782,6 @@ def _project_role_name_map(project_id):
         _role_snapshot_cache[project_id] = (now, {}, ROLE_SNAPSHOT_FAILURE_TTL_SECONDS)
         #
         return {}
-    #
-    names_by_role_id = {r["id"]: r["name"] for r in project_roles if r.get("name")}
-    mapping = {}
-    #
-    for user_role in user_roles:
-        name = names_by_role_id.get(user_role.get("role_id"))
-        user_id = user_role.get("user_id")
-        #
-        if name is None or user_id is None:
-            continue
-        #
-        mapping.setdefault(int(user_id), set()).add(name)
-    #
-    result = {user_id: sorted(names) for user_id, names in mapping.items()}
     #
     if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
         _evict_expired_role_snapshots(now)
