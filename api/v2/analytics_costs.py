@@ -332,14 +332,17 @@ if _API_AVAILABLE:
             otherwise a nested run titles its parent with a sub-agent's name.
 
             entity_kind (agent/pipeline) comes from elitea_core: root_entity_type is always
-            'application' on the row, pipelines included (#6678).
+            'application' on the row, pipelines included (#6678). The root's own project is
+            part of the key, since a public agent's id belongs to the public project (#6902).
             """
             root_name = func.max(case(
                 (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
                 else_=None,
             ))
+            root_project = an.root_project_expr()
             columns = [
                 UsageEvent.root_entity_id,
+                root_project.label("root_project_id"),
                 root_name.label("entity_name"),
                 func.count().label("calls"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
@@ -353,21 +356,23 @@ if _API_AVAILABLE:
             statement = select(*columns).where(
                 *conditions, an.is_agent_row(run_scope), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
-                UsageEvent.root_entity_type, UsageEvent.root_entity_id,
+                UsageEvent.root_entity_type, UsageEvent.root_entity_id, root_project,
             ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
 
             rows = an.fetch_all(statement)
-            applications, _ = an.entity_meta(project_id, application_ids=[r["root_entity_id"] for r in rows])
+            applications = an.application_meta(
+                project_id, refs=[(r["root_project_id"], r["root_entity_id"]) for r in rows],
+            )
 
             return [
                 {
                     "entity_name": (
                         r["entity_name"]
-                        or applications.get(r["root_entity_id"], {}).get("name")
+                        or applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
                         or f"Agent #{r['root_entity_id']}"
                     ),
                     "entity_id": r["root_entity_id"],
-                    "entity_kind": applications.get(r["root_entity_id"], {}).get("kind"),
+                    "entity_kind": applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("kind"),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),

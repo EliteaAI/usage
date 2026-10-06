@@ -42,3 +42,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.info("usage: admin task ensured usage_event.role_snapshot")
         #
         return self.usage_backfill_role_snapshot()
+
+    @web.method()
+    def usage_ensure_root_entity_project_column_task(self, *args, **kwargs):  # pylint: disable=W0613
+        """Add usage_event.root_entity_project_id if missing (#6902). Safe to rerun. No backfill:
+        rows written before it existed read as their own project_id.
+        """
+        self.usage_ensure_root_entity_project_column()
+        log.info("usage: admin task ensured usage_event.root_entity_project_id")
