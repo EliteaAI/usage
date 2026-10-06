@@ -5,8 +5,6 @@ import re
 from flask import request
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
-from ...methods import _analytics as an
-
 PROMPT_LIB_MODE = "prompt_lib"
 
 OPENAPI_TAG = "usage/usage"
@@ -52,6 +50,8 @@ def _model_display_names(project_id: int):
     The analytics lookup itself, so one model reads identically in both.
     An empty map is a safe outcome: callers keep the raw model name.
     """
+    from ...methods import _analytics as an  # pylint: disable=C0415
+    #
     return an.model_display_names(project_id)
 
 
