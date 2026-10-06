@@ -77,6 +77,9 @@ MANUAL_RUN = UsageEvent.trigger_source.is_(None)
 # admin/constants.py's RESTRICTED_ROLES.
 RESTRICTED_ROLES = {"super_admin", "system"}
 
+# Configuration sections a metered call can name its model from (#6901)
+MODEL_SECTIONS = ("llm", "embedding", "image_generation", "asr", "tts")
+
 # Global super-admin verdicts, cached per user_id: {user_id: (monotonic_stamp, is_super_admin)}
 SUPER_ADMIN_TTL_SECONDS = 300
 SUPER_ADMIN_CACHE_MAX = 2048
@@ -990,21 +993,29 @@ def outsider_admin_ids(project_id, conditions):
 
 
 def model_display_names(project_id):
-    """model_name -> display name, from the project's configured models."""
+    """model_name -> display name, from the project's configured models of every section.
+
+    Each section is read on its own, so one unavailable section does not blank the others;
+    the first section listing a name wins.
+    """
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
     names = {}
     #
-    try:
-        response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-            project_id=project_id, section="llm", include_shared=True,
-        )
+    for section in MODEL_SECTIONS:
+        try:
+            response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
+                project_id=project_id, section=section, include_shared=True,
+            )
+        except:  # pylint: disable=W0702
+            log.warning(
+                "usage: %s model display names unavailable for project %s", section, project_id,
+            )
+            continue
         #
         for item in (response or {}).get("items", []) or []:
             if isinstance(item, dict) and item.get("name"):
-                names[item["name"]] = item.get("display_name") or item["name"]
-    except:  # pylint: disable=W0702
-        log.warning("usage: model display names unavailable for project %s", project_id)
+                names.setdefault(item["name"], item.get("display_name") or item["name"])
     #
     return names
 
