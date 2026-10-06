@@ -915,3 +915,63 @@ def event_type_health(project_id, dt_from=None, dt_to=None, run_scope=None):
         }
         for row in rows
     ]
+
+
+# Per-conversation token sums an eval run settles its case figures from (#6716). Each case and
+# judge call dispatches under its own stream id, which the predict path stores as conversation_id.
+EVAL_BREAKDOWN_TOKEN_COLUMNS = (
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens",
+)
+
+
+def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
+    """llm rows of one eval run, grouped by conversation_id. Bounds are required: ts is the
+    partition key, so a run-scoped query without them scans every partition.
+    """
+    priced = func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced"
+    return select_from(
+        [
+            UsageEvent.conversation_id,
+            func.count().label("llm_calls"),
+            *[
+                func.sum(func.coalesce(getattr(UsageEvent, name), 0)).label(name)
+                for name in EVAL_BREAKDOWN_TOKEN_COLUMNS
+            ],
+            func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano_usd"),
+            count_where(and_(~priced, total_tokens_expr() > 0)).label("unpriced_calls"),
+            func.max(UsageEvent.model_name).label("model_name"),
+        ],
+        [
+            UsageEvent.project_id == project_id,
+            UsageEvent.ts >= dt_from,
+            UsageEvent.ts <= dt_to,
+            UsageEvent.run_id == platform_run_id,
+            UsageEvent.event_type == EVENT_LLM,
+        ],
+    ).group_by(UsageEvent.conversation_id)
+
+
+def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
+    """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, model_name}] for one
+    eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
+
+    Raises ValueError for a malformed run id.
+    """
+    try:
+        platform_run_id = str(uuid.UUID(str(platform_run_id)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("platform_run_id must be a UUID") from exc
+    #
+    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    rows = fetch_all(eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to))
+    return [
+        {
+            "conversation_id": row["conversation_id"],
+            "llm_calls": int(row["llm_calls"] or 0),
+            **{name: int(row[name] or 0) for name in EVAL_BREAKDOWN_TOKEN_COLUMNS},
+            "cost_nano_usd": int(row["cost_nano_usd"] or 0),
+            "unpriced_calls": int(row["unpriced_calls"] or 0),
+            "model_name": row["model_name"],
+        }
+        for row in rows
+    ]

@@ -54,3 +54,12 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         if run_scope is not None and date_from is None and date_to is None:
             date_from, date_to = run_scope.dt_from, run_scope.dt_to
         return an.event_type_health(project_id, date_from, date_to, run_scope=run_scope)
+
+    @web.rpc("usage_eval_run_breakdown", "usage_eval_run_breakdown")
+    def usage_eval_run_breakdown(  # pylint: disable=R0913,R0917
+            self, project_id, platform_run_id, date_from=None, date_to=None, **kwargs,
+    ):  # pylint: disable=W0613
+        """One eval run's llm usage per conversation_id, for elitea_core to settle its per-case
+        figures from the ledger (#6716). Raises ValueError for a malformed run id.
+        """
+        return an.eval_run_breakdown(project_id, platform_run_id, date_from, date_to)
