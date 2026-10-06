@@ -17,6 +17,14 @@ from usage.methods import gate, reconcile
 
 START = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
 END = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+# The drift pass cuts facts off at now(), so the tests pin now() inside the period
+MID_PERIOD = START + datetime.timedelta(days=15)
+
+
+class _FrozenClock(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return MID_PERIOD if tz else MID_PERIOD.replace(tzinfo=None)
 
 
 class Rows:
@@ -572,6 +580,9 @@ class TestRedisDrift:
             types.SimpleNamespace(connect=lambda: FakeLockConnection()), raising=False,
         )
         monkeypatch.setattr(reconcile.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(
+            reconcile, "datetime", types.SimpleNamespace(**{**vars(datetime), "datetime": _FrozenClock}),
+        )
         #
         return instance
 
