@@ -399,6 +399,23 @@ def is_evaluation_row():
     return UsageEvent.entity_type == ENTITY_TYPE_EVALUATION
 
 
+def root_project_expr():
+    """Schema the root entity lives in (#6902); a row predating the column is its own project."""
+    return func.coalesce(UsageEvent.root_entity_project_id, UsageEvent.project_id)
+
+
+def _entity_meta_rpc(project_id, **kwargs):
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
+            project_id, **kwargs,
+        ) or {}
+    except:  # pylint: disable=W0702
+        log.warning("usage: entity names unavailable for project %s", project_id)
+        return {}
+
+
 def entity_meta(project_id, application_ids=(), version_ids=()):
     """({app_id: meta}, {version_id: meta}) with names and agent/pipeline kind (#6678).
 
@@ -410,20 +427,27 @@ def entity_meta(project_id, application_ids=(), version_ids=()):
     if not application_ids and not version_ids:
         return {}, {}
     #
-    from tools import rpc_tools  # pylint: disable=C0415,E0401
-    #
-    try:
-        response = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
-            project_id, application_ids=application_ids, version_ids=version_ids,
-        ) or {}
-    except:  # pylint: disable=W0702
-        log.warning("usage: entity names unavailable for project %s", project_id)
-        return {}, {}
+    response = _entity_meta_rpc(project_id, application_ids=application_ids, version_ids=version_ids)
     #
     return (
         {item["id"]: item for item in response.get("applications") or []},
         {item["id"]: item for item in response.get("versions") or []},
     )
+
+
+def application_meta(project_id, refs=()):
+    """{(root_project_id, app_id): meta} for root_project_expr() groups (#6902).
+
+    An app id is only unique within its own schema, so a public agent is looked up in the
+    public project's schema and never matched against this project's same-id application.
+    """
+    refs = sorted({(p, i) for p, i in refs if p is not None and i is not None})
+    if not refs:
+        return {}
+    #
+    response = _entity_meta_rpc(project_id, application_refs=[list(ref) for ref in refs])
+    #
+    return {(item["project_id"], item["id"]): item for item in response.get("scoped_applications") or []}
 
 
 def active_users_expr():

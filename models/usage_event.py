@@ -55,6 +55,9 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     root_entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     root_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     root_entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Schema the root entity lives in; differs from project_id for a public agent (#6902).
+    # NULL on rows written before it existed, which readers treat as project_id.
+    root_entity_project_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     # Which node inside the run made this call
     entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
