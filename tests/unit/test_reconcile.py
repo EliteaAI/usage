@@ -17,6 +17,15 @@ from usage.methods import gate, reconcile
 
 START = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
 END = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+# The drift pass cuts facts off at now(); pinned inside the period so the wall clock can't
+# walk past END and flip the cutoff/queue assertions
+NOW = datetime.datetime(2026, 9, 15, 12, tzinfo=datetime.timezone.utc)
+
+
+class FrozenDatetime(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz is None else NOW.astimezone(tz)
 
 
 class Rows:
@@ -572,6 +581,9 @@ class TestRedisDrift:
             types.SimpleNamespace(connect=lambda: FakeLockConnection()), raising=False,
         )
         monkeypatch.setattr(reconcile.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(reconcile, "datetime", types.SimpleNamespace(
+            datetime=FrozenDatetime, timezone=datetime.timezone,
+        ))
         #
         return instance
 
