@@ -327,18 +327,14 @@ if _API_AVAILABLE:
             root of the run it belongs to, so this reads straight off the row instead of the
             elitea_core original's trace_id join to a separate application-type event.
 
-            entity_name names the node that made one call and there is no root_entity_name, so
-            the label is read only off whichever row IS the run (entity_id == root_entity_id) —
-            otherwise a nested run titles its parent with a sub-agent's name.
+            The label is the application's own name from elitea_core, falling back to the run
+            row's stored name without its version suffix (#6910): rows span every version.
 
             entity_kind (agent/pipeline) comes from elitea_core: root_entity_type is always
             'application' on the row, pipelines included (#6678). The root's own project is
             part of the key, since a public agent's id belongs to the public project (#6902).
             """
-            root_name = func.max(case(
-                (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
-                else_=None,
-            ))
+            root_name = an.run_name_expr()
             root_project = an.root_project_expr()
             columns = [
                 UsageEvent.root_entity_id,
@@ -367,8 +363,8 @@ if _API_AVAILABLE:
             return [
                 {
                     "entity_name": (
-                        r["entity_name"]
-                        or applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
+                        applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
+                        or r["entity_name"]
                         or f"Agent #{r['root_entity_id']}"
                     ),
                     "entity_id": r["root_entity_id"],

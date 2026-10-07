@@ -407,6 +407,21 @@ def root_project_expr():
     return func.coalesce(UsageEvent.root_entity_project_id, UsageEvent.project_id)
 
 
+def run_name_expr():
+    """Name of the run row (entity_id == root_entity_id), never a child call's, without its version.
+
+    The run row is stored as "<name> (<version>)", but agent tables aggregate every version of
+    an entity, so the suffix would label the whole row as one version (#6910).
+    """
+    return func.regexp_replace(
+        func.max(case(
+            (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
+            else_=None,
+        )),
+        r" \([^()]*\)$", "",
+    )
+
+
 def _entity_meta_rpc(project_id, **kwargs):
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
