@@ -131,6 +131,12 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "usage_ensure_root_entity_project_column_task", root_project_task, group="R-2.0.7",
             )
+            budget_exempt_task = self._wrap_admin_task(
+                Method, "usage_ensure_budget_exempt_column_task", self,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "usage_ensure_budget_exempt_column_task", budget_exempt_task, group="R-2.0.7",
+            )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to register admin tasks: %s", exc)
 
@@ -146,6 +152,10 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.unregister_admin_task(
                 "usage_ensure_root_entity_project_column_task",
                 self.usage_ensure_root_entity_project_column_task,
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "usage_ensure_budget_exempt_column_task",
+                self.usage_ensure_budget_exempt_column_task,
             )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to unregister admin tasks: %s", exc)

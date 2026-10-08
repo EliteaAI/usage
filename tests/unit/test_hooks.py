@@ -19,12 +19,13 @@ from usage.sources import registry
 
 BEGIN_PARAMS = [
     "project_id", "user_id", "model_name", "endpoint", "headers", "provider", "run_id",
-    "attribution", "user_email", "max_output_tokens", "input_size_bytes",
+    "attribution", "user_email", "max_output_tokens", "input_size_bytes", "budget_exempt",
 ]
 
 # Optional so a second interface can adopt the hooks before it can supply any of them
 BEGIN_OPTIONAL_PARAMS = (
     "provider", "run_id", "attribution", "user_email", "max_output_tokens", "input_size_bytes",
+    "budget_exempt",
 )
 
 # Any uuid; what matters is that it survives canonicalisation and a malformed one does not
@@ -719,3 +720,75 @@ class TestAdmission:
         assert ctx.denied is False
         assert ctx.response is None
         assert drain(ctx, [OPENAI_JSON]) == [OPENAI_JSON]
+
+
+class TestBudgetExempt:
+    """A project-own (BYO) model: billed by the provider to the customer, so the platform
+    budget must neither refuse it nor count it. The row is still written for analytics."""
+
+    @staticmethod
+    def _closed_enforce(metering, monkeypatch):
+        monkeypatch.setattr(hooks.this.descriptor, "config", {"usage": {"mode": "enforce"}})
+        calls = []
+        #
+        def acquire(*args, **kwargs):  # pylint: disable=W0613
+            calls.append(args)
+            return {"allowed": False, "scope": "project", "reservation": None, "healthy": True}
+        #
+        monkeypatch.setattr(metering.recorder, "usage_gate_acquire", acquire)
+        notified = []
+        monkeypatch.setattr(hooks, "_notify_limit_reached", lambda *a: notified.append(a))
+        return calls, notified
+
+    @staticmethod
+    def _begin(budget_exempt):
+        return hooks.begin_llm_call(
+            project_id=7, user_id=42, model_name="gpt-4o", endpoint="/v1/chat/completions",
+            headers={}, budget_exempt=budget_exempt,
+        )
+
+    def test_exempt_call_passes_a_closed_budget_without_touching_the_gate(
+            self, metering, monkeypatch,
+    ):
+        calls, notified = self._closed_enforce(metering, monkeypatch)
+        ctx = self._begin(True)
+        #
+        assert ctx.denied is False
+        assert calls == []
+        assert notified == []
+        assert ctx.reservation is None
+
+    def test_shared_call_is_still_refused(self, metering, monkeypatch):
+        calls, notified = self._closed_enforce(metering, monkeypatch)
+        ctx = self._begin(None)
+        #
+        assert ctx.denied is True
+        assert len(calls) == 1
+        assert len(notified) == 1
+
+    def test_exempt_call_served_even_when_write_path_is_unhealthy(self, metering, monkeypatch):
+        self._closed_enforce(metering, monkeypatch)
+        metering.recorder.usage_write_path_healthy = lambda: False
+        #
+        assert self._begin(True).denied is False
+
+    def test_exempt_row_is_flagged_and_settles_nothing(self, metering, monkeypatch):
+        settled = []
+        monkeypatch.setattr(metering.recorder, "usage_gate_settle", lambda *a: settled.append(a))
+        drain(self._begin(True), [OPENAI_JSON])
+        #
+        assert metering.rows[-1]["budget_exempt"] is True
+        assert metering.rows[-1]["cost_nano_usd"] > 0  # still priced, for analytics
+        assert settled == []
+
+    def test_shared_row_does_not_carry_the_key(self, metering):
+        # Absent, not False: a deploy that has not run the column migration keeps working
+        drain(self._begin(None), [OPENAI_JSON])
+        #
+        assert "budget_exempt" not in metering.rows[-1]
+
+    def test_only_a_literal_true_exempts(self, metering, monkeypatch):
+        calls, _ = self._closed_enforce(metering, monkeypatch)
+        #
+        assert self._begin("yes").denied is True
+        assert len(calls) == 1

@@ -110,6 +110,8 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     # scheduled/webhook/index; NULL is a manual (UI/API) run
     trigger_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # TRUE for a project-own model: never counted toward budgets. NULL counts, so filter IS NOT TRUE
+    budget_exempt: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     # Sparse extras only. Nothing a report filters on goes here.
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)

@@ -79,6 +79,15 @@ class TestFactTotals:
         #
         assert "event_type" in str(connection.statements[0])
 
+    def test_budget_exempt_facts_are_left_out_null_safely(self):
+        # The drainer never counts BYO rows, so summing them here would "repair" counters
+        # upward into enforcement; NULL (shared, pre-migration) rows must still be summed
+        connection = Rows([])
+        #
+        build().usage_fact_totals(connection, START, END)
+        #
+        assert "usage_event.budget_exempt IS NOT true" in str(connection.statements[0])
+
     def test_a_row_without_a_user_counts_only_towards_the_project(self):
         connection = Rows([(42, None, 10, 20, 1000, 1)])
         #
