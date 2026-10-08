@@ -417,6 +417,24 @@ class TestAttribution:
         assert row["root_entity_type"] == "application" and row["root_entity_id"] == 1
         assert row["conversation_id"] == ATTRIBUTION["conversation_id"]
 
+    def test_a_signed_skill_entity_survives(self, metering):
+        skill_attribution = {
+            **ATTRIBUTION, "entity_type": "skill", "entity_id": 3, "entity_name": "pdf-skill",
+            "root_entity_type": "skill", "root_entity_id": 3,
+        }
+        drain(self.attributed(attribution=signed(skill_attribution)), [OPENAI_JSON])
+        #
+        row = metering.rows[0]
+        assert (row["entity_type"], row["entity_id"], row["entity_name"]) == ("skill", 3, "pdf-skill")
+        assert (row["root_entity_type"], row["root_entity_id"]) == ("skill", 3)
+
+    def test_a_skill_label_forged_onto_a_signed_header_is_dropped(self, metering):
+        tampered = {**signed(ATTRIBUTION), "entity_type": "skill", "root_entity_type": "skill"}
+        #
+        drain(self.attributed(attribution=tampered), [OPENAI_JSON])
+        #
+        assert not set(ATTRIBUTION) & set(metering.rows[0])
+
     def test_text_is_truncated_to_the_column_width(self, metering):
         drain(
             self.attributed(attribution=signed({**ATTRIBUTION, "entity_name": "n" * 900, "entity_type": "t" * 90,

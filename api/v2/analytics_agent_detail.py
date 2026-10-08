@@ -193,9 +193,9 @@ if _API_AVAILABLE:
         def _kpis(conditions, entity_id, run_scope=None):
             """Display name plus the headline numbers, in one scan."""
             # No root_entity_name column: read the name off whichever row IS the run
-            # (entity_id == root_entity_id).
+            # (an.is_run_row()).
             entity_name_expr = func.max(case(
-                (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
+                (an.is_run_row(), UsageEvent.entity_name),
                 else_=None,
             ))
 
