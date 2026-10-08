@@ -81,7 +81,7 @@ MEASURES = ("input_tokens", "output_tokens", "cost_nano_usd")
 RETURNING_COLUMNS = (
     UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
     UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_nano_usd,
-    UsageEvent.event_type,
+    UsageEvent.event_type, UsageEvent.idempotency_key,
 )
 
 
@@ -127,6 +127,14 @@ def event_values(rows):
         )
     #
     return values
+
+
+def budgeted(rows):
+    """LLM rows that count toward budgets; exempt ones stay facts only."""
+    return [
+        row for row in rows
+        if row.get("event_type") == EVENT_TYPE_LLM and row.get("budget_exempt") is not True
+    ]
 
 
 def counter_deltas(rows):
@@ -414,10 +422,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         ).returning(*RETURNING_COLUMNS)
         #
         landed = [dict(row) for row in connection.execute(statement).mappings()]
+        # Read off the input rows: RETURNING the column would fail every insert pre-migration
+        exempt = {row.get("idempotency_key") for row in rows if row.get("budget_exempt") is True}
         #
-        self.usage_apply_counter_deltas(connection, counter_deltas([
-            row for row in landed if row.get("event_type") == EVENT_TYPE_LLM
-        ]))
+        self.usage_apply_counter_deltas(connection, counter_deltas(budgeted([
+            dict(row, budget_exempt=row.get("idempotency_key") in exempt) for row in landed
+        ])))
         #
         return landed
 
