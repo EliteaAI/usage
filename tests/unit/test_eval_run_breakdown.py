@@ -6,7 +6,7 @@ an in-memory table rather than being re-implemented in Python.
 import datetime
 
 import pytest
-from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, String, Table, create_engine
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, MetaData, String, Table, create_engine
 from sqlalchemy.orm import Session
 
 from usage.methods import _analytics
@@ -26,6 +26,8 @@ FAKE_TABLE = Table(
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
         "reasoning_tokens", "billable_input_tokens", "cost_nano_usd")],
     Column("cost_source", String),
+    Column("token_source", String),
+    Column("is_error", Boolean, default=False),
 )
 
 
@@ -55,13 +57,14 @@ def session(monkeypatch):
 
 def _insert(session, conversation_id, *, run_id=RUN, event_type="llm", project_id=1, minutes=1,
             input_tokens=0, output_tokens=0, cost_nano_usd=0, cost_source="costs-catalog",
-            model_name="gpt-4o"):
+            model_name="gpt-4o", token_source="provider", is_error=False):
     session.execute(FAKE_TABLE.insert().values(
         project_id=project_id, ts=T0 + datetime.timedelta(minutes=minutes), run_id=run_id,
         conversation_id=conversation_id, event_type=event_type, model_name=model_name,
         input_tokens=input_tokens, output_tokens=output_tokens, billable_input_tokens=input_tokens,
         cache_read_tokens=0, cache_creation_tokens=0, reasoning_tokens=0,
-        cost_nano_usd=cost_nano_usd, cost_source=cost_source,
+        cost_nano_usd=cost_nano_usd, cost_source=cost_source, token_source=token_source,
+        is_error=is_error,
     ))
     session.commit()
 
@@ -98,6 +101,16 @@ def test_unpriced_call_with_tokens_is_flagged(session):
     rows = _breakdown()
     assert rows["a_0"]["unpriced_calls"] == 2
     assert rows["a_1"]["unpriced_calls"] == 0
+
+
+def test_unparsed_successful_call_is_flagged(session):
+    # The proxy could not read the response, so the row's 0/0 is not a reading.
+    _insert(session, "a_0", input_tokens=40)
+    _insert(session, "a_0", token_source="unparsed")
+    _insert(session, "a_1", token_source="unparsed", is_error=True)  # failed call: 0 is real
+    rows = _breakdown()
+    assert (rows["a_0"]["llm_calls"], rows["a_0"]["unparsed_calls"]) == (2, 1)
+    assert rows["a_1"]["unparsed_calls"] == 0
 
 
 def test_malformed_run_id_is_rejected():

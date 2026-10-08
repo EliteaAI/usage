@@ -38,6 +38,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from ._counters import NANO
 from ..models.usage_event import UsageEvent
+from ..sources.base import TOKEN_SOURCE_UNPARSED
 
 DEFAULT_DATE_RANGE_DAYS = 7
 # One row per calendar day, so an unbounded span is unbounded cardinality
@@ -939,6 +940,11 @@ def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
             ],
             func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano_usd"),
             count_where(and_(~priced, total_tokens_expr() > 0)).label("unpriced_calls"),
+            # A successful call whose response the proxy could not read: its 0 tokens are not a
+            # reading, so the caller keeps its own figure. A failed call's 0 is real (nothing ran).
+            count_where(and_(
+                UsageEvent.token_source == TOKEN_SOURCE_UNPARSED, UsageEvent.is_error.is_(False),
+            )).label("unparsed_calls"),
             func.max(UsageEvent.model_name).label("model_name"),
         ],
         [
@@ -952,7 +958,8 @@ def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
 
 
 def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
-    """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, model_name}] for one
+    """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, unparsed_calls,
+    model_name}] for one
     eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
 
     Raises ValueError for a malformed run id.
@@ -971,6 +978,7 @@ def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
             **{name: int(row[name] or 0) for name in EVAL_BREAKDOWN_TOKEN_COLUMNS},
             "cost_nano_usd": int(row["cost_nano_usd"] or 0),
             "unpriced_calls": int(row["unpriced_calls"] or 0),
+            "unparsed_calls": int(row["unparsed_calls"] or 0),
             "model_name": row["model_name"],
         }
         for row in rows
