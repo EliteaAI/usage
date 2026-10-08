@@ -8,7 +8,7 @@ from sqlalchemy.exc import CompileError, ProgrammingError
 
 from fixtures.fake_redis import RecordingRedis
 from fixtures.helpers import bind, fake_module
-from usage.methods import drainer
+from usage.methods import drainer, events
 from usage.methods._counters import member_key, project_key
 
 TS = datetime.datetime(2026, 9, 11, 12, 0, tzinfo=datetime.timezone.utc)
@@ -187,6 +187,75 @@ class TestInsertEvents:
         #
         insert(instance, connection, [event("a"), event("b", event_type="tool")])
         #
+        assert {delta["call_count"] for delta in connection.upserts} == {1}
+
+
+class TestBudgetExemptRows:
+    """Project-own (BYO) calls land as facts but never feed usage_counter, which is what the
+    gate primes from -- skipping only the gate would let their cost leak back into enforcement."""
+
+    def test_an_exempt_row_lands_but_counts_nothing(self):
+        connection = Landing()
+        instance = build(connection)
+        #
+        landed = insert(instance, connection, [dict(event("a"), budget_exempt=True)])
+        #
+        assert [row["idempotency_key"] for row in landed] == ["a"]
+        assert connection.upserts == []
+
+    def test_a_mixed_batch_counts_only_the_shared_rows(self):
+        connection = Landing()
+        instance = build(connection)
+        #
+        insert(instance, connection, [
+            dict(event("a", cost=7000), budget_exempt=True), event("b", cost=3000),
+        ])
+        #
+        assert {delta["cost_nano_usd"] for delta in connection.upserts} == {3000}
+        assert {delta["call_count"] for delta in connection.upserts} == {1}
+
+    def test_exemption_is_read_off_the_input_not_returning(self):
+        # RETURNING never projects budget_exempt (a pre-migration DB would reject it), so a
+        # landed row without the key must still be matched to its exempt input by idempotency key
+        assert drainer.UsageEvent.budget_exempt not in drainer.RETURNING_COLUMNS
+        assert drainer.UsageEvent.idempotency_key in drainer.RETURNING_COLUMNS
+
+    def test_budgeted_is_null_safe(self):
+        rows = [event("a"), dict(event("b"), budget_exempt=None),
+                dict(event("c"), budget_exempt=False), dict(event("d"), budget_exempt=True),
+                event("e", event_type="tool")]
+        #
+        assert [row["idempotency_key"] for row in drainer.budgeted(rows)] == ["a", "b", "c"]
+
+
+class TestDirectWrite:
+    """usage_write_event: the path taken when the queue is down."""
+
+    @staticmethod
+    def _write(monkeypatch, row):
+        connection = Landing()
+        instance = fake_module()
+        bind(instance, events.Method)
+        instance.usage_apply_counter_deltas = \
+            lambda conn, deltas: connection.upserts.extend(deltas)
+        monkeypatch.setattr(events, "insert", lambda *a, **k: _Tagged([row]))
+        monkeypatch.setattr(events, "event_values", lambda rows: [dict(r) for r in rows])
+        monkeypatch.setattr(events, "db", types.SimpleNamespace(
+            engine=types.SimpleNamespace(connect=lambda: connection),
+        ))
+        #
+        return instance.usage_write_event(row), connection
+
+    def test_an_exempt_row_lands_but_counts_nothing(self, monkeypatch):
+        written, connection = self._write(monkeypatch, dict(event("a"), budget_exempt=True))
+        #
+        assert written is True
+        assert connection.upserts == []
+
+    def test_a_shared_row_counts(self, monkeypatch):
+        written, connection = self._write(monkeypatch, event("a"))
+        #
+        assert written is True
         assert {delta["call_count"] for delta in connection.upserts} == {1}
 
 
