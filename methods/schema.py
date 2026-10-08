@@ -40,6 +40,7 @@ from . import _analytics as an
 
 ROLE_SNAPSHOT_COLUMN = "role_snapshot"
 ROOT_ENTITY_PROJECT_COLUMN = "root_entity_project_id"
+BUDGET_EXEMPT_COLUMN = "budget_exempt"
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -78,6 +79,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             connection.commit()
         #
         log.info("usage: ensured %s.usage_event.%s", schema, ROOT_ENTITY_PROJECT_COLUMN)
+
+    @web.method()
+    def usage_ensure_budget_exempt_column(self):
+        """Add usage_event.budget_exempt if a deployed table predates it; a no-op once it
+        exists. Cascades to every partition like role_snapshot. No backfill: NULL is counted.
+        """
+        schema = c.POSTGRES_SCHEMA
+        #
+        with db.engine.connect() as connection:
+            connection.execute(text(
+                f"ALTER TABLE {schema}.usage_event "
+                f"ADD COLUMN IF NOT EXISTS {BUDGET_EXEMPT_COLUMN} BOOLEAN"
+            ))
+            connection.commit()
+        #
+        log.info("usage: ensured %s.usage_event.%s", schema, BUDGET_EXEMPT_COLUMN)
 
     @web.method()
     def usage_backfill_role_snapshot(self):

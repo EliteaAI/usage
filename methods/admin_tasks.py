@@ -50,3 +50,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         self.usage_ensure_root_entity_project_column()
         log.info("usage: admin task ensured usage_event.root_entity_project_id")
+
+    @web.method()
+    def usage_ensure_budget_exempt_column_task(self, *args, **kwargs):  # pylint: disable=W0613
+        """Add usage_event.budget_exempt if missing. Safe to rerun. No backfill: old rows count."""
+        self.usage_ensure_budget_exempt_column()
+        log.info("usage: admin task ensured usage_event.budget_exempt")

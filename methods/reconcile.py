@@ -501,7 +501,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_fact_totals(self, connection, start, end):
         """Per-project and per-member sums straight off usage_event.
 
-        LLM rows only: nothing counts other event types into usage_counter, so including them
+        Budgeted LLM rows only: nothing else is counted into usage_counter, so including them
         here would report drift that is by design.
         """
         statement = select(
@@ -510,6 +510,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             func.sum(UsageEvent.cost_nano_usd), func.count(),
         ).where(
             UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.event_type == EVENT_TYPE_LLM,
+            UsageEvent.budget_exempt.isnot(True),
         ).group_by(
             UsageEvent.project_id, UsageEvent.user_id,
         )

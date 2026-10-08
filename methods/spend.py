@@ -98,6 +98,8 @@ def _event_where(project_id, start, end, user_id=None):
         UsageEvent.project_id == int(project_id),
         UsageEvent.ts >= start, UsageEvent.ts < end,
         UsageEvent.event_type == EVENT_TYPE_LLM,
+        # Project-own models are recorded but never budgeted, so spent-vs-limit leaves them out
+        UsageEvent.budget_exempt.isnot(True),
     ]
     #
     if user_id is not None:
