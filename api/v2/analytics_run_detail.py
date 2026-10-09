@@ -13,7 +13,6 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import select
 
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
@@ -75,38 +74,20 @@ if _API_AVAILABLE:
                     conditions.append(UsageEvent.ts <= run_scope.dt_to)
                 run_id = run_scope.run_id or run_scope.platform_run_id
 
-                rows = an.fetch_all(select(
-                    UsageEvent.entity_type,
-                    UsageEvent.entity_id,
-                    UsageEvent.entity_version_id,
-                    UsageEvent.entity_name,
-                    UsageEvent.root_entity_type,
-                    UsageEvent.root_entity_id,
-                    UsageEvent.user_id,
-                    UsageEvent.event_type,
-                    UsageEvent.model_name,
-                    UsageEvent.tool_name,
-                    UsageEvent.input_tokens,
-                    UsageEvent.output_tokens,
-                    UsageEvent.cache_read_tokens,
-                    UsageEvent.cache_creation_tokens,
-                    UsageEvent.cost_nano_usd,
-                    UsageEvent.duration_ms,
-                    UsageEvent.is_error,
-                    UsageEvent.meta,
-                    UsageEvent.ts,
-                ).where(*conditions).order_by(UsageEvent.ts.asc()))
+                rows = an.fetch_all(an.run_trace_statement(conditions))
 
                 if not rows:
                     return {"error": "Run not found"}, 404
 
-                return self._build_response(run_id, rows), 200
+                has_models = any(row["model_name"] for row in rows)
+                display_names = an.model_display_names(project_id) if has_models else {}
+                return self._build_response(run_id, rows, display_names), 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics run detail query failed", exc_info=True)
                 return {"error": "Failed to query analytics run detail"}, 500
 
         @staticmethod
-        def _build_response(run_id, rows):
+        def _build_response(run_id, rows, display_names=None):
             first_row = rows[0]
             root_entity_type = first_row["root_entity_type"]
             root_entity_id = first_row["root_entity_id"]
@@ -124,15 +105,27 @@ if _API_AVAILABLE:
             tool_calls = []
             skill_events = []
             sub_agents = {}
+            models = []
+            root_entity_version_ids = []
             total_tokens = 0
+            billable_tokens = 0
             total_cost_nano_usd = 0
+            calls_duration_ms = 0
             errors = 0
 
             for row in rows:
+                row_billable_tokens = _billable_tokens(row)
                 total_tokens += int(row["input_tokens"] or 0) + int(row["output_tokens"] or 0)
+                billable_tokens += row_billable_tokens
                 total_cost_nano_usd += int(row["cost_nano_usd"] or 0)
+                calls_duration_ms += int(row["duration_ms"] or 0)
                 if row["is_error"]:
                     errors += 1
+                if row["model_name"] and row["model_name"] not in models:
+                    models.append(row["model_name"])
+                version_id = row["root_entity_version_id"]
+                if version_id is not None and version_id not in root_entity_version_ids:
+                    root_entity_version_ids.append(version_id)
 
                 if row["event_type"] == an.EVENT_LLM:
                     llm_calls.append({
@@ -144,7 +137,9 @@ if _API_AVAILABLE:
                         "output_tokens": int(row["output_tokens"] or 0),
                         "cache_read_tokens": int(row["cache_read_tokens"] or 0),
                         "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+                        "billable_tokens": row_billable_tokens,
                         "cost_nano_usd": int(row["cost_nano_usd"] or 0),
+                        "root_entity_version_id": row["root_entity_version_id"],
                         "duration_ms": row["duration_ms"],
                         "ts": row["ts"].isoformat() if row["ts"] else None,
                         "is_error": bool(row["is_error"]),
@@ -190,6 +185,11 @@ if _API_AVAILABLE:
                 "root_entity_type": root_entity_type,
                 "root_entity_id": root_entity_id,
                 "root_entity_name": root_entity_name,
+                "root_entity_version_ids": root_entity_version_ids,
+                "models": [
+                    {"model_name": name, "display_name": (display_names or {}).get(name, name)}
+                    for name in models
+                ],
                 "user_id": first_row["user_id"],
                 "started_at": started_at.isoformat() if started_at else None,
                 "ended_at": ended_at.isoformat() if ended_at else None,
@@ -202,7 +202,10 @@ if _API_AVAILABLE:
                     "tool_calls": len(tool_calls),
                     "skill_events": len(skill_events),
                     "total_tokens": total_tokens,
+                    "billable_tokens": billable_tokens,
                     "total_cost_nano_usd": total_cost_nano_usd,
+                    "total_cost": an.cost_usd(total_cost_nano_usd),
+                    "calls_duration_ms": calls_duration_ms,
                     "errors": errors,
                 },
                 "llm_calls": llm_calls,
@@ -210,6 +213,15 @@ if _API_AVAILABLE:
                 "skill_events": skill_events,
                 "sub_agents": list(sub_agents.values()),
             }
+
+
+    def _billable_tokens(row):
+        return (
+            int(row["billable_input_tokens"] or 0)
+            + int(row["output_tokens"] or 0)
+            + int(row["cache_read_tokens"] or 0)
+            + int(row["cache_creation_tokens"] or 0)
+        )
 
 
     class API(api_tools.APIBase):

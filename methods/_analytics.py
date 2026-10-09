@@ -64,6 +64,8 @@ ENTITY_TYPE_EVALUATION = "evaluation"
 # Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
 ENTITY_TYPE_SKILL = "skill"
 
+ROOT_ENTITY_TYPES = (*AGENT_ROOT_TYPES, ENTITY_TYPE_SKILL)
+
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
 # the query, so there is no user_email allow-list to maintain beyond the synthetic actor.
 SYSTEM_USER_EMAILS = ("system@centry.user",)
@@ -143,6 +145,36 @@ class RunScope(NamedTuple):
     platform_run_id: Optional[str] = None
     dt_from: Optional[datetime.datetime] = None
     dt_to: Optional[datetime.datetime] = None
+    root_entity_type: Optional[str] = None
+    root_entity_id: Optional[int] = None
+    root_entity_project_id: Optional[int] = None
+
+
+def _optional_int(args, key):
+    raw = args.get(key)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+
+
+def parse_root_entity(args):
+    root_entity_type = (args.get("root_entity_type") or "").strip() or None
+    root_entity_id = _optional_int(args, "root_entity_id")
+    root_entity_project_id = _optional_int(args, "root_entity_project_id")
+    if root_entity_type is None and root_entity_id is None and root_entity_project_id is None:
+        return {}
+    if root_entity_type not in ROOT_ENTITY_TYPES or root_entity_id is None:
+        raise ValueError(
+            f"root_entity_type must be one of {', '.join(ROOT_ENTITY_TYPES)} together with root_entity_id"
+        )
+    return {
+        "root_entity_type": root_entity_type,
+        "root_entity_id": root_entity_id,
+        "root_entity_project_id": root_entity_project_id,
+    }
 
 
 def parse_run_scope(project_id, args):
@@ -152,8 +184,11 @@ def parse_run_scope(project_id, args):
     """
     raw_run_id = (args.get("run_id") or "").strip()
     raw_eval_run_id = (args.get("eval_run_id") or "").strip()
+    root_entity = parse_root_entity(args)
     #
     if not raw_run_id and not raw_eval_run_id:
+        if root_entity:
+            raise ValueError("root_entity_type/root_entity_id need run_id or eval_run_id")
         return None
     #
     run_id = None
@@ -164,7 +199,7 @@ def parse_run_scope(project_id, args):
             raise ValueError("run_id must be a UUID") from exc
     #
     if not raw_eval_run_id:
-        return RunScope(run_id=run_id)
+        return RunScope(run_id=run_id, **root_entity)
     #
     try:
         eval_run_uuid = str(uuid.UUID(raw_eval_run_id))
@@ -200,6 +235,7 @@ def parse_run_scope(project_id, args):
         platform_run_id=platform_run_id,
         dt_from=dt_from,
         dt_to=dt_to,
+        **root_entity,
     )
 
 
@@ -234,6 +270,30 @@ RUN_SCOPE_PARAMETERS = [
             "Scope to one evaluation run by its uuid. Without date_from/date_to the window is "
             "the eval run's own start/finish."
         ),
+    },
+    {
+        "name": "root_entity_type",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string", "enum": list(ROOT_ENTITY_TYPES)},
+        "description": (
+            "With run_id/eval_run_id and root_entity_id: count only that root entity's rows, so a "
+            "conversation with several participants reports one participant's run."
+        ),
+    },
+    {
+        "name": "root_entity_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "integer"},
+        "description": "Root entity id; required with root_entity_type.",
+    },
+    {
+        "name": "root_entity_project_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "integer"},
+        "description": "Project the root entity lives in, e.g. the public project for a Catalog skill.",
     },
 ]
 
@@ -272,6 +332,21 @@ def run_filters(run_scope):
             conditions.append(UsageEvent.entity_type == ENTITY_TYPE_EVALUATION)
             conditions.append(UsageEvent.entity_id == run_scope.eval_run_id)
     #
+    conditions.extend(root_entity_conditions(
+        run_scope.root_entity_type, run_scope.root_entity_id, run_scope.root_entity_project_id,
+    ))
+    #
+    return conditions
+
+
+def root_entity_conditions(root_entity_type, root_entity_id, root_entity_project_id):
+    conditions = []
+    if root_entity_type:
+        conditions.append(UsageEvent.root_entity_type == root_entity_type)
+    if root_entity_id is not None:
+        conditions.append(UsageEvent.root_entity_id == int(root_entity_id))
+    if root_entity_project_id is not None:
+        conditions.append(root_project_expr() == int(root_entity_project_id))
     return conditions
 
 
@@ -425,6 +500,32 @@ def is_run_row():
         UsageEvent.entity_id == UsageEvent.root_entity_id,
         UsageEvent.entity_type == UsageEvent.root_entity_type,
     )
+
+
+def run_trace_statement(conditions):
+    return select(
+        UsageEvent.entity_type,
+        UsageEvent.entity_id,
+        UsageEvent.entity_version_id,
+        UsageEvent.entity_name,
+        UsageEvent.root_entity_type,
+        UsageEvent.root_entity_id,
+        UsageEvent.root_entity_version_id,
+        UsageEvent.user_id,
+        UsageEvent.event_type,
+        UsageEvent.model_name,
+        UsageEvent.tool_name,
+        UsageEvent.input_tokens,
+        UsageEvent.billable_input_tokens,
+        UsageEvent.output_tokens,
+        UsageEvent.cache_read_tokens,
+        UsageEvent.cache_creation_tokens,
+        UsageEvent.cost_nano_usd,
+        UsageEvent.duration_ms,
+        UsageEvent.is_error,
+        UsageEvent.meta,
+        UsageEvent.ts,
+    ).where(*conditions).order_by(UsageEvent.ts.asc())
 
 
 def run_name_expr():

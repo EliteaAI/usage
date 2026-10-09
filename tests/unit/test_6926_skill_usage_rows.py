@@ -6,54 +6,15 @@ run detail lists them as skill events, and a skill whose id collides with its ag
 names the agent's run. The real SQL expressions run against an in-memory table.
 """
 import datetime
-import importlib
-import re
 import sys
-import types
 
 import pytest
-from sqlalchemy import (
-    JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, create_engine, distinct,
-    event, func, select,
-)
+from sqlalchemy import distinct, func, select
 
+from fixtures.usage_event_table import (
+    FakeUsageEvent, drop_engine, insert_row, install_engine, load_run_detail, trace_rows,
+)
 from usage.methods import _analytics
-
-METADATA = MetaData()
-
-FAKE_TABLE = Table(
-    "usage_event", METADATA,
-    Column("seq", Integer, primary_key=True, autoincrement=True),
-    Column("ts", DateTime),
-    Column("project_id", Integer),
-    Column("user_id", Integer),
-    Column("user_email", String),
-    Column("run_id", String),
-    Column("conversation_id", String),
-    Column("root_entity_type", String),
-    Column("root_entity_id", Integer),
-    Column("root_entity_version_id", Integer),
-    Column("root_entity_project_id", Integer),
-    Column("entity_type", String),
-    Column("entity_id", Integer),
-    Column("entity_version_id", Integer),
-    Column("entity_name", String),
-    Column("event_type", String),
-    Column("model_name", String),
-    Column("tool_name", String),
-    Column("input_tokens", Integer, default=0),
-    Column("output_tokens", Integer, default=0),
-    Column("billable_input_tokens", Integer, default=0),
-    Column("cache_read_tokens", Integer, default=0),
-    Column("cache_creation_tokens", Integer, default=0),
-    Column("cost_nano_usd", Integer, default=0),
-    Column("duration_ms", Integer),
-    Column("is_error", Boolean, default=False),
-    Column("trigger_source", String),
-    Column("meta", JSON),
-)
-
-FakeUsageEvent = types.SimpleNamespace(**{column.name: column for column in FAKE_TABLE.c})
 
 PROJECT_ID = 7
 AGENT_ID = 5
@@ -62,21 +23,9 @@ TS = datetime.datetime(2026, 10, 8, 12, 0, 0)
 
 @pytest.fixture
 def engine(monkeypatch):
-    monkeypatch.setattr(_analytics, "UsageEvent", FakeUsageEvent)
-    monkeypatch.setattr(_analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != _analytics.SYSTEM_USER_ID)
-    db_engine = create_engine("sqlite://")
-    event.listen(db_engine, "connect", lambda connection, _record: connection.create_function(
-        "regexp_replace", 3, lambda value, pattern, repl: None if value is None else re.sub(pattern, repl, value),
-    ))
-    METADATA.create_all(db_engine)
-
-    def fetch_all(statement):
-        with db_engine.connect() as connection:
-            return list(connection.execute(statement).mappings())
-
-    monkeypatch.setattr(_analytics, "fetch_all", fetch_all)
+    db_engine = install_engine(monkeypatch, _analytics)
     yield db_engine
-    METADATA.drop_all(db_engine)
+    drop_engine(db_engine)
 
 
 def insert(engine, **values):
@@ -87,8 +36,7 @@ def insert(engine, **values):
         "is_error": False,
     }
     row.update(values)
-    with engine.begin() as connection:
-        connection.execute(FAKE_TABLE.insert().values(**row))
+    insert_row(engine, **row)
 
 
 def agent_fixture(engine):
@@ -246,28 +194,12 @@ class TestRunNameIsTypeAware:
 
 @pytest.fixture
 def run_detail(monkeypatch):
-    tools = sys.modules["tools"]
-    monkeypatch.setattr(tools, "api_tools", types.SimpleNamespace(
-        APIModeHandler=object, APIBase=object, with_modes=lambda params: params,
-        endpoint_metrics=lambda func: func,
-    ), raising=False)
-    monkeypatch.setattr(tools, "auth", types.SimpleNamespace(
-        decorators=types.SimpleNamespace(check_api=lambda *a, **k: (lambda func: func)),
-    ), raising=False)
-    monkeypatch.setattr(tools.config, "DEFAULT_MODE", "default", raising=False)
-    monkeypatch.setattr(tools, "register_openapi", lambda *a, **k: (lambda func: func), raising=False)
-    flask_stub = types.ModuleType("flask")
-    flask_stub.request = types.SimpleNamespace(args={})
-    monkeypatch.setitem(sys.modules, "flask", flask_stub)
-    monkeypatch.delitem(sys.modules, "usage.api.v2.analytics_run_detail", raising=False)
-    module = importlib.import_module("usage.api.v2.analytics_run_detail")
-    yield module.PromptLibAPI._build_response
+    yield load_run_detail(monkeypatch).PromptLibAPI._build_response
     sys.modules.pop("usage.api.v2.analytics_run_detail", None)
 
 
-def detail_rows(engine):
-    with engine.connect() as connection:
-        return list(connection.execute(select(FAKE_TABLE).order_by(FAKE_TABLE.c.seq)).mappings())
+def detail_rows(engine, *conditions):
+    return trace_rows(engine, _analytics, *conditions)
 
 
 class TestRunDetail:
@@ -276,7 +208,7 @@ class TestRunDetail:
         skill_rows(engine)
         insert(engine, event_type="llm", entity_id=31, entity_name="child-agent")
         #
-        response = run_detail("run-1", [r for r in detail_rows(engine) if r["run_id"] == "run-1"])
+        response = run_detail("run-1", detail_rows(engine, FakeUsageEvent.run_id == "run-1"))
         #
         assert response["root_entity_name"] == "my-agent (base)"
         assert [s["entity_id"] for s in response["sub_agents"]] == [31]
@@ -291,10 +223,10 @@ class TestRunDetail:
 
     def test_skill_rows_leave_the_run_kpis_unchanged(self, engine, run_detail):
         agent_fixture(engine)
-        before = run_detail("run-1", [r for r in detail_rows(engine) if r["run_id"] == "run-1"])
+        before = run_detail("run-1", detail_rows(engine, FakeUsageEvent.run_id == "run-1"))
         skill_rows(engine)
         #
-        after = run_detail("run-1", [r for r in detail_rows(engine) if r["run_id"] == "run-1"])
+        after = run_detail("run-1", detail_rows(engine, FakeUsageEvent.run_id == "run-1"))
         #
         assert after["kpis"] == {**before["kpis"], "skill_events": 2}
         assert after["llm_calls"] == before["llm_calls"]
