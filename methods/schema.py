@@ -80,8 +80,6 @@ _PARTITIONS_SQL = text(
     "ORDER BY child.relname"
 )
 
-# A partition already covered: an index of it attached to the parent skill index, either built
-# by an earlier run or cloned by CREATE TABLE ... PARTITION OF once the parent index existed
 _ATTACHED_SQL = text(
     "SELECT 1 FROM pg_inherits i "
     "JOIN pg_class parent_index ON parent_index.oid = i.inhparent "
@@ -91,8 +89,7 @@ _ATTACHED_SQL = text(
     "WHERE n.nspname = :schema AND parent_index.relname = :index AND part.relname = :partition"
 )
 
-# CREATE INDEX CONCURRENTLY that fails part way leaves an INVALID index behind, which
-# IF NOT EXISTS would then skip forever
+# A failed CONCURRENTLY build leaves an INVALID index that IF NOT EXISTS would skip forever
 _INVALID_SQL = text(
     "SELECT 1 FROM pg_class ci JOIN pg_namespace n ON n.oid = ci.relnamespace "
     "JOIN pg_index x ON x.indexrelid = ci.oid "
@@ -222,15 +219,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_ensure_skill_index(self):
-        """Partial index for skill usage reads (#6926), built without blocking inserts.
-
-        A plain CREATE INDEX on the partitioned parent locks out inserts while every month is
-        scanned. So each partition is indexed CONCURRENTLY and attached to an invalid parent
-        index created ON ONLY the parent; the parent turns valid once every partition is
-        attached, and partitions created after that inherit the index from it.
-
-        Safe to rerun: an attached partition is skipped and an invalid leftover is rebuilt.
-        """
+        """Built per partition CONCURRENTLY: a plain CREATE INDEX on the parent blocks inserts."""
         schema = c.POSTGRES_SCHEMA
         built = []
         #

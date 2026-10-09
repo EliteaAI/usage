@@ -50,7 +50,6 @@ SYSTEM_USER_ID = 0
 
 EVENT_LLM = "llm"
 EVENT_TOOL = "tool"
-# Zero-cost skill activations (#6926): existing aggregates must not count them
 EVENT_SKILL = "skill"
 METERED_EVENT_TYPES = (EVENT_LLM, EVENT_TOOL)
 
