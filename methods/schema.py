@@ -37,64 +37,10 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 from tools import db, config as c  # pylint: disable=E0401
 
 from . import _analytics as an
-from ..models.usage_event import SKILL_INDEX_NAME, SKILL_INDEX_PREDICATE
 
 ROLE_SNAPSHOT_COLUMN = "role_snapshot"
 ROOT_ENTITY_PROJECT_COLUMN = "root_entity_project_id"
 BUDGET_EXEMPT_COLUMN = "budget_exempt"
-SKILL_INDEX_COLUMNS = "(project_id, entity_id, ts)"
-
-
-def parent_index_statement(schema):
-    """ Helper """
-    return (
-        f"CREATE INDEX IF NOT EXISTS {SKILL_INDEX_NAME} ON ONLY {schema}.usage_event "
-        f"{SKILL_INDEX_COLUMNS} WHERE {SKILL_INDEX_PREDICATE}"
-    )
-
-
-def partition_index_name(partition):
-    """ Helper """
-    return f"{partition}_skill_entity_ts"
-
-
-def partition_index_statement(schema, partition):
-    """ Helper """
-    return (
-        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {partition_index_name(partition)} "
-        f"ON {schema}.{partition} {SKILL_INDEX_COLUMNS} WHERE {SKILL_INDEX_PREDICATE}"
-    )
-
-
-def attach_statement(schema, partition):
-    """ Helper """
-    return f"ALTER INDEX {schema}.{SKILL_INDEX_NAME} ATTACH PARTITION {schema}.{partition_index_name(partition)}"
-
-
-_PARTITIONS_SQL = text(
-    "SELECT child.relname FROM pg_inherits i "
-    "JOIN pg_class child ON child.oid = i.inhrelid "
-    "JOIN pg_class parent ON parent.oid = i.inhparent "
-    "JOIN pg_namespace n ON n.oid = parent.relnamespace "
-    "WHERE n.nspname = :schema AND parent.relname = 'usage_event' "
-    "ORDER BY child.relname"
-)
-
-_ATTACHED_SQL = text(
-    "SELECT 1 FROM pg_inherits i "
-    "JOIN pg_class parent_index ON parent_index.oid = i.inhparent "
-    "JOIN pg_namespace n ON n.oid = parent_index.relnamespace "
-    "JOIN pg_index x ON x.indexrelid = i.inhrelid "
-    "JOIN pg_class part ON part.oid = x.indrelid "
-    "WHERE n.nspname = :schema AND parent_index.relname = :index AND part.relname = :partition"
-)
-
-# A failed CONCURRENTLY build leaves an INVALID index that IF NOT EXISTS would skip forever
-_INVALID_SQL = text(
-    "SELECT 1 FROM pg_class ci JOIN pg_namespace n ON n.oid = ci.relnamespace "
-    "JOIN pg_index x ON x.indexrelid = ci.oid "
-    "WHERE n.nspname = :schema AND ci.relname = :index AND NOT x.indisvalid"
-)
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -216,31 +162,3 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "unresolved_users": unresolved_users,
             "failed_projects": failed_projects,
         }
-
-    @web.method()
-    def usage_ensure_skill_index(self):
-        """Built per partition CONCURRENTLY: a plain CREATE INDEX on the parent blocks inserts."""
-        schema = c.POSTGRES_SCHEMA
-        built = []
-        #
-        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            connection.execute(text(parent_index_statement(schema)))
-            partitions = [row[0] for row in connection.execute(_PARTITIONS_SQL, {"schema": schema})]
-            #
-            for partition in partitions:
-                if connection.execute(_ATTACHED_SQL, {
-                        "schema": schema, "index": SKILL_INDEX_NAME, "partition": partition,
-                }).first():
-                    continue
-                #
-                index = partition_index_name(partition)
-                if connection.execute(_INVALID_SQL, {"schema": schema, "index": index}).first():
-                    connection.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {schema}.{index}"))
-                #
-                connection.execute(text(partition_index_statement(schema, partition)))
-                connection.execute(text(attach_statement(schema, partition)))
-                built.append(partition)
-        #
-        log.info("usage: skill index built on %s of %s partition(s)", len(built), len(partitions))
-        #
-        return {"partitions": len(partitions), "built": built}

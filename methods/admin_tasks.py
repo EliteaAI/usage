@@ -56,11 +56,3 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Add usage_event.budget_exempt if missing. Safe to rerun. No backfill: old rows count."""
         self.usage_ensure_budget_exempt_column()
         log.info("usage: admin task ensured usage_event.budget_exempt")
-
-    @web.method()
-    def usage_ensure_skill_index_task(self, *args, **kwargs):  # pylint: disable=W0613
-        """Build the partial skill usage index on every usage_event partition (#6926), one
-        partition at a time with CREATE INDEX CONCURRENTLY, so inserts are never blocked. Safe
-        to rerun: partitions already indexed are skipped.
-        """
-        return self.usage_ensure_skill_index()

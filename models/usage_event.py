@@ -26,14 +26,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c  # pylint: disable=E0401
 
-# A deployed table gets this index from usage_ensure_skill_index
-SKILL_INDEX_NAME = "ix_usage_event_project_skill_entity_ts"
-SKILL_INDEX_PREDICATE = "event_type = 'skill' OR root_entity_type = 'skill'"
-
 
 class UsageEvent(db.Base):  # pylint: disable=R0903
-    """One metered LLM or tool call, or an agent activating a skill. postgresql_partition_by
-    lets create_all() provision the parent; child partitions come from usage_ensure_partitions().
+    """One metered LLM or tool call. postgresql_partition_by lets create_all() provision the
+    parent; child partitions come from usage_ensure_partitions().
     """
 
     __tablename__ = "usage_event"
@@ -132,10 +128,6 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
         Index(
             "ix_usage_event_project_tool_ts", "project_id", "tool_name", "ts",
             postgresql_where=text("tool_name IS NOT NULL"),
-        ),
-        Index(
-            SKILL_INDEX_NAME, "project_id", "entity_id", "ts",
-            postgresql_where=text(SKILL_INDEX_PREDICATE),
         ),
         Index("ix_usage_event_conversation", "conversation_id"),
         Index("ix_usage_event_project_run", "project_id", "run_id"),

@@ -17,8 +17,7 @@ from sqlalchemy import (
     event, func, select,
 )
 
-from usage.methods import _analytics, schema
-from usage.models.usage_event import SKILL_INDEX_NAME, SKILL_INDEX_PREDICATE, UsageEvent
+from usage.methods import _analytics
 
 METADATA = MetaData()
 
@@ -312,105 +311,3 @@ class TestRunDetail:
         assert response["root_entity_name"] == "pdf-skill"
         assert response["sub_agents"] == []
         assert response["kpis"]["llm_calls"] == 1
-
-
-class TestSkillIndexModel:
-    def test_model_declares_the_partial_skill_index(self):
-        index = next(i for i in UsageEvent.__table__.indexes if i.name == SKILL_INDEX_NAME)
-        #
-        assert [c.name for c in index.columns] == ["project_id", "entity_id", "ts"]
-        assert str(index.dialect_options["postgresql"]["where"]) == SKILL_INDEX_PREDICATE
-
-
-class FakeConnection:
-    """Answers the catalog queries from a dict and records every DDL statement."""
-
-    def __init__(self, partitions, attached=(), invalid=()):
-        self.partitions = list(partitions)
-        self.attached = set(attached)
-        self.invalid = set(invalid)
-        self.ddl = []
-        self.isolation_level = None
-
-    def execution_options(self, isolation_level=None):
-        self.isolation_level = isolation_level
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def execute(self, statement, params=None):
-        sql = str(statement)
-        if sql == str(schema._PARTITIONS_SQL):
-            return [(p,) for p in self.partitions]
-        if sql == str(schema._ATTACHED_SQL):
-            return Result(params["partition"] in self.attached)
-        if sql == str(schema._INVALID_SQL):
-            return Result(params["index"] in self.invalid)
-        self.ddl.append(sql)
-        if "ATTACH PARTITION" in sql:
-            self.attached.add(sql.rsplit(".", 1)[1].replace("_skill_entity_ts", ""))
-        return Result(False)
-
-
-class Result:
-    def __init__(self, found):
-        self.found = found
-
-    def first(self):
-        return (1,) if self.found else None
-
-
-@pytest.fixture
-def index_module(monkeypatch):
-    def build(connection):
-        monkeypatch.setattr(schema, "db", types.SimpleNamespace(
-            engine=types.SimpleNamespace(connect=lambda: connection),
-        ))
-    return build
-
-
-class TestSkillIndexTask:
-    def test_builds_each_partition_concurrently_then_attaches_it(self, index_module):
-        connection = FakeConnection(["usage_event_202609", "usage_event_202610"])
-        index_module(connection)
-        #
-        result = schema.Method.usage_ensure_skill_index(None)
-        #
-        assert connection.isolation_level == "AUTOCOMMIT"
-        assert connection.ddl[0] == schema.parent_index_statement("centry")
-        assert "ON ONLY centry.usage_event" in connection.ddl[0]
-        assert connection.ddl[1:] == [
-            schema.partition_index_statement("centry", "usage_event_202609"),
-            schema.attach_statement("centry", "usage_event_202609"),
-            schema.partition_index_statement("centry", "usage_event_202610"),
-            schema.attach_statement("centry", "usage_event_202610"),
-        ]
-        assert all("CONCURRENTLY" in sql for sql in connection.ddl[1::2])
-        assert result == {"partitions": 2, "built": ["usage_event_202609", "usage_event_202610"]}
-
-    def test_a_second_run_builds_nothing(self, index_module):
-        connection = FakeConnection(["usage_event_202609", "usage_event_202610"])
-        index_module(connection)
-        schema.Method.usage_ensure_skill_index(None)
-        connection.ddl.clear()
-        #
-        result = schema.Method.usage_ensure_skill_index(None)
-        #
-        assert connection.ddl == [schema.parent_index_statement("centry")]
-        assert result["built"] == []
-
-    def test_an_invalid_leftover_is_dropped_and_rebuilt(self, index_module):
-        connection = FakeConnection(
-            ["usage_event_202610"], invalid={"usage_event_202610_skill_entity_ts"},
-        )
-        index_module(connection)
-        #
-        schema.Method.usage_ensure_skill_index(None)
-        #
-        assert connection.ddl[1] == \
-            "DROP INDEX CONCURRENTLY IF EXISTS centry.usage_event_202610_skill_entity_ts"
-        assert connection.ddl[2] == schema.partition_index_statement("centry", "usage_event_202610")
