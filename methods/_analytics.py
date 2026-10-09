@@ -50,6 +50,8 @@ SYSTEM_USER_ID = 0
 
 EVENT_LLM = "llm"
 EVENT_TOOL = "tool"
+EVENT_SKILL = "skill"
+METERED_EVENT_TYPES = (EVENT_LLM, EVENT_TOOL)
 
 # What the user launched. entity_* is the node that made one call; root_entity_* is the run it
 # belongs to, so a run's agent identity survives on every llm and tool row underneath it.
@@ -58,6 +60,9 @@ AGENT_ROOT_TYPES = ("application", "pipeline")
 # Marks a judge/eval-batch call (#6677): root_entity_* still names the real application/pipeline
 # being evaluated, so this must be excluded from agent-run counts on entity_type, not root type.
 ENTITY_TYPE_EVALUATION = "evaluation"
+
+# Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
+ENTITY_TYPE_SKILL = "skill"
 
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
 # the query, so there is no user_email allow-list to maintain beyond the synthetic actor.
@@ -290,13 +295,18 @@ def clamp_date_range(dt_from, dt_to):
     return dt_from, dt_to
 
 
-def base_filters(project_id, dt_from, dt_to, human_only=True, run_scope=None):
+def base_filters(
+        project_id, dt_from, dt_to, human_only=True, run_scope=None, event_types=METERED_EVENT_TYPES,
+):
     """Project and date conditions, leading with (project_id, ts) so the index applies.
 
     A run-scoped query keeps every row of the run, system actors included, so its totals are
-    the run's real totals.
+    the run's real totals. Skill rows stay out unless a caller asks for them in event_types.
     """
     conditions = [UsageEvent.project_id == project_id]
+    #
+    if event_types:
+        conditions.append(UsageEvent.event_type.in_(event_types))
     #
     if dt_from is not None:
         conditions.append(UsageEvent.ts >= dt_from)
@@ -407,15 +417,25 @@ def root_project_expr():
     return func.coalesce(UsageEvent.root_entity_project_id, UsageEvent.project_id)
 
 
+def is_run_row():
+    """Matched on type too: skill and application ids come from separate sequences, so a
+    loaded skill can share its agent's id.
+    """
+    return and_(
+        UsageEvent.entity_id == UsageEvent.root_entity_id,
+        UsageEvent.entity_type == UsageEvent.root_entity_type,
+    )
+
+
 def run_name_expr():
-    """Name of the run row (entity_id == root_entity_id), never a child call's, without its version.
+    """Name of the run row (is_run_row), never a child call's, without its version.
 
     The run row is stored as "<name> (<version>)", but agent tables aggregate every version of
     an entity, so the suffix would label the whole row as one version (#6910).
     """
     return func.regexp_replace(
         func.max(case(
-            (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
+            (is_run_row(), UsageEvent.entity_name),
             else_=None,
         )),
         r" \([^()]*\)$", "",

@@ -1,5 +1,5 @@
 """
-Single-run analytics detail endpoint: the full LLM/tool/sub-agent trace for one run_id.
+Single-run analytics detail endpoint: the full LLM/tool/skill/sub-agent trace for one run_id.
 """
 
 from pylon.core.tools import log
@@ -19,16 +19,16 @@ if _API_AVAILABLE:
     from ...models.usage_event import UsageEvent
 
     class PromptLibAPI(api_tools.APIModeHandler):
-        """Full LLM/tool/sub-agent breakdown for one run."""
+        """Full LLM/tool/skill/sub-agent breakdown for one run."""
 
         @register_openapi(
             name="Get Run Analytics Detail",
             description=(
                 "Returns the full event-level trace for one run_id: the LLM calls, tool calls, "
-                "and sub-agents/sub-pipelines that happened during that run."
+                "skill activations and sub-agents/sub-pipelines that happened during that run."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need the full trace for one specific run: its LLM calls, tool calls, and sub-agents/sub-pipelines. Do not use this tool for aggregate breakdowns across many runs — use Get Agent Analytics Detail instead.",
+            mcp_description="Use this tool when you need the full trace for one specific run: its LLM calls, tool calls, skill activations, and sub-agents/sub-pipelines. Do not use this tool for aggregate breakdowns across many runs — use Get Agent Analytics Detail instead.",
             tags=["usage/analytics"],
             parameters=[
                 {
@@ -78,6 +78,7 @@ if _API_AVAILABLE:
                 rows = an.fetch_all(select(
                     UsageEvent.entity_type,
                     UsageEvent.entity_id,
+                    UsageEvent.entity_version_id,
                     UsageEvent.entity_name,
                     UsageEvent.root_entity_type,
                     UsageEvent.root_entity_id,
@@ -92,6 +93,7 @@ if _API_AVAILABLE:
                     UsageEvent.cost_nano_usd,
                     UsageEvent.duration_ms,
                     UsageEvent.is_error,
+                    UsageEvent.meta,
                     UsageEvent.ts,
                 ).where(*conditions).order_by(UsageEvent.ts.asc()))
 
@@ -120,6 +122,7 @@ if _API_AVAILABLE:
 
             llm_calls = []
             tool_calls = []
+            skill_events = []
             sub_agents = {}
             total_tokens = 0
             total_cost_nano_usd = 0
@@ -156,10 +159,21 @@ if _API_AVAILABLE:
                         "ts": row["ts"].isoformat() if row["ts"] else None,
                         "is_error": bool(row["is_error"]),
                     })
+                elif row["event_type"] == an.EVENT_SKILL:
+                    meta = row["meta"] or {}
+                    skill_events.append({
+                        "entity_id": row["entity_id"],
+                        "entity_version_id": row["entity_version_id"],
+                        "entity_name": row["entity_name"],
+                        "source": meta.get("source"),
+                        "outcome": meta.get("outcome"),
+                        "parent_agent_name": meta.get("parent_agent_name"),
+                        "ts": row["ts"].isoformat() if row["ts"] else None,
+                    })
 
                 is_agent = (
                     row["root_entity_type"] in an.AGENT_ROOT_TYPES
-                    and (row["entity_type"] or "") != an.ENTITY_TYPE_EVALUATION
+                    and (row["entity_type"] or "") not in (an.ENTITY_TYPE_EVALUATION, an.ENTITY_TYPE_SKILL)
                 )
                 if is_agent and row["entity_id"] != root_entity_id:
                     key = (row["entity_type"], row["entity_id"])
@@ -186,12 +200,14 @@ if _API_AVAILABLE:
                 "kpis": {
                     "llm_calls": len(llm_calls),
                     "tool_calls": len(tool_calls),
+                    "skill_events": len(skill_events),
                     "total_tokens": total_tokens,
                     "total_cost_nano_usd": total_cost_nano_usd,
                     "errors": errors,
                 },
                 "llm_calls": llm_calls,
                 "tool_calls": tool_calls,
+                "skill_events": skill_events,
                 "sub_agents": list(sub_agents.values()),
             }
 
