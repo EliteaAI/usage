@@ -17,7 +17,7 @@ from sqlalchemy import (
     event, func, select,
 )
 
-from usage.methods import _analytics, skill_index
+from usage.methods import _analytics, schema
 from usage.models.usage_event import SKILL_INDEX_NAME, SKILL_INDEX_PREDICATE, UsageEvent
 
 METADATA = MetaData()
@@ -344,11 +344,11 @@ class FakeConnection:
 
     def execute(self, statement, params=None):
         sql = str(statement)
-        if sql == str(skill_index._PARTITIONS_SQL):
+        if sql == str(schema._PARTITIONS_SQL):
             return [(p,) for p in self.partitions]
-        if sql == str(skill_index._ATTACHED_SQL):
+        if sql == str(schema._ATTACHED_SQL):
             return Result(params["partition"] in self.attached)
-        if sql == str(skill_index._INVALID_SQL):
+        if sql == str(schema._INVALID_SQL):
             return Result(params["index"] in self.invalid)
         self.ddl.append(sql)
         if "ATTACH PARTITION" in sql:
@@ -367,7 +367,7 @@ class Result:
 @pytest.fixture
 def index_module(monkeypatch):
     def build(connection):
-        monkeypatch.setattr(skill_index, "db", types.SimpleNamespace(
+        monkeypatch.setattr(schema, "db", types.SimpleNamespace(
             engine=types.SimpleNamespace(connect=lambda: connection),
         ))
     return build
@@ -378,16 +378,16 @@ class TestSkillIndexTask:
         connection = FakeConnection(["usage_event_202609", "usage_event_202610"])
         index_module(connection)
         #
-        result = skill_index.Method.usage_ensure_skill_index(None)
+        result = schema.Method.usage_ensure_skill_index(None)
         #
         assert connection.isolation_level == "AUTOCOMMIT"
-        assert connection.ddl[0] == skill_index.parent_index_statement("centry")
+        assert connection.ddl[0] == schema.parent_index_statement("centry")
         assert "ON ONLY centry.usage_event" in connection.ddl[0]
         assert connection.ddl[1:] == [
-            skill_index.partition_index_statement("centry", "usage_event_202609"),
-            skill_index.attach_statement("centry", "usage_event_202609"),
-            skill_index.partition_index_statement("centry", "usage_event_202610"),
-            skill_index.attach_statement("centry", "usage_event_202610"),
+            schema.partition_index_statement("centry", "usage_event_202609"),
+            schema.attach_statement("centry", "usage_event_202609"),
+            schema.partition_index_statement("centry", "usage_event_202610"),
+            schema.attach_statement("centry", "usage_event_202610"),
         ]
         assert all("CONCURRENTLY" in sql for sql in connection.ddl[1::2])
         assert result == {"partitions": 2, "built": ["usage_event_202609", "usage_event_202610"]}
@@ -395,12 +395,12 @@ class TestSkillIndexTask:
     def test_a_second_run_builds_nothing(self, index_module):
         connection = FakeConnection(["usage_event_202609", "usage_event_202610"])
         index_module(connection)
-        skill_index.Method.usage_ensure_skill_index(None)
+        schema.Method.usage_ensure_skill_index(None)
         connection.ddl.clear()
         #
-        result = skill_index.Method.usage_ensure_skill_index(None)
+        result = schema.Method.usage_ensure_skill_index(None)
         #
-        assert connection.ddl == [skill_index.parent_index_statement("centry")]
+        assert connection.ddl == [schema.parent_index_statement("centry")]
         assert result["built"] == []
 
     def test_an_invalid_leftover_is_dropped_and_rebuilt(self, index_module):
@@ -409,8 +409,8 @@ class TestSkillIndexTask:
         )
         index_module(connection)
         #
-        skill_index.Method.usage_ensure_skill_index(None)
+        schema.Method.usage_ensure_skill_index(None)
         #
         assert connection.ddl[1] == \
             "DROP INDEX CONCURRENTLY IF EXISTS centry.usage_event_202610_skill_entity_ts"
-        assert connection.ddl[2] == skill_index.partition_index_statement("centry", "usage_event_202610")
+        assert connection.ddl[2] == schema.partition_index_statement("centry", "usage_event_202610")

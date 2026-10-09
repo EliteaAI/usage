@@ -26,7 +26,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c  # pylint: disable=E0401
 
-# A deployed table gets this index from methods/skill_index.py, which never blocks inserts
+# A deployed table gets this index from methods/schema.py, which never blocks inserts
 SKILL_INDEX_NAME = "ix_usage_event_project_skill_entity_ts"
 SKILL_INDEX_PREDICATE = "event_type = 'skill' OR root_entity_type = 'skill'"
 

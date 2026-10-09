@@ -64,7 +64,6 @@ ENTITY_TYPE_EVALUATION = "evaluation"
 
 # Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
 ENTITY_TYPE_SKILL = "skill"
-SKILL_ROOT_TYPES = (ENTITY_TYPE_SKILL,)
 
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
 # the query, so there is no user_email allow-list to maintain beyond the synthetic actor.
