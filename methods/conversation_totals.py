@@ -50,8 +50,8 @@ def root_entity_conditions(root_entity_type, root_entity_id, root_entity_project
     return conditions
 
 
-def conversation_totals_statement(project_id, conversation_ids, entity_conditions, model_name=None):
-    statement = select(
+def conversation_totals_statement(project_id, conversation_ids, entity_conditions):
+    return select(
         UsageEvent.conversation_id,
         func.sum(total_tokens_expr()),
         func.sum(UsageEvent.cost_nano_usd),
@@ -64,9 +64,6 @@ def conversation_totals_statement(project_id, conversation_ids, entity_condition
         UsageEvent.event_type.in_(METERED_EVENT_TYPES),
         *entity_conditions,
     ).group_by(UsageEvent.conversation_id)
-    if model_name:
-        statement = statement.having(func.bool_or(UsageEvent.model_name == model_name))
-    return statement
 
 
 def conversation_totals_row(row):
@@ -90,12 +87,22 @@ def root_entity_models_statement(project_id, conversation_ids, entity_conditions
     )
 
 
+def root_entity_conversations_statement(project_id, model_name, entity_conditions):
+    return select(func.distinct(UsageEvent.conversation_id)).where(
+        UsageEvent.project_id == int(project_id),
+        UsageEvent.event_type.in_(METERED_EVENT_TYPES),
+        UsageEvent.model_name == model_name,
+        UsageEvent.conversation_id.isnot(None),
+        *entity_conditions,
+    )
+
+
 class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_read_conversation_totals(  # pylint: disable=R0913
             self, project_id, conversation_ids, root_entity_type=None, root_entity_id=None,
-            root_entity_project_id=None, model_name=None, **_kwargs,
+            root_entity_project_id=None, **_kwargs,
     ):
         if self.usage_get_mode() == MODE_OFF:
             return None
@@ -106,9 +113,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         try:
             with db.engine.connect() as connection:
                 for chunk in _chunks(conversation_ids):
-                    statement = conversation_totals_statement(
-                        project_id, chunk, entity_conditions, model_name,
-                    )
+                    statement = conversation_totals_statement(project_id, chunk, entity_conditions)
                     for row in connection.execute(statement):
                         totals[row[0]] = conversation_totals_row(row)
         except:  # pylint: disable=W0702
@@ -136,3 +141,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("usage: entity models read failed for project %s", project_id)
             return None
         return sorted(models)
+
+    @web.method()
+    def usage_read_root_entity_conversations(  # pylint: disable=R0913
+            self, project_id, model_name, root_entity_type, root_entity_id,
+            root_entity_project_id=None, **_kwargs,
+    ):
+        if self.usage_get_mode() == MODE_OFF:
+            return None
+        entity_conditions = root_entity_conditions(
+            root_entity_type, root_entity_id, root_entity_project_id,
+        )
+        try:
+            with db.engine.connect() as connection:
+                statement = root_entity_conversations_statement(project_id, model_name, entity_conditions)
+                return [conversation_id for (conversation_id,) in connection.execute(statement)]
+        except:  # pylint: disable=W0702
+            log.exception("usage: entity conversations read failed for project %s", project_id)
+            return None

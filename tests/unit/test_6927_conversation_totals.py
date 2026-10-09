@@ -85,13 +85,6 @@ class TestConversationTotals:
         assert "GROUP BY usage_event.conversation_id" in sql
         assert "HAVING" not in sql
 
-    def test_model_filter_keeps_conversations_that_model_answered_in(self, build):
-        instance, engine = build(Engine([]))
-
-        instance.usage_read_conversation_totals(2, PAGE, "skill", 174, 2, model_name="opus")
-
-        assert "HAVING bool_or(usage_event.model_name = 'opus')" in engine.connection.statements[0]
-
     def test_latest_run_is_taken_by_time(self, build):
         instance, engine = build(Engine([]))
 
@@ -158,3 +151,29 @@ class TestRootEntityModels:
         instance, _ = build(Engine([("opus",)]), usage_mode="off")
 
         assert instance.usage_read_root_entity_models(2, PAGE, "skill", 123, 1) is None
+
+
+class TestRootEntityConversations:
+    def test_conversations_the_model_answered_in_for_the_entity(self, build):
+        instance, engine = build(Engine([("c1",), ("c2",)]))
+
+        conversations = instance.usage_read_root_entity_conversations(2, "opus", "skill", 174, 1)
+
+        assert conversations == ["c1", "c2"]
+        sql = engine.connection.statements[0]
+        assert "usage_event.model_name = 'opus'" in sql
+        assert "usage_event.event_type IN ('llm', 'tool')" in sql
+        assert "usage_event.root_entity_id = 174" in sql
+        assert "coalesce(usage_event.root_entity_project_id, usage_event.project_id) = 1" in sql
+        assert "usage_event.conversation_id IN" not in sql
+
+    def test_failed_read_is_none(self, build):
+        instance, _ = build(FailingEngine())
+
+        assert instance.usage_read_root_entity_conversations(2, "opus", "skill", 174, 1) is None
+
+    def test_metering_off_is_unknown(self, build):
+        instance, engine = build(Engine([("c1",)]), usage_mode="off")
+
+        assert instance.usage_read_root_entity_conversations(2, "opus", "skill", 174, 1) is None
+        assert engine.connection.statements == []

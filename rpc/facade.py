@@ -125,3 +125,12 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
             project_id=project_id, conversation_ids=conversation_ids,
             root_entity_type=root_entity_type, root_entity_id=root_entity_id, **kwargs,
         )
+
+    @web.rpc("usage_root_entity_conversations", "usage_root_entity_conversations")
+    def usage_root_entity_conversations_rpc(
+            self, project_id, model_name, root_entity_type, root_entity_id, **kwargs,
+    ):
+        return self.usage_read_root_entity_conversations(
+            project_id=project_id, model_name=model_name,
+            root_entity_type=root_entity_type, root_entity_id=root_entity_id, **kwargs,
+        )
