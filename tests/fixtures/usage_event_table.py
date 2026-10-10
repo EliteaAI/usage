@@ -36,6 +36,10 @@ FAKE_TABLE = Table(
     Column("cache_read_tokens", Integer, default=0),
     Column("cache_creation_tokens", Integer, default=0),
     Column("cost_nano_usd", Integer, default=0),
+    Column("input_cost_nano_usd", Integer, default=0),
+    Column("output_cost_nano_usd", Integer, default=0),
+    Column("cache_read_cost_nano_usd", Integer, default=0),
+    Column("cache_creation_cost_nano_usd", Integer, default=0),
     Column("duration_ms", Integer),
     Column("is_error", Boolean, default=False),
     Column("trigger_source", String),
@@ -48,6 +52,12 @@ FakeUsageEvent = types.SimpleNamespace(**{column.name: column for column in FAKE
 def install_engine(monkeypatch, analytics):
     monkeypatch.setattr(analytics, "UsageEvent", FakeUsageEvent)
     monkeypatch.setattr(analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != analytics.SYSTEM_USER_ID)
+    monkeypatch.setattr(analytics, "COST_SPLIT_COLUMNS", {
+        "input_cost": FakeUsageEvent.input_cost_nano_usd,
+        "output_cost": FakeUsageEvent.output_cost_nano_usd,
+        "cache_read_cost": FakeUsageEvent.cache_read_cost_nano_usd,
+        "cache_creation_cost": FakeUsageEvent.cache_creation_cost_nano_usd,
+    })
     db_engine = create_engine("sqlite://")
     event.listen(db_engine, "connect", lambda connection, _record: connection.create_function(
         "regexp_replace", 3, lambda value, pattern, repl: None if value is None else re.sub(pattern, repl, value),
