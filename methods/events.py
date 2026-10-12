@@ -24,7 +24,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from .drainer import budgeted, counter_deltas, event_values
+from .drainer import budgeted, counter_deltas, event_values, feature_budgeted, row_feature
 from ..models.usage_event import UsageEvent
 
 
@@ -49,6 +49,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # never sees them, so this is their only count
                 if budgeted([payload]):
                     self.usage_apply_counter_deltas(connection, counter_deltas(landed))
+                elif feature_budgeted([row]):
+                    feature = row_feature(row)
+                    self.usage_apply_counter_deltas(
+                        connection, counter_deltas(landed, lambda _: feature),
+                    )
                 connection.commit()
             #
             return bool(landed)

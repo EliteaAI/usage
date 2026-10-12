@@ -17,9 +17,13 @@
 
 """ usage_counter key helpers (underscored: pure helpers, not a pylon Method module) """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 PERIOD_MONTH = "month"
+PERIOD_DAY = "day"
+PERIOD_WEEK = "week"
+# Only month is written today; day/week are period-ready branches for #6006
+PERIOD_KINDS = (PERIOD_MONTH,)
 
 # user_id 0 is the project aggregate; model_name '' is all models. Reserved, never a real row.
 PROJECT_USER_SENTINEL = 0
@@ -28,6 +32,9 @@ ALL_MODELS_SENTINEL = ""
 # The one event type that feeds usage_counter, so the page total, the gate total and the drift
 # report can never disagree. Spelled once here rather than per module.
 EVENT_TYPE_LLM = "llm"
+
+# Paid tool spend (tool_cost rows) feeds separate per-feature counters, never the '' rows
+EVENT_TYPE_TOOL_COST = "tool_cost"
 
 # Stored money unit: nano-USD per dollar. Micro rounded sub-$0.0000005 embedding calls to 0.
 NANO = 1_000_000_000
@@ -38,7 +45,7 @@ def period_start(moment, period_kind=PERIOD_MONTH):
 
     Naive input is read as UTC; the ledger's month boundary is UTC everywhere.
     """
-    if period_kind != PERIOD_MONTH:
+    if period_kind not in (PERIOD_MONTH, PERIOD_DAY, PERIOD_WEEK):
         raise ValueError(f"Unsupported period kind: {period_kind!r}")
     #
     if isinstance(moment, datetime):
@@ -50,6 +57,10 @@ def period_start(moment, period_kind=PERIOD_MONTH):
     if not isinstance(moment, date):
         raise TypeError(f"Expected date or datetime, got {type(moment).__name__}")
     #
+    if period_kind == PERIOD_DAY:
+        return moment
+    if period_kind == PERIOD_WEEK:
+        return moment - timedelta(days=moment.weekday())
     return moment.replace(day=1)
 
 
@@ -79,3 +90,16 @@ def member_key(
         "period_start": period_start(moment, period_kind),
         "model_name": model_name or ALL_MODELS_SENTINEL,
     }
+
+
+def counter_keys(row, model_name=ALL_MODELS_SENTINEL, kinds=PERIOD_KINDS):
+    """Project key plus a member key (when the row has a user) for every period kind."""
+    keys = []
+    #
+    for kind in kinds:
+        keys.append(project_key(row["project_id"], row["ts"], model_name, kind))
+        #
+        if row.get("user_id"):
+            keys.append(member_key(row["project_id"], row["user_id"], row["ts"], model_name, kind))
+    #
+    return keys

@@ -28,7 +28,10 @@ import cachetools  # pylint: disable=E0401
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
-from .gate import SCOPE_MEMBER, SCOPE_PROJECT, member_hash_key, project_hash_key
+from tools import context  # pylint: disable=E0401
+
+from ._counters import PERIOD_MONTH
+from .gate import SCOPE_MEMBER, SCOPE_PROJECT, member_hash_key, project_hash_key, to_nano
 from .mode import MODE_ENFORCE
 
 DEFAULT_WARNING_PCT = 80
@@ -52,6 +55,7 @@ NO_WARNING = {
 WARNING_LEVELS = (90, 95)
 
 _warning_cache = cachetools.TTLCache(maxsize=8192, ttl=BUDGET_WARNING_TTL)
+_feature_warning_cache = cachetools.TTLCache(maxsize=8192, ttl=BUDGET_WARNING_TTL)
 
 
 def warning_level(pct, threshold_pct):
@@ -193,3 +197,72 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "level": level,
             "should_warn": True,
         }
+
+    @web.method()
+    def usage_get_feature_warning_threshold(self, feature, scope):
+        """Per-feature threshold (usage.features.<f>.warning_pct), else the scope's LLM one."""
+        features = self.usage_config().get("features", None) or {}
+        value = (features.get(feature) or {}).get("warning_pct")
+        #
+        try:
+            value = int(value) if value is not None else None
+        except (TypeError, ValueError):
+            value = None
+        #
+        if value is not None and 1 <= value <= 100:
+            return value
+        return self.usage_get_warning_threshold(scope)
+
+    @web.method()
+    def usage_get_feature_warning_state(self, feature, project_id, user_id=None):
+        """Cached usage_resolve_feature_warning; the key includes the feature."""
+        key = (feature, int(project_id), None if user_id is None else int(user_id))
+        cached = _feature_warning_cache.get(key)
+        if cached is not None:
+            return cached
+        #
+        payload = self.usage_resolve_feature_warning(feature, project_id, user_id)
+        _feature_warning_cache[key] = payload
+        return payload
+
+    @web.method()
+    def usage_resolve_feature_warning(self, feature, project_id, user_id=None, period_kind=PERIOD_MONTH):
+        """Warning state for a tool-spend feature, off its Postgres feature counters."""
+        if self.usage_get_mode() != MODE_ENFORCE:
+            return NO_WARNING
+        #
+        try:
+            limits = context.rpc_manager.timeout(10).elitea_core_get_effective_feature_limits(
+                project_id=project_id, user_id=user_id, feature=feature, period_kind=period_kind,
+            ) or {}
+            spend = self.usage_read_feature_spend(project_id, user_id, feature, period_kind)
+            if not spend.get("available"):
+                return NO_WARNING
+            #
+            personal = bool(limits.get("is_personal_project", False))
+            scopes = []
+            if user_id:
+                scopes.append((SCOPE_MEMBER, "user", spend["member_spent_nano"],
+                               to_nano(limits.get("member_limit_usd"))))
+            scopes.append((SCOPE_PROJECT, "personal_project" if personal else "project",
+                           spend["project_spent_nano"], to_nano(limits.get("project_limit_usd"))))
+            #
+            best = None
+            for scope, threshold_scope, spent, limit in scopes:
+                if limit is None or int(limit) <= 0:
+                    continue
+                state = self.usage_warning_for_scope(
+                    scope, int(spent), int(limit),
+                    self.usage_get_feature_warning_threshold(feature, threshold_scope),
+                )
+                if state is not None and (best is None or state["level"] > best["level"]):
+                    best = state
+            #
+            if best is not None:
+                return dict(best, feature=feature, period_kind=period_kind)
+        except:  # pylint: disable=W0702
+            log.exception(
+                "usage: failed to resolve %s warning for project %s user %s", feature, project_id, user_id,
+            )
+        #
+        return NO_WARNING

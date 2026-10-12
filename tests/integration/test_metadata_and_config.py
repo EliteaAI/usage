@@ -13,6 +13,7 @@ EXPECTED_PROPERTIES = {
     "usage_project_warning_pct", "usage_personal_project_warning_pct", "usage_user_warning_pct",
     "usage_warnings_dismissible",
     "usage_reconcile_repair_batch_size",
+    "usage_features_web_search_warning_pct",
 }
 
 
@@ -122,10 +123,23 @@ class TestAdminSchema:
         "usage_user_warning_pct", "usage_warnings_dismissible",
     }
 
+    # Per-feature Tool Spend settings sit with the elitea_core feature switches in one admin section
+    TOOL_SPEND_PROPERTIES = {"usage_features_web_search_warning_pct"}
+
     def test_every_property_is_sectioned(self, admin_schema):
         for name, prop in admin_schema["properties"].items():
-            expected = "cost_budgets" if name in self.COST_BUDGETS_PROPERTIES else "Usage"
+            if name in self.COST_BUDGETS_PROPERTIES:
+                expected = "cost_budgets"
+            elif name in self.TOOL_SPEND_PROPERTIES:
+                expected = "tool_spend"
+            else:
+                expected = "Usage"
             assert prop.get("section") == expected, name
+
+    def test_feature_warning_threshold_is_optional_and_bounded(self, admin_schema):
+        prop = admin_schema["properties"]["usage_features_web_search_warning_pct"]
+        assert prop["default"] is None and prop["requires_restart"] is False
+        assert prop["value_schema"]["minimum"] == 1 and prop["value_schema"]["maximum"] == 100
 
     def test_visible_when_references_a_sibling_property(self, admin_schema):
         properties = admin_schema["properties"]
