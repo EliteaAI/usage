@@ -24,9 +24,9 @@ if _API_AVAILABLE:
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
 
-    _MODEL_LIMIT = 30
-    _AGENT_LIMIT = 20
-    _USER_LIMIT = 20
+    _MODEL_DISPLAY = 30
+    _AGENT_DISPLAY = 20
+    _USER_DISPLAY  = 20
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """LLM cost breakdown analytics for the project."""
@@ -224,6 +224,23 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics costs"}, 500
 
         @staticmethod
+        def _collapse_tail(rows, display_limit, name_key, other_label):
+            if len(rows) <= display_limit:
+                return rows
+            top = rows[:display_limit]
+            tail = rows[display_limit:]
+            numeric_keys = {
+                k for k, v in tail[0].items()
+                if isinstance(v, (int, float)) and k != "below_resolution"
+            }
+            other = {k: None for k in tail[0]}
+            for k in numeric_keys:
+                other[k] = sum(r.get(k) or 0 for r in tail)
+            other[name_key] = other_label
+            other["below_resolution"] = {}
+            return top + [other]
+
+        @staticmethod
         def _kpis(conditions):
             """One scan for every headline number.
 
@@ -297,15 +314,20 @@ if _API_AVAILABLE:
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
             ).group_by(UsageEvent.model_name).order_by(
                 func.sum(UsageEvent.cost_nano_usd).desc(),
-            ).limit(_MODEL_LIMIT)
+            )
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, PromptLibAPI._MODEL_DISPLAY, "model_name", "__other__")
             display_names = an.model_display_names(project_id) if rows else {}
 
             return [
                 {
                     "model_name": r["model_name"],
-                    "display_name": display_names.get(r["model_name"], r["model_name"]),
+                    "display_name": (
+                        "Other models"
+                        if r["model_name"] == "__other__"
+                        else display_names.get(r["model_name"], r["model_name"])
+                    ),
                     "calls": r["calls"],
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
@@ -353,19 +375,27 @@ if _API_AVAILABLE:
                 *conditions, an.is_agent_row(run_scope), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_type, UsageEvent.root_entity_id, root_project,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, PromptLibAPI._AGENT_DISPLAY, "entity_name", "__other__")
             applications = an.application_meta(
-                project_id, refs=[(r["root_project_id"], r["root_entity_id"]) for r in rows],
+                project_id, refs=[
+                    (r["root_project_id"], r["root_entity_id"]) for r in rows
+                    if r["entity_name"] != "__other__"
+                ],
             )
 
             return [
                 {
                     "entity_name": (
-                        applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
-                        or r["entity_name"]
-                        or f"Agent #{r['root_entity_id']}"
+                        "Other agents"
+                        if r["entity_name"] == "__other__"
+                        else (
+                            applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
+                            or r["entity_name"]
+                            or f"Agent #{r['root_entity_id']}"
+                        )
                     ),
                     "entity_id": r["root_entity_id"],
                     "entity_kind": applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("kind"),
@@ -410,17 +440,39 @@ if _API_AVAILABLE:
                 *conditions, an.is_evaluation_row(), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_id, UsageEvent.root_entity_version_id,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, PromptLibAPI._AGENT_DISPLAY, "root_entity_id", "__other__")
+            real_rows = [r for r in rows if r["root_entity_id"] != "__other__"]
             applications, versions = an.entity_meta(
                 project_id,
-                application_ids=[r["root_entity_id"] for r in rows],
-                version_ids=[r["root_entity_version_id"] for r in rows],
+                application_ids=[r["root_entity_id"] for r in real_rows],
+                version_ids=[r["root_entity_version_id"] for r in real_rows],
             )
 
             result = []
             for r in rows:
+                if r["root_entity_id"] == "__other__":
+                    result.append({
+                        "entity_name": "Other",
+                        "entity_id": None,
+                        "entity_kind": None,
+                        "version_id": None,
+                        "version_name": None,
+                        "eval_runs": int(r.get("eval_runs") or 0),
+                        "total_cost": an.cost_usd(r["cost_nano"]),
+                        **an.cost_split_usd(r),
+                        "below_resolution": {},
+                        "input_tokens": int(r.get("input_tokens") or 0),
+                        "output_tokens": int(r.get("output_tokens") or 0),
+                        "cache_read_tokens": int(r.get("cache_read_tokens") or 0),
+                        "cache_creation_tokens": int(r.get("cache_creation_tokens") or 0),
+                        "total_tokens": int(r.get("total_tokens") or 0),
+                        "calls": int(r.get("calls") or 0),
+                        "avg_cost": 0.0,
+                    })
+                    continue
                 application = applications.get(r["root_entity_id"], {})
                 version = versions.get(r["root_entity_version_id"], {})
                 result.append({
@@ -466,19 +518,24 @@ if _API_AVAILABLE:
 
             statement = select(*columns).where(*conditions).group_by(
                 UsageEvent.user_id,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_USER_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, PromptLibAPI._USER_DISPLAY, "user_id", "__other__")
 
             emails = an.label_users(
-                [r["user_id"] for r in rows],
-                {r["user_id"]: r["user_email"] for r in rows if r["user_id"] is not None},
+                [r["user_id"] for r in rows if r["user_id"] != "__other__"],
+                {r["user_id"]: r["user_email"] for r in rows if r["user_id"] not in (None, "__other__")},
             )
 
             return [
                 {
-                    "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    "user_id": r["user_id"] if r["user_id"] != "__other__" else None,
+                    "user_email": (
+                        "Other users"
+                        if r["user_id"] == "__other__"
+                        else emails.get(r["user_id"])
+                    ),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
