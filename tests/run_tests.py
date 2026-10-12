@@ -78,13 +78,33 @@ def install_pylon_stubs():
         get_session=lambda *a, **k: None,
         get_shared_metadata=lambda: metadata,
     )
-    tools.config = types.SimpleNamespace(POSTGRES_SCHEMA='centry')
+    tools.config = types.SimpleNamespace(
+        POSTGRES_SCHEMA='centry',
+        ADMINISTRATION_MODE='administration',
+        DEFAULT_MODE='default',
+    )
     tools.context = types.SimpleNamespace(rpc_manager=None)
     # Provided by `shared`, which usage depends_on, so it always resolves in a live pylon
     openapi_registry = types.SimpleNamespace(registered=[])
     openapi_registry.register_plugin = \
         lambda **kwargs: openapi_registry.registered.append(kwargs)
     tools.openapi_registry = openapi_registry
+
+    # Stubs for Flask/pylon API infrastructure — enough so analytics_costs.py
+    # passes its `_API_AVAILABLE` guard and PromptLibAPI is defined.
+    tools.api_tools = types.SimpleNamespace(
+        APIModeHandler=object,
+        APIBase=object,
+        endpoint_metrics=lambda f: f,
+        with_modes=lambda *a, **k: [],
+    )
+    tools.auth = types.SimpleNamespace(
+        decorators=types.SimpleNamespace(
+            check_api=lambda *a, **kw: (lambda f: f),
+        )
+    )
+    tools.register_openapi = lambda **kw: (lambda f: f)
+
     # Default for_module() is a happy-path admin+scheduling stub, so ready()/deinit() stay quiet
     # unless a test explicitly monkeypatches `this` to inspect that behaviour.
     def _for_module(name):
