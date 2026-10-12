@@ -36,6 +36,9 @@ META_FIELDS = {
     "results_count": lambda v: _count(v),
     "urls_count": lambda v: _count(v),
     "failed_urls": lambda v: _count(v),
+    # Set by elitea_core when the reported units were capped at the backend's ceiling
+    "clamped": lambda v: v is True,
+    "reported_units": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0,
 }
 
 

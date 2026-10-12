@@ -144,6 +144,18 @@ class TestFeatureWarning:
         assert instance.usage_resolve_feature_warning("web_search", 3, 7)["should_warn"] is False
 
 
+class TestClampTrail:
+    def test_clamp_flag_and_reported_units_reach_the_ledger(self):
+        meta = tool_cost.tool_cost_row(record(meta={"clamped": True, "reported_units": 9999.0}), {})["meta"]
+        assert meta["clamped"] is True and meta["reported_units"] == 9999.0
+
+    @pytest.mark.parametrize("bad", [{"clamped": "yes"}, {"clamped": False}, {"reported_units": -1},
+                                     {"reported_units": float("nan")}, {"reported_units": "9"}])
+    def test_bad_trail_values_are_dropped(self, bad):
+        meta = tool_cost.tool_cost_row(record(meta=bad), {})["meta"]
+        assert not set(bad) & set(meta)
+
+
 class TestRowCanOnlyAddSpend:
     """Second guard behind the API: whatever reaches the RPC, a row never lowers spend."""
 
