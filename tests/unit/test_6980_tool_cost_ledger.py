@@ -142,3 +142,30 @@ class TestFeatureWarning:
         assert instance.usage_resolve_feature_warning("web_search", 3, 7)["should_warn"] is False
         instance = self.build({"mode": "observe"}, {"project_limit_usd": 1.0}, self.SPENT, monkeypatch)
         assert instance.usage_resolve_feature_warning("web_search", 3, 7)["should_warn"] is False
+
+
+class TestRowCanOnlyAddSpend:
+    """Second guard behind the API: whatever reaches the RPC, a row never lowers spend."""
+
+    @pytest.mark.parametrize("field,value", [
+        ("units", -100), ("units", float("nan")), ("units", float("inf")), ("units", "5"), ("units", True),
+        ("cost_usd", -0.008), ("cost_usd", float("nan")), ("cost_usd", float("-inf")), ("cost_usd", 10**12),
+        ("duration_ms", -1), ("feature", "x" * 65), ("op", ""),
+    ])
+    def test_invalid_money_or_shape_is_rejected(self, field, value):
+        with pytest.raises(ValueError):
+            tool_cost.tool_cost_row(record(**{field: value}), {})
+
+    def test_record_rpc_raises_and_writes_nothing(self):
+        instance = recorder()
+        with pytest.raises(ValueError):
+            instance.usage_record_tool_cost(record(units=-100))
+        assert instance.queued == [] and instance.written == []
+
+    def test_meta_values_are_typed_scalars_only(self):
+        meta = tool_cost.tool_cost_row(record(meta={
+            "credits_source": "reported", "depth": {"nested": "x" * 10_000}, "results_count": -1,
+            "urls_count": 3, "failed_urls": True,
+        }), {})["meta"]
+        assert meta["credits_source"] == "reported" and meta["urls_count"] == 3
+        assert "depth" not in meta and "results_count" not in meta and "failed_urls" not in meta

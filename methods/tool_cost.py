@@ -19,25 +19,59 @@
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
+import math
+
 from ._counters import EVENT_TYPE_TOOL_COST, NANO
 from .mode import MODE_OFF
 
-# Counter meta keys that may land on the row; nothing else (no queries, no URLs)
-TOOL_COST_META_KEYS = (
-    "feature", "backend", "op", "units", "unit", "credits_source",
-    "results_count", "urls_count", "failed_urls", "depth", "period_kind",
-)
 REQUIRED_KEYS = ("ts", "idempotency_key", "project_id", "feature", "backend", "op")
+# Storage bounds of the target columns (bigint nano-USD, int4 ms/counts), not tuning knobs
+BIGINT_MAX = 2**63 - 1
+INT32_MAX = 2**31 - 1
+MAX_NAME = 64
+# Typed meta: key -> validator. Anything else (queries, URLs, nested objects) never lands.
+META_FIELDS = {
+    "credits_source": lambda v: v in ("reported", "estimated"),
+    "depth": lambda v: v in ("basic", "advanced"),
+    "results_count": lambda v: _count(v),
+    "urls_count": lambda v: _count(v),
+    "failed_urls": lambda v: _count(v),
+}
+
+
+def _count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= INT32_MAX
+
+
+def _money(value, name):
+    """Finite and >= 0: a ledger row can only ever add spend."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"tool_cost {name} must be a finite number >= 0")
+    return float(value)
+
+
+def _name(value, name):
+    if not isinstance(value, str) or not 0 < len(value) <= MAX_NAME:
+        raise ValueError(f"tool_cost {name} must be a short string")
+    return value
 
 
 def tool_cost_row(record, attribution):
     """usage_event payload for one recorded tool spend; ts and idempotency_key are kept as given."""
-    meta = {key: record[key] for key in TOOL_COST_META_KEYS if record.get(key) is not None}
+    feature, backend, op = (_name(record[key], key) for key in ("feature", "backend", "op"))
+    units = _money(record.get("units") or 0, "units")
+    cost = record.get("cost_usd")
+    cost_nano = 0 if cost is None else int(round(_money(cost, "cost_usd") * NANO))
+    if cost_nano > BIGINT_MAX:
+        raise ValueError("tool_cost cost_usd is out of range")
+    duration = record.get("duration_ms")
+    if duration is not None and not _count(duration):
+        raise ValueError("tool_cost duration_ms must be an int >= 0")
+    meta = {"feature": feature, "backend": backend, "op": op, "units": units, "unit": _name(record.get("unit") or "credit", "unit")}
     meta.update({
         key: value for key, value in (record.get("meta") or {}).items()
-        if key in TOOL_COST_META_KEYS and key not in meta
+        if key in META_FIELDS and META_FIELDS[key](value)
     })
-    cost = record.get("cost_usd")
     #
     row = {
         **(attribution or {}),
@@ -48,12 +82,12 @@ def tool_cost_row(record, attribution):
         "user_email": record.get("user_email"),
         "run_id": record.get("run_id"),
         "event_type": EVENT_TYPE_TOOL_COST,
-        "tool_name": record.get("tool_name"),
-        "model_name": f"{record['backend']}/{record['op']}",
-        "cost_nano_usd": int(round(cost * NANO)) if cost is not None else 0,
+        "tool_name": (record.get("tool_name") or None) and str(record["tool_name"])[:256],
+        "model_name": f"{backend}/{op}",
+        "cost_nano_usd": cost_nano,
         "cost_source": record.get("cost_source") if cost is not None else "unpriced",
-        "duration_ms": record.get("duration_ms"),
-        "is_error": not record.get("ok", True),
+        "duration_ms": duration,
+        "is_error": record.get("ok", True) is not True,
         "meta": meta,
     }
     if record.get("budget_exempt"):
