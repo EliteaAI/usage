@@ -143,7 +143,7 @@ if _API_AVAILABLE:
             try:
                 dt_from, dt_to = an.parse_date_range(request.args)
                 sort_by = request.args.get("sort_by", sa.DEFAULT_SORT)
-                return sa.skill_leaderboard(
+                return sa.build_skill_leaderboard(
                     project_id, dt_from, dt_to,
                     search=request.args.get("search", "").strip(),
                     sort_by=sort_by if sort_by in sa.SORT_COLUMNS else sa.DEFAULT_SORT,

@@ -63,7 +63,7 @@ def meta(monkeypatch):
             {CONVERSATION_1: 1701},
         )
 
-    monkeypatch.setattr(sa, "skill_meta", skill_meta)
+    monkeypatch.setattr(sa, "fetch_skill_meta", skill_meta)
     state["calls"] = calls
     yield state
 
@@ -116,7 +116,7 @@ def mixed_usage(engine):
 
 
 def leaderboard(**kwargs):
-    return sa.skill_leaderboard(PROJECT_ID, *WINDOW, **kwargs)
+    return sa.build_skill_leaderboard(PROJECT_ID, *WINDOW, **kwargs)
 
 
 def by_skill(result):
@@ -209,7 +209,7 @@ class TestLeaderboard:
     def test_the_window_bounds_the_rows(self, engine, meta):
         mixed_usage(engine)
 
-        result = sa.skill_leaderboard(PROJECT_ID, TS + datetime.timedelta(days=1), TS + datetime.timedelta(days=2))
+        result = sa.build_skill_leaderboard(PROJECT_ID, TS + datetime.timedelta(days=1), TS + datetime.timedelta(days=2))
 
         assert result["total"] == 0 and result["summary"]["skills_used"] == 0
 
@@ -271,7 +271,7 @@ class TestReconciliation:
 
 
 def detail():
-    return sa.skill_detail(PROJECT_ID, SKILL_ID, PROJECT_ID, *WINDOW)
+    return sa.build_skill_detail(PROJECT_ID, SKILL_ID, PROJECT_ID, *WINDOW)
 
 
 class TestDetail:
@@ -290,7 +290,7 @@ class TestDetail:
     def test_the_catalog_skill_is_not_mixed_in(self, engine, meta):
         mixed_usage(engine)
 
-        result = sa.skill_detail(PROJECT_ID, SKILL_ID, PUBLIC_PROJECT_ID, *WINDOW)
+        result = sa.build_skill_detail(PROJECT_ID, SKILL_ID, PUBLIC_PROJECT_ID, *WINDOW)
 
         assert (result["skill_name"], result["kpis"]["runs"], result["kpis"]["in_agent_uses"]) == (
             "catalog summarizer", 1, 0,
@@ -391,7 +391,7 @@ class TestSkillMeta:
             "conversations": [{"uuid": CONVERSATION_1, "id": 9}],
         }
 
-        skills, conversations = sa.skill_meta(PROJECT_ID, [(2, 5), (2, 5)], [CONVERSATION_1])
+        skills, conversations = sa.fetch_skill_meta(PROJECT_ID, [(2, 5), (2, 5)], [CONVERSATION_1])
 
         assert skills == {(2, 5): {"id": 5, "project_id": 2, "name": "a"}}
         assert conversations == {CONVERSATION_1: 9}
@@ -401,10 +401,10 @@ class TestSkillMeta:
     def test_a_failed_or_older_core_is_unknown_not_empty(self, rpc, reply):
         rpc["reply"] = reply
 
-        skills, _ = sa.skill_meta(PROJECT_ID, [(2, 5)])
+        skills, _ = sa.fetch_skill_meta(PROJECT_ID, [(2, 5)])
 
         assert skills is None
 
     def test_nothing_to_resolve_makes_no_call(self, rpc):
-        assert sa.skill_meta(PROJECT_ID) == ({}, {})
+        assert sa.fetch_skill_meta(PROJECT_ID) == ({}, {})
         assert "kwargs" not in rpc

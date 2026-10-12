@@ -95,7 +95,7 @@ if _API_AVAILABLE:
             skill_project_id = an.clamp_int(request.args.get("skill_project_id"), project_id)
             try:
                 dt_from, dt_to = an.parse_date_range(request.args)
-                detail = sa.skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to)
+                detail = sa.build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to)
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics skill detail query failed", exc_info=True)
                 return {"error": "Failed to query analytics skill detail"}, 500
