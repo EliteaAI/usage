@@ -90,6 +90,13 @@ def install_pylon_stubs():
         lambda **kwargs: openapi_registry.registered.append(kwargs)
     tools.openapi_registry = openapi_registry
 
+    # Flask stub — analytics_costs.py imports `from flask import request` inside the
+    # `if _API_AVAILABLE:` block, but Flask is not installed in the CI environment.
+    if 'flask' not in sys.modules:
+        flask_mod = types.ModuleType('flask')
+        flask_mod.request = types.SimpleNamespace(args={}, json={})
+        sys.modules.setdefault('flask', flask_mod)
+
     # Stubs for Flask/pylon API infrastructure — enough so analytics_costs.py
     # passes its `_API_AVAILABLE` guard and PromptLibAPI is defined.
     tools.api_tools = types.SimpleNamespace(
