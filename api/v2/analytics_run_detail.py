@@ -13,7 +13,6 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import select
 
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
@@ -75,27 +74,7 @@ if _API_AVAILABLE:
                     conditions.append(UsageEvent.ts <= run_scope.dt_to)
                 run_id = run_scope.run_id or run_scope.platform_run_id
 
-                rows = an.fetch_all(select(
-                    UsageEvent.entity_type,
-                    UsageEvent.entity_id,
-                    UsageEvent.entity_version_id,
-                    UsageEvent.entity_name,
-                    UsageEvent.root_entity_type,
-                    UsageEvent.root_entity_id,
-                    UsageEvent.user_id,
-                    UsageEvent.event_type,
-                    UsageEvent.model_name,
-                    UsageEvent.tool_name,
-                    UsageEvent.input_tokens,
-                    UsageEvent.output_tokens,
-                    UsageEvent.cache_read_tokens,
-                    UsageEvent.cache_creation_tokens,
-                    UsageEvent.cost_nano_usd,
-                    UsageEvent.duration_ms,
-                    UsageEvent.is_error,
-                    UsageEvent.meta,
-                    UsageEvent.ts,
-                ).where(*conditions).order_by(UsageEvent.ts.asc()))
+                rows = an.fetch_all(an.run_trace_statement(conditions))
 
                 if not rows:
                     return {"error": "Run not found"}, 404
@@ -124,6 +103,7 @@ if _API_AVAILABLE:
             tool_calls = []
             skill_events = []
             sub_agents = {}
+            root_entity_version_ids = []
             total_tokens = 0
             total_cost_nano_usd = 0
             errors = 0
@@ -133,6 +113,9 @@ if _API_AVAILABLE:
                 total_cost_nano_usd += int(row["cost_nano_usd"] or 0)
                 if row["is_error"]:
                     errors += 1
+                version_id = row["root_entity_version_id"]
+                if version_id is not None and version_id not in root_entity_version_ids:
+                    root_entity_version_ids.append(version_id)
 
                 if row["event_type"] == an.EVENT_LLM:
                     llm_calls.append({
@@ -190,6 +173,7 @@ if _API_AVAILABLE:
                 "root_entity_type": root_entity_type,
                 "root_entity_id": root_entity_id,
                 "root_entity_name": root_entity_name,
+                "root_entity_version_ids": root_entity_version_ids,
                 "user_id": first_row["user_id"],
                 "started_at": started_at.isoformat() if started_at else None,
                 "ended_at": ended_at.isoformat() if ended_at else None,
