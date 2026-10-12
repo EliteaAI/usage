@@ -516,7 +516,6 @@ def run_trace_statement(conditions):
         UsageEvent.model_name,
         UsageEvent.tool_name,
         UsageEvent.input_tokens,
-        UsageEvent.billable_input_tokens,
         UsageEvent.output_tokens,
         UsageEvent.cache_read_tokens,
         UsageEvent.cache_creation_tokens,

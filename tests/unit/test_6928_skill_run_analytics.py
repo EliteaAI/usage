@@ -2,13 +2,12 @@
 
 A skill Run History row is a conversation, and the skill may share it with other participants.
 Every run-scoped read takes the skill as its root entity, so only the skill's rows are counted,
-and run detail reports the same token total as the Costs and Tokens tabs.
+and run detail names the versions the run used.
 """
 import datetime
 import sys
 
 import pytest
-from sqlalchemy import func, select
 
 from fixtures.helpers import bind, fake_module
 from fixtures.usage_event_table import (
@@ -164,9 +163,9 @@ class TestHealthRpc:
 
 
 class TestSkillRunDetail:
-    def detail(self, engine, run_detail, scope=SKILL_SCOPE, display_names=None):
+    def detail(self, engine, run_detail, scope=SKILL_SCOPE):
         rows = trace_rows(engine, _analytics, *_analytics.run_filters(scope))
-        return run_detail(scope.run_id, rows, display_names or {})
+        return run_detail(scope.run_id, rows)
 
     def test_the_root_is_the_scoped_skill_even_when_another_participant_answered_first(
             self, engine, run_detail,
@@ -181,50 +180,25 @@ class TestSkillRunDetail:
         assert response["root_entity_name"] == "summarizer (v2)"
         assert response["sub_agents"] == []
 
-    def test_models_and_versions_are_the_ones_the_run_used_in_order(self, engine, run_detail):
+    def test_versions_are_the_ones_the_run_used_in_order(self, engine, run_detail):
         shared_chat(engine)
 
-        response = self.detail(engine, run_detail, display_names={"sonnet": "Claude Sonnet"})
+        assert self.detail(engine, run_detail)["root_entity_version_ids"] == [252, 253]
 
-        assert response["models"] == [
-            {"model_name": "sonnet", "display_name": "Claude Sonnet"},
-            {"model_name": "gpt", "display_name": "gpt"},
-        ]
-        assert response["root_entity_version_ids"] == [252, 253]
-
-    def test_totals_are_the_sum_of_the_skill_rows(self, engine, run_detail):
+    def test_totals_count_only_the_skill_rows(self, engine, run_detail):
         shared_chat(engine)
 
         kpis = self.detail(engine, run_detail)["kpis"]
 
-        assert kpis["llm_calls"] == 2
-        assert kpis["tool_calls"] == 0
-        assert kpis["errors"] == 1
-        assert kpis["billable_tokens"] == (100 + 20 + 30 + 5) + 7
+        assert (kpis["llm_calls"], kpis["tool_calls"], kpis["errors"]) == (2, 0, 1)
         assert kpis["total_cost_nano_usd"] == 4_050
-        assert kpis["total_cost"] == pytest.approx(0.00000405)
-        assert kpis["calls_duration_ms"] == 1_500
 
     def test_the_failing_call_is_in_the_trace(self, engine, run_detail):
         shared_chat(engine)
 
         calls = self.detail(engine, run_detail)["llm_calls"]
 
-        assert [(call["model_name"], call["is_error"], call["billable_tokens"]) for call in calls] == [
-            ("sonnet", False, 155), ("gpt", True, 7),
-        ]
-
-    def test_billable_tokens_reconcile_with_the_costs_tab(self, engine, run_detail):
-        shared_chat(engine)
-        costs_conditions = _analytics.base_filters(PROJECT_ID, None, None, run_scope=SKILL_SCOPE) + [
-            _analytics.UsageEvent.event_type == _analytics.EVENT_LLM,
-        ]
-        costs_tokens = _analytics.fetch_all(
-            select(func.sum(_analytics.total_tokens_expr()).label("tokens")).where(*costs_conditions)
-        )[0]["tokens"]
-        kpis = self.detail(engine, run_detail)["kpis"]
-
-        assert kpis["billable_tokens"] == costs_tokens == 162
+        assert [(call["model_name"], call["is_error"]) for call in calls] == [("sonnet", False), ("gpt", True)]
 
     def test_an_agent_run_keeps_its_first_row_root_and_trace(self, engine, run_detail):
         shared_chat(engine)
