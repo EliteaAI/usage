@@ -58,3 +58,8 @@ usage:
   reconcile:
     # Counter rows repaired per transaction when the hourly reconciler applies a fix.
     repair_batch_size: 500
+  #
+  # Tool Spend features (#6980): per-feature warning thresholds; null falls back to warning_thresholds.
+  features:
+    web_search:
+      warning_pct: null

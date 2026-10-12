@@ -68,7 +68,11 @@ if _API_AVAILABLE:
                 if run_scope is None:
                     return {"error": "run_id or eval_run_id is required"}, 400
 
-                conditions = [UsageEvent.project_id == project_id, *an.run_filters(run_scope)]
+                conditions = [
+                    UsageEvent.project_id == project_id, *an.run_filters(run_scope),
+                    # tool_cost rows are not listed here, so they must not reach the totals either
+                    UsageEvent.event_type.in_((an.EVENT_LLM, an.EVENT_TOOL, an.EVENT_SKILL)),
+                ]
                 if run_scope.dt_from:
                     conditions.append(UsageEvent.ts >= run_scope.dt_from)
                 if run_scope.dt_to:

@@ -30,7 +30,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 from tools import db  # pylint: disable=E0401
 
 from . import _analytics as an
-from ._counters import EVENT_TYPE_LLM, member_key, project_key
+from ._counters import ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, EVENT_TYPE_TOOL_COST, counter_keys
 from .gate import DEAD_QUEUE_KEY, QUEUE_KEY
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
@@ -137,17 +137,27 @@ def budgeted(rows):
     ]
 
 
-def counter_deltas(rows):
+def feature_budgeted(rows):
+    """tool_cost rows that count toward their feature's limits; exempt ones stay facts only."""
+    return [
+        row for row in rows
+        if row.get("event_type") == EVENT_TYPE_TOOL_COST and row.get("budget_exempt") is not True
+        and row_feature(row)
+    ]
+
+
+def row_feature(row):
+    """Feature a tool_cost row is counted under (its counter model_name)."""
+    meta = row.get("meta")
+    return meta.get("feature") if isinstance(meta, dict) else None
+
+
+def counter_deltas(rows, model_name=lambda row: ALL_MODELS_SENTINEL):
     """Per-counter-key sums for rows that actually landed. Two keys per row: project and member."""
     deltas = {}
     #
     for row in rows:
-        keys = [project_key(row["project_id"], row["ts"])]
-        #
-        if row.get("user_id"):
-            keys.append(member_key(row["project_id"], row["user_id"], row["ts"]))
-        #
-        for key in keys:
+        for key in counter_keys(row, model_name(row)):
             bucket = deltas.setdefault(
                 tuple(sorted(key.items())),
                 dict(key, call_count=0, **{measure: 0 for measure in MEASURES}),
@@ -158,6 +168,11 @@ def counter_deltas(rows):
                 bucket[measure] += int(row.get(measure) or 0)
     #
     return list(deltas.values())
+
+
+def landed_deltas(landed):
+    """LLM deltas (unchanged) plus per-feature deltas for landed tool_cost rows."""
+    return counter_deltas(budgeted(landed)) + counter_deltas(feature_budgeted(landed), row_feature)
 
 
 def counter_upsert(delta):
@@ -424,10 +439,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         landed = [dict(row) for row in connection.execute(statement).mappings()]
         # Read off the input rows: RETURNING the column would fail every insert pre-migration
         exempt = {row.get("idempotency_key") for row in rows if row.get("budget_exempt") is True}
+        meta = {row.get("idempotency_key"): row.get("meta") for row in rows if row.get("meta")}
         #
-        self.usage_apply_counter_deltas(connection, counter_deltas(budgeted([
-            dict(row, budget_exempt=row.get("idempotency_key") in exempt) for row in landed
-        ])))
+        self.usage_apply_counter_deltas(connection, landed_deltas([
+            dict(
+                row, budget_exempt=row.get("idempotency_key") in exempt,
+                meta=meta.get(row.get("idempotency_key")),
+            ) for row in landed
+        ]))
         #
         return landed
 

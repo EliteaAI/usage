@@ -248,6 +248,24 @@
         "minimum": 1,
         "maximum": 10000
       }
+    },
+    "usage_features_web_search_warning_pct": {
+      "type": "integer",
+      "title": "Web search: warning threshold (%)",
+      "description": "Warn when web search spend reaches this percentage of its limit. Empty uses the cost budget thresholds.",
+      "path": "usage.features.web_search.warning_pct",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": null,
+      "requires_restart": false,
+      "value_schema": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1,
+        "maximum": 100
+      }
     }
   }
 }

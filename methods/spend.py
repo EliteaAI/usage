@@ -21,6 +21,9 @@ Scalar and map spend come off usage_counter (full-PK equality lookups); per-mode
 cache-token detail comes off usage_event, which is the only place that grain exists.
 """
 
+import datetime
+
+from cachetools import TTLCache
 from sqlalchemy import func, select
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -60,7 +63,7 @@ def _chunks(ids):
     return [values[at:at + ID_CHUNK] for at in range(0, len(values), ID_CHUNK)]
 
 
-def _counter_measures(period_day, *where):
+def _counter_measures(period_day, *where, model_name=ALL_MODELS_SENTINEL):
     """Summed counter measures for whatever slice the caller pins down."""
     return select(
         func.sum(UsageCounter.input_tokens), func.sum(UsageCounter.output_tokens),
@@ -68,7 +71,7 @@ def _counter_measures(period_day, *where):
     ).where(
         UsageCounter.period_kind == PERIOD_MONTH,
         UsageCounter.period_start == period_day,
-        UsageCounter.model_name == ALL_MODELS_SENTINEL,
+        UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
         *where,
     )
 
@@ -108,11 +111,52 @@ def _event_where(project_id, start, end, user_id=None):
     return clauses
 
 
+FEATURE_SPEND_TTL = 10
+_feature_spend_cache = TTLCache(maxsize=4096, ttl=FEATURE_SPEND_TTL)
+
+
 class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
 
     @web.method()
-    def usage_read_project_spend(self, project_id, period=None, **_kwargs):
+    def usage_read_feature_spend(
+            self, project_id, user_id, feature, period_kind=PERIOD_MONTH, moment=None, **_kwargs,
+    ):
+        """Typed spend for a tool-spend feature; a failed read is available=False, never zeros."""
+        moment = moment or datetime.datetime.now(datetime.timezone.utc)
+        day = period_start(moment, period_kind)
+        key = (int(project_id), int(user_id or 0), feature, period_kind, day)
+        cached = _feature_spend_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+        #
+        users = [PROJECT_USER_SENTINEL] + ([int(user_id)] if user_id else [])
+        statement = select(UsageCounter.user_id, UsageCounter.cost_nano_usd).where(
+            UsageCounter.project_id == int(project_id),
+            UsageCounter.user_id.in_(users),
+            UsageCounter.period_kind == period_kind,
+            UsageCounter.period_start == day,
+            UsageCounter.model_name == feature,
+        )
+        try:
+            with db.engine.connect() as connection:
+                rows = {int(uid): int(cost or 0) for uid, cost in connection.execute(statement)}
+        except:  # pylint: disable=W0702
+            log.exception("usage: feature spend read failed for project %s feature %s", project_id, feature)
+            return {"available": False}
+        #
+        result = {
+            "available": True,
+            "period_kind": period_kind,
+            "period_start": day.isoformat(),
+            "project_spent_nano": rows.get(PROJECT_USER_SENTINEL, 0),
+            "member_spent_nano": rows.get(int(user_id), 0) if user_id else 0,
+        }
+        _feature_spend_cache[key] = result
+        return dict(result)
+
+    @web.method()
+    def usage_read_project_spend(self, project_id, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):
         """Month spend for a project, off the project-aggregate counter row."""
         period, _start, _end, period_day = _resolve(period)
         tag = f"project-{project_id}-{period}"
@@ -123,6 +167,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     period_day,
                     UsageCounter.project_id == int(project_id),
                     UsageCounter.user_id == PROJECT_USER_SENTINEL,
+                    model_name=model_name,
                 )).first()
         except:  # pylint: disable=W0702
             log.exception("usage: project spend read failed for project %s", project_id)
@@ -131,7 +176,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return _spend_shape(tag, period, row or (0, 0, 0, 0))
 
     @web.method()
-    def usage_read_user_spend(self, project_id, user_id, period=None, **_kwargs):
+    def usage_read_user_spend(self, project_id, user_id, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):
         """Month spend for one member of a project."""
         period, _start, _end, period_day = _resolve(period)
         tag = f"user-{user_id}-{period}"
@@ -142,6 +187,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     period_day,
                     UsageCounter.project_id == int(project_id),
                     UsageCounter.user_id == int(user_id),
+                    model_name=model_name,
                 )).first()
         except:  # pylint: disable=W0702
             log.exception(
@@ -152,7 +198,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return _spend_shape(tag, period, row or (0, 0, 0, 0))
 
     @web.method()
-    def usage_read_projects_spend(self, project_ids, period=None, **_kwargs):
+    def usage_read_projects_spend(self, project_ids, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):
         """Month spend per project id. Every requested id is present, with 0.0 when unmetered.
 
         A map has no `available` flag, so a failed read answers all-zero, never a partial map.
@@ -171,7 +217,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     ).where(
                         UsageCounter.period_kind == PERIOD_MONTH,
                         UsageCounter.period_start == period_day,
-                        UsageCounter.model_name == ALL_MODELS_SENTINEL,
+                        UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
                         UsageCounter.user_id == PROJECT_USER_SENTINEL,
                         UsageCounter.project_id.in_(chunk),
                     ).group_by(UsageCounter.project_id)
@@ -187,7 +233,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return spend
 
     @web.method()
-    def usage_read_users_spend(self, project_id, user_ids, period=None, **_kwargs):
+    def usage_read_users_spend(self, project_id, user_ids, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):
         """Month spend per member of one project, keyed by user id.
 
         A failed read answers all-zero for every requested id, never a partial map.
@@ -206,7 +252,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     ).where(
                         UsageCounter.period_kind == PERIOD_MONTH,
                         UsageCounter.period_start == period_day,
-                        UsageCounter.model_name == ALL_MODELS_SENTINEL,
+                        UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
                         UsageCounter.project_id == int(project_id),
                         UsageCounter.user_id.in_(chunk),
                     ).group_by(UsageCounter.user_id)
@@ -220,7 +266,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return spend
 
     @web.method()
-    def usage_read_member_spend_listing(self, project_id, period=None, **_kwargs):
+    def usage_read_member_spend_listing(self, project_id, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):
         """Members with recorded spend plus the project total. None means unreachable."""
         _period, _start, _end, period_day = _resolve(period)
         #
@@ -229,7 +275,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         ).where(
             UsageCounter.period_kind == PERIOD_MONTH,
             UsageCounter.period_start == period_day,
-            UsageCounter.model_name == ALL_MODELS_SENTINEL,
+            UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
             UsageCounter.project_id == int(project_id),
         )
         #

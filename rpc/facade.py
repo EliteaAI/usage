@@ -110,3 +110,10 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         return self.usage_read_user_usage_detail(
             project_id=project_id, user_id=user_id, **kwargs,
         )
+
+    @web.rpc("usage_get_feature_spend", "usage_get_feature_spend")
+    def usage_get_feature_spend_rpc(self, project_id, user_id, feature, **kwargs):
+        """Typed current-period spend for a tool-spend feature (available=False on a failed read)."""
+        return self.usage_read_feature_spend(
+            project_id=project_id, user_id=user_id, feature=feature, **kwargs,
+        )
