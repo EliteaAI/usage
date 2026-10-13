@@ -62,8 +62,14 @@ class TestCatalogChatSkillUse:
 
 
 
-@pytest.mark.parametrize("stored", ["abc", 1.5, "", 99999999999, None])
+@pytest.mark.parametrize("stored", ["abc", 1.5, "", 1_000_000_000, 99999999999, None])
 def test_a_stored_project_id_that_is_not_a_project_falls_back_to_the_runs_project(engine, meta, stored):  # noqa: F811
     use(engine, meta={"source": "load_skill", "outcome": "loaded", "skill_project_id": stored})
 
     assert set(by_skill(leaderboard())) == {(PROJECT_ID, SKILL_ID)}
+
+
+def test_the_largest_project_id_the_writer_records_is_read_back(engine, meta):  # noqa: F811
+    use(engine, meta={"source": "load_skill", "outcome": "loaded", "skill_project_id": 999_999_999})
+
+    assert set(by_skill(leaderboard())) == {(999_999_999, SKILL_ID)}
