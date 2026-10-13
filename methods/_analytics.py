@@ -38,6 +38,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from ._counters import NANO
 from ..models.usage_event import UsageEvent
+from ..sources.base import TOKEN_SOURCE_UNPARSED
 
 DEFAULT_DATE_RANGE_DAYS = 7
 # One row per calendar day, so an unbounded span is unbounded cardinality
@@ -1281,6 +1282,73 @@ def event_type_health(project_id, dt_from=None, dt_to=None, run_scope=None):
             "total": int(row["total"] or 0),
             "errors": int(row["errors"] or 0),
             "avg_duration_ms": float(row["avg_duration_ms"]) if row["avg_duration_ms"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
+# Per-conversation token sums an eval run settles its case figures from (#6716). Each case and
+# judge call dispatches under its own stream id, which the predict path stores as conversation_id.
+EVAL_BREAKDOWN_TOKEN_COLUMNS = (
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens",
+)
+
+
+def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
+    """llm rows of one eval run, grouped by conversation_id. Bounds are required: ts is the
+    partition key, so a run-scoped query without them scans every partition.
+    """
+    priced = func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced"
+    return select_from(
+        [
+            UsageEvent.conversation_id,
+            func.count().label("llm_calls"),
+            *[
+                func.sum(func.coalesce(getattr(UsageEvent, name), 0)).label(name)
+                for name in EVAL_BREAKDOWN_TOKEN_COLUMNS
+            ],
+            func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano_usd"),
+            count_where(and_(~priced, total_tokens_expr() > 0)).label("unpriced_calls"),
+            # A successful call whose response the proxy could not read: its 0 tokens are not a
+            # reading, so the caller keeps its own figure. A failed call's 0 is real (nothing ran).
+            count_where(and_(
+                UsageEvent.token_source == TOKEN_SOURCE_UNPARSED, UsageEvent.is_error.is_(False),
+            )).label("unparsed_calls"),
+            func.max(UsageEvent.model_name).label("model_name"),
+        ],
+        [
+            UsageEvent.project_id == project_id,
+            UsageEvent.ts >= dt_from,
+            UsageEvent.ts <= dt_to,
+            UsageEvent.run_id == platform_run_id,
+            UsageEvent.event_type == EVENT_LLM,
+        ],
+    ).group_by(UsageEvent.conversation_id)
+
+
+def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
+    """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, unparsed_calls,
+    model_name}] for one
+    eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
+
+    Raises ValueError for a malformed run id.
+    """
+    try:
+        platform_run_id = str(uuid.UUID(str(platform_run_id)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("platform_run_id must be a UUID") from exc
+    #
+    dt_from, dt_to = clamp_date_range(dt_from, dt_to)
+    rows = fetch_all(eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to))
+    return [
+        {
+            "conversation_id": row["conversation_id"],
+            "llm_calls": int(row["llm_calls"] or 0),
+            **{name: int(row[name] or 0) for name in EVAL_BREAKDOWN_TOKEN_COLUMNS},
+            "cost_nano_usd": int(row["cost_nano_usd"] or 0),
+            "unpriced_calls": int(row["unpriced_calls"] or 0),
+            "unparsed_calls": int(row["unparsed_calls"] or 0),
+            "model_name": row["model_name"],
         }
         for row in rows
     ]
