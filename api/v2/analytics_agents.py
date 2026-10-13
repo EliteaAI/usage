@@ -17,7 +17,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import asc, case, desc, func, select
+    from sqlalchemy import asc, desc, func, select
 
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
@@ -164,7 +164,9 @@ if _API_AVAILABLE:
                 sort_order = request.args.get("sort_order", "desc")
                 search = request.args.get("search", "").strip()
 
-                total, rows = self._agents(conditions, search, sort_by, sort_order, limit, offset, run_scope)
+                total, rows = self._agents(
+                    project_id, conditions, search, sort_by, sort_order, limit, offset, run_scope,
+                )
 
                 return {
                     "total": total,
@@ -179,14 +181,11 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics agents"}, 500
 
         @staticmethod
-        def _agents(conditions, search, sort_by, sort_order, limit, offset, run_scope=None):
+        def _agents(project_id, conditions, search, sort_by, sort_order, limit, offset, run_scope=None):
             """Grouped-by-run agent rows, paginated and sorted."""
-            # There is no root_entity_name column: the display name is read off whichever
-            # row IS the run (entity_id == root_entity_id), never guessed from a child call.
-            entity_name_expr = func.max(case(
-                (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
-                else_=None,
-            ))
+            # Search/sort run on the stored run name; the label prefers elitea_core's name (#6910)
+            entity_name_expr = an.run_name_expr()
+            root_project_col = func.max(an.root_project_expr()).label("root_project_id")
 
             events_col = an.agent_runs_expr(run_scope).label("events")
             users_col = func.count(func.distinct(UsageEvent.user_id)).label("users")
@@ -211,6 +210,7 @@ if _API_AVAILABLE:
             columns = [
                 UsageEvent.root_entity_id.label("entity_id"),
                 entity_name_expr.label("entity_name"),
+                root_project_col,
                 events_col, users_col, avg_dur_col, errors_col,
                 input_tokens_col, output_tokens_col,
                 cache_read_tokens_col, cache_creation_tokens_col,
@@ -240,10 +240,17 @@ if _API_AVAILABLE:
             rows = an.fetch_all(
                 stmt.order_by(order_fn(sort_map.get(sort_by, events_col))).limit(limit).offset(offset)
             )
+            applications = an.application_meta(
+                project_id, refs=[(r["root_project_id"], r["entity_id"]) for r in rows],
+            )
 
             return total, [
                 {
-                    "entity_name": r["entity_name"] or f"Agent #{r['entity_id']}",
+                    "entity_name": (
+                        applications.get((r["root_project_id"], r["entity_id"]), {}).get("name")
+                        or r["entity_name"]
+                        or f"Agent #{r['entity_id']}"
+                    ),
                     "entity_id": r["entity_id"],
                     "events": int(r["events"] or 0),
                     "users": r["users"] or 0,

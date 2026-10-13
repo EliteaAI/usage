@@ -51,6 +51,8 @@ SYSTEM_USER_ID = 0
 
 EVENT_LLM = "llm"
 EVENT_TOOL = "tool"
+EVENT_SKILL = "skill"
+METERED_EVENT_TYPES = (EVENT_LLM, EVENT_TOOL)
 
 # What the user launched. entity_* is the node that made one call; root_entity_* is the run it
 # belongs to, so a run's agent identity survives on every llm and tool row underneath it.
@@ -59,6 +61,11 @@ AGENT_ROOT_TYPES = ("application", "pipeline")
 # Marks a judge/eval-batch call (#6677): root_entity_* still names the real application/pipeline
 # being evaluated, so this must be excluded from agent-run counts on entity_type, not root type.
 ENTITY_TYPE_EVALUATION = "evaluation"
+
+# Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
+ENTITY_TYPE_SKILL = "skill"
+
+ROOT_ENTITY_TYPES = (*AGENT_ROOT_TYPES, ENTITY_TYPE_SKILL)
 
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
 # the query, so there is no user_email allow-list to maintain beyond the synthetic actor.
@@ -69,11 +76,17 @@ SYSTEM_USER_EMAIL_SUFFIX = "@centry.user"
 # Drops the synthetic actor from anything user-facing
 HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
+# Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881)
+MANUAL_RUN = UsageEvent.trigger_source.is_(None)
+
 # Platform-managed roles that project creation copies into every project's role set (#6794):
 # super_admin is seeded into mode="default" and system is the pre-existing per-project role.
 # Neither is a role a user picks, so both are hidden from the analytics role filter — mirrors
 # admin/constants.py's RESTRICTED_ROLES.
 RESTRICTED_ROLES = {"super_admin", "system"}
+
+# Configuration sections a metered call can name its model from (#6901)
+MODEL_SECTIONS = ("llm", "embedding", "image_generation", "asr", "tts")
 
 # Global super-admin verdicts, cached per user_id: {user_id: (monotonic_stamp, is_super_admin)}
 SUPER_ADMIN_TTL_SECONDS = 300
@@ -133,6 +146,36 @@ class RunScope(NamedTuple):
     platform_run_id: Optional[str] = None
     dt_from: Optional[datetime.datetime] = None
     dt_to: Optional[datetime.datetime] = None
+    root_entity_type: Optional[str] = None
+    root_entity_id: Optional[int] = None
+    root_entity_project_id: Optional[int] = None
+
+
+def _optional_int(args, key):
+    raw = args.get(key)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+
+
+def parse_root_entity(args):
+    root_entity_type = (args.get("root_entity_type") or "").strip() or None
+    root_entity_id = _optional_int(args, "root_entity_id")
+    root_entity_project_id = _optional_int(args, "root_entity_project_id")
+    if root_entity_type is None and root_entity_id is None and root_entity_project_id is None:
+        return {}
+    if root_entity_type not in ROOT_ENTITY_TYPES or root_entity_id is None:
+        raise ValueError(
+            f"root_entity_type must be one of {', '.join(ROOT_ENTITY_TYPES)} together with root_entity_id"
+        )
+    return {
+        "root_entity_type": root_entity_type,
+        "root_entity_id": root_entity_id,
+        "root_entity_project_id": root_entity_project_id,
+    }
 
 
 def parse_run_scope(project_id, args):
@@ -142,8 +185,11 @@ def parse_run_scope(project_id, args):
     """
     raw_run_id = (args.get("run_id") or "").strip()
     raw_eval_run_id = (args.get("eval_run_id") or "").strip()
+    root_entity = parse_root_entity(args)
     #
     if not raw_run_id and not raw_eval_run_id:
+        if root_entity:
+            raise ValueError("root_entity_type/root_entity_id need run_id or eval_run_id")
         return None
     #
     run_id = None
@@ -154,7 +200,7 @@ def parse_run_scope(project_id, args):
             raise ValueError("run_id must be a UUID") from exc
     #
     if not raw_eval_run_id:
-        return RunScope(run_id=run_id)
+        return RunScope(run_id=run_id, **root_entity)
     #
     try:
         eval_run_uuid = str(uuid.UUID(raw_eval_run_id))
@@ -190,6 +236,7 @@ def parse_run_scope(project_id, args):
         platform_run_id=platform_run_id,
         dt_from=dt_from,
         dt_to=dt_to,
+        **root_entity,
     )
 
 
@@ -224,6 +271,30 @@ RUN_SCOPE_PARAMETERS = [
             "Scope to one evaluation run by its uuid. Without date_from/date_to the window is "
             "the eval run's own start/finish."
         ),
+    },
+    {
+        "name": "root_entity_type",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "string", "enum": list(ROOT_ENTITY_TYPES)},
+        "description": (
+            "With run_id/eval_run_id and root_entity_id: count only that root entity's rows, so a "
+            "conversation with several participants reports one participant's run."
+        ),
+    },
+    {
+        "name": "root_entity_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "integer"},
+        "description": "Root entity id; required with root_entity_type.",
+    },
+    {
+        "name": "root_entity_project_id",
+        "in": "query",
+        "required": False,
+        "schema": {"type": "integer"},
+        "description": "Project the root entity lives in, e.g. the public project for a Catalog skill.",
     },
 ]
 
@@ -262,6 +333,21 @@ def run_filters(run_scope):
             conditions.append(UsageEvent.entity_type == ENTITY_TYPE_EVALUATION)
             conditions.append(UsageEvent.entity_id == run_scope.eval_run_id)
     #
+    conditions.extend(root_entity_conditions(
+        run_scope.root_entity_type, run_scope.root_entity_id, run_scope.root_entity_project_id,
+    ))
+    #
+    return conditions
+
+
+def root_entity_conditions(root_entity_type, root_entity_id, root_entity_project_id):
+    conditions = []
+    if root_entity_type:
+        conditions.append(UsageEvent.root_entity_type == root_entity_type)
+    if root_entity_id is not None:
+        conditions.append(UsageEvent.root_entity_id == int(root_entity_id))
+    if root_entity_project_id is not None:
+        conditions.append(root_project_expr() == int(root_entity_project_id))
     return conditions
 
 
@@ -285,13 +371,18 @@ def clamp_date_range(dt_from, dt_to):
     return dt_from, dt_to
 
 
-def base_filters(project_id, dt_from, dt_to, human_only=True, run_scope=None):
+def base_filters(
+        project_id, dt_from, dt_to, human_only=True, run_scope=None, event_types=METERED_EVENT_TYPES,
+):
     """Project and date conditions, leading with (project_id, ts) so the index applies.
 
     A run-scoped query keeps every row of the run, system actors included, so its totals are
-    the run's real totals.
+    the run's real totals. Skill rows stay out unless a caller asks for them in event_types.
     """
     conditions = [UsageEvent.project_id == project_id]
+    #
+    if event_types:
+        conditions.append(UsageEvent.event_type.in_(event_types))
     #
     if dt_from is not None:
         conditions.append(UsageEvent.ts >= dt_from)
@@ -397,6 +488,73 @@ def is_evaluation_row():
     return UsageEvent.entity_type == ENTITY_TYPE_EVALUATION
 
 
+def root_project_expr():
+    """Schema the root entity lives in (#6902); a row predating the column is its own project."""
+    return func.coalesce(UsageEvent.root_entity_project_id, UsageEvent.project_id)
+
+
+def is_run_row():
+    """Matched on type too: skill and application ids come from separate sequences, so a
+    loaded skill can share its agent's id.
+    """
+    return and_(
+        UsageEvent.entity_id == UsageEvent.root_entity_id,
+        UsageEvent.entity_type == UsageEvent.root_entity_type,
+    )
+
+
+def run_trace_statement(conditions):
+    return select(
+        UsageEvent.entity_type,
+        UsageEvent.entity_id,
+        UsageEvent.entity_version_id,
+        UsageEvent.entity_name,
+        UsageEvent.root_entity_type,
+        UsageEvent.root_entity_id,
+        UsageEvent.root_entity_version_id,
+        UsageEvent.user_id,
+        UsageEvent.event_type,
+        UsageEvent.model_name,
+        UsageEvent.tool_name,
+        UsageEvent.input_tokens,
+        UsageEvent.output_tokens,
+        UsageEvent.cache_read_tokens,
+        UsageEvent.cache_creation_tokens,
+        UsageEvent.cost_nano_usd,
+        UsageEvent.duration_ms,
+        UsageEvent.is_error,
+        UsageEvent.meta,
+        UsageEvent.ts,
+    ).where(*conditions).order_by(UsageEvent.ts.asc())
+
+
+def run_name_expr():
+    """Name of the run row (is_run_row), never a child call's, without its version.
+
+    The run row is stored as "<name> (<version>)", but agent tables aggregate every version of
+    an entity, so the suffix would label the whole row as one version (#6910).
+    """
+    return func.regexp_replace(
+        func.max(case(
+            (is_run_row(), UsageEvent.entity_name),
+            else_=None,
+        )),
+        r" \([^()]*\)$", "",
+    )
+
+
+def _entity_meta_rpc(project_id, **kwargs):
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
+            project_id, **kwargs,
+        ) or {}
+    except:  # pylint: disable=W0702
+        log.warning("usage: entity names unavailable for project %s", project_id)
+        return {}
+
+
 def entity_meta(project_id, application_ids=(), version_ids=()):
     """({app_id: meta}, {version_id: meta}) with names and agent/pipeline kind (#6678).
 
@@ -408,15 +566,7 @@ def entity_meta(project_id, application_ids=(), version_ids=()):
     if not application_ids and not version_ids:
         return {}, {}
     #
-    from tools import rpc_tools  # pylint: disable=C0415,E0401
-    #
-    try:
-        response = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
-            project_id, application_ids=application_ids, version_ids=version_ids,
-        ) or {}
-    except:  # pylint: disable=W0702
-        log.warning("usage: entity names unavailable for project %s", project_id)
-        return {}, {}
+    response = _entity_meta_rpc(project_id, application_ids=application_ids, version_ids=version_ids)
     #
     return (
         {item["id"]: item for item in response.get("applications") or []},
@@ -424,9 +574,53 @@ def entity_meta(project_id, application_ids=(), version_ids=()):
     )
 
 
+def application_meta(project_id, refs=()):
+    """{(root_project_id, app_id): meta} for root_project_expr() groups (#6902).
+
+    An app id is only unique within its own schema, so a public agent is looked up in the
+    public project's schema and never matched against this project's same-id application.
+    """
+    refs = sorted({(p, i) for p, i in refs if p is not None and i is not None})
+    if not refs:
+        return {}
+    #
+    response = _entity_meta_rpc(project_id, application_refs=[list(ref) for ref in refs])
+    #
+    return {(item["project_id"], item["id"]): item for item in response.get("scoped_applications") or []}
+
+
 def active_users_expr():
     """Distinct human actors."""
-    return func.count(distinct(case((HUMAN_ACTOR, UsageEvent.user_id), else_=None)))
+    return func.count(distinct(case((and_(HUMAN_ACTOR, MANUAL_RUN), UsageEvent.user_id), else_=None)))
+
+
+def manual_users_expr():
+    """Distinct users of the rows in scope, automated runs aside."""
+    return func.count(distinct(case((MANUAL_RUN, UsageEvent.user_id), else_=None)))
+
+
+def automated_activity(conditions):
+    """Runs, calls and cost of automated runs, one entry per trigger_source."""
+    rows = fetch_all(select_from(
+        [
+            UsageEvent.trigger_source,
+            func.count(distinct(UsageEvent.run_id)).label("runs"),
+            llm_calls_expr().label("llm_calls"),
+            tool_runs_expr().label("tool_runs"),
+            func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+        ],
+        [*conditions, ~MANUAL_RUN],
+    ).group_by(UsageEvent.trigger_source).order_by(UsageEvent.trigger_source))
+    return [
+        {
+            "trigger_source": r["trigger_source"],
+            "runs": int(r["runs"] or 0),
+            "llm_calls": int(r["llm_calls"] or 0),
+            "tool_runs": int(r["tool_runs"] or 0),
+            "llm_cost": cost_usd(r["cost_nano"] or 0),
+        }
+        for r in rows
+    ]
 
 
 def day_expr():
@@ -661,6 +855,12 @@ def resolve_role_filter(project_id, roles):
     same shape admin/rpc/roles.py's get_users_roles_in_project already uses. A role that
     exists but has no members returns an empty set, which is a legitimate zero, not a reason
     to fall back to matching everyone.
+
+    Reflects project_user_role as it stands *right now*: a role change or removal rewrites or
+    deletes that row, so a row on the far side of that change is no longer in the returned set
+    even though its usage_event activity is unchanged (#6796). role_filter_condition is what a
+    reader actually wants; this is kept as the live half of that, and for whatever else in the
+    plugin still wants today's live-only membership.
     """
     wanted = {role for role in (roles or []) if role}
     #
@@ -679,6 +879,141 @@ def resolve_role_filter(project_id, roles):
     role_ids = {r["id"] for r in project_roles if r.get("name") in wanted}
     #
     return {ur["user_id"] for ur in user_roles if ur.get("role_id") in role_ids}
+
+
+# Role names snapshot cache, batched per project (#6796):
+# {project_id: (stamp, {user_id: [names]}, ttl_seconds)}.
+# usage_event is written far more often than a project's roles change, so a fresh lookup happens
+# on cache expiry rather than once per drained batch.
+ROLE_SNAPSHOT_TTL_SECONDS = 60
+# Failed lookups (e.g. auth outage) are cached too, but briefly -- long enough to spare the
+# drainer's hot path from a synchronous RPC per row, short enough to notice auth recovering.
+ROLE_SNAPSHOT_FAILURE_TTL_SECONDS = 30
+ROLE_SNAPSHOT_CACHE_MAX = 512
+_role_snapshot_cache = {}
+
+
+def fetch_project_role_name_map(project_id):
+    """{user_id: sorted role names} for every current member of project_id, uncached; raises
+    on a failed lookup so a caller that must not mistake an outage for "no roles" can tell.
+    """
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    project_roles = auth.list_project_roles(project_id) or []
+    user_roles = auth.list_project_user_roles(project_id) or []
+    #
+    names_by_role_id = {r["id"]: r["name"] for r in project_roles if r.get("name")}
+    mapping = {}
+    #
+    for user_role in user_roles:
+        name = names_by_role_id.get(user_role.get("role_id"))
+        user_id = user_role.get("user_id")
+        #
+        if name is None or user_id is None:
+            continue
+        #
+        mapping.setdefault(int(user_id), set()).add(name)
+    #
+    return {user_id: sorted(names) for user_id, names in mapping.items()}
+
+
+def _project_role_name_map(project_id):
+    """{user_id: sorted role names} for every member of project_id, cached briefly.
+
+    Silent on any failure, including auth being unavailable at all: an unresolvable project
+    leaves every row of the batch with no snapshot, which is exactly today's (pre-#6796)
+    behaviour for that row -- role_filter_condition falls back to the live join for it. This is
+    the write path, so it never logs; a lookup that fails on every call would otherwise log on
+    every call.
+
+    Failures are cached too (briefly, per ROLE_SNAPSHOT_FAILURE_TTL_SECONDS): during an auth
+    outage, drainer.py's event_values() calls this once per drained row, and without negative
+    caching every row for the same project would retry the RPC synchronously.
+    """
+    now = time.monotonic()
+    cached = _role_snapshot_cache.get(project_id)
+    #
+    if cached is not None and now - cached[0] < cached[2]:
+        return cached[1]
+    #
+    try:
+        result = fetch_project_role_name_map(project_id)
+    except Exception:  # pylint: disable=W0703
+        if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+            _evict_expired_role_snapshots(now)
+        #
+        _role_snapshot_cache[project_id] = (now, {}, ROLE_SNAPSHOT_FAILURE_TTL_SECONDS)
+        #
+        return {}
+    #
+    if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+        _evict_expired_role_snapshots(now)
+    #
+    _role_snapshot_cache[project_id] = (now, result, ROLE_SNAPSHOT_TTL_SECONDS)
+    #
+    return result
+
+
+def _evict_expired_role_snapshots(now):
+    """Prune only expired entries from the role-snapshot cache (mirrors _is_super_admin's
+    eviction), never a blanket clear() -- that would wipe other projects' still-fresh entries
+    and trigger a synchronous auth RPC thundering-herd in the drainer's hot path.
+
+    If pruning expired entries still leaves the cache at or over the cap, fall back to evicting
+    the oldest entries (by stamp) until it fits, rather than leaving it unbounded.
+    """
+    for key, entry in list(_role_snapshot_cache.items()):
+        if now - entry[0] >= entry[2]:
+            _role_snapshot_cache.pop(key, None)
+    #
+    if len(_role_snapshot_cache) >= ROLE_SNAPSHOT_CACHE_MAX:
+        oldest_first = sorted(_role_snapshot_cache.items(), key=lambda item: item[1][0])
+        #
+        for key, _entry in oldest_first[:len(oldest_first) - ROLE_SNAPSHOT_CACHE_MAX + 1]:
+            _role_snapshot_cache.pop(key, None)
+
+
+def role_names_snapshot(project_id, user_id):
+    """This actor's current project role names, or None (unknown, none, or lookup failed).
+
+    Stamped onto a usage_event row at write time -- the one choke point every insert passes
+    through regardless of caller (methods/drainer.py event_values()) -- so that a later role
+    change or removal cannot make this row's activity disappear from a role-filtered Activity
+    trend (#6796). role_filter_condition is what reads it back.
+    """
+    if project_id is None or user_id is None:
+        return None
+    #
+    try:
+        names = _project_role_name_map(int(project_id)).get(int(user_id))
+    except (TypeError, ValueError):
+        return None
+    #
+    return names or None
+
+
+def role_filter_condition(project_id, roles):
+    """SQL condition scoping usage_event to rows whose actor held one of `roles`, or None for
+    "no filter" (today's behaviour, all roles).
+
+    Prefers each row's own role_snapshot over resolve_role_filter's live join (#6796): the live
+    join only ever reflects a user's *current* roles, so once a role changes or a user is
+    removed from the project, their already-recorded activity permanently vanished from any
+    role-filtered view even though the usage_event row itself was never touched. A row written
+    before role_snapshot existed has it NULL and falls back to the live join -- exactly today's
+    behaviour for every row already on disk, so nothing regresses for historical data.
+    """
+    wanted = sorted({role for role in (roles or []) if role})
+    #
+    if not wanted:
+        return None
+    #
+    live_user_ids = resolve_role_filter(project_id, wanted)
+    #
+    return or_(
+        and_(UsageEvent.role_snapshot.isnot(None), UsageEvent.role_snapshot.overlap(wanted)),
+        and_(UsageEvent.role_snapshot.is_(None), UsageEvent.user_id.in_(live_user_ids)),
+    )
 
 
 def label_users(rows_user_ids, stored_emails=None):
@@ -766,22 +1101,57 @@ def project_member_count(project_id, unique_users=0):
     return max(total, unique_users or 0)
 
 
+def outsider_admin_ids(project_id, conditions):
+    """Active user ids in the window who are global super-admins but not project members.
+
+    A super-admin can act in any project for oversight; that is not team adoption, so they are
+    kept off per-user listings. A member removed after the fact is not an outsider here — their
+    activity in the window is real and stays listed. A failed member lookup excludes no one.
+    """
+    from tools import auth  # pylint: disable=C0415,E0401
+    #
+    try:
+        member_ids = {int(uid) for uid in (auth.list_project_users(project_id) or [])}
+    except:  # pylint: disable=W0702
+        log.exception("usage: project member lookup failed for project %s", project_id)
+        return set()
+    #
+    active_ids = {
+        int(r["user_id"]) for r in fetch_all(
+            select(distinct(UsageEvent.user_id).label("user_id")).where(*conditions)
+        ) if r["user_id"] is not None
+    }
+    #
+    return {
+        user_id for user_id in active_ids - member_ids
+        if _is_super_admin(user_id)
+    }
+
+
 def model_display_names(project_id):
-    """model_name -> display name, from the project's configured models."""
+    """model_name -> display name, from the project's configured models of every section.
+
+    Each section is read on its own, so one unavailable section does not blank the others;
+    the first section listing a name wins.
+    """
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
     names = {}
     #
-    try:
-        response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-            project_id=project_id, section="llm", include_shared=True,
-        )
+    for section in MODEL_SECTIONS:
+        try:
+            response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
+                project_id=project_id, section=section, include_shared=True,
+            )
+        except:  # pylint: disable=W0702
+            log.warning(
+                "usage: %s model display names unavailable for project %s", section, project_id,
+            )
+            continue
         #
         for item in (response or {}).get("items", []) or []:
             if isinstance(item, dict) and item.get("name"):
-                names[item["name"]] = item.get("display_name") or item["name"]
-    except:  # pylint: disable=W0702
-        log.warning("usage: model display names unavailable for project %s", project_id)
+                names.setdefault(item["name"], item.get("display_name") or item["name"])
     #
     return names
 
@@ -858,12 +1228,11 @@ def ai_active_users_trend(
     granularity = granularity if granularity in _BUCKET_EXPRS else GRANULARITY_DAY
     wanted_roles = sorted({role for role in (roles or []) if role})
     #
-    role_user_ids = resolve_role_filter(project_id, wanted_roles)
+    role_condition = role_filter_condition(project_id, wanted_roles)
     conditions = base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
     #
-    if role_user_ids is not None:
-        # Possibly empty: a selected role with no members is a legitimate zero
-        conditions.append(UsageEvent.user_id.in_(role_user_ids))
+    if role_condition is not None:
+        conditions.append(role_condition)
     #
     bucket = bucket_expr(granularity).label("bucket")
     active_users = active_users_expr()

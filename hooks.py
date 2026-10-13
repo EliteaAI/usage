@@ -70,14 +70,18 @@ ATTRIBUTION_HEADER = "X-Elitea-Attribution"
 ATTRIBUTION_KEYS = (
     "conversation_id",
     "entity_type", "entity_id", "entity_version_id", "entity_name",
-    "root_entity_type", "root_entity_id", "root_entity_version_id",
+    "root_entity_type", "root_entity_id", "root_entity_version_id", "root_entity_project_id",
+    "trigger_source",
 )
+#: Automated sources only; manual stays NULL, and an unknown value is dropped as manual (#6881)
+TRIGGER_SOURCES = ("scheduled", "webhook", "index")
 ATTRIBUTION_INT_KEYS = (
     "entity_id", "entity_version_id", "root_entity_id", "root_entity_version_id",
+    "root_entity_project_id",
 )
 #: Column widths, and a cap on the header itself: this arrives from a caller.
 ATTRIBUTION_HEADER_LIMIT = 4096
-ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32}
+ATTRIBUTION_TEXT_LIMITS = {"entity_type": 32, "root_entity_type": 32, "trigger_source": 16}
 ATTRIBUTION_TEXT_LIMIT = 512
 #: Signature field inside the header JSON; the indexer signs it with a key users never see (#6762)
 ATTRIBUTION_SIGNATURE_KEY = "sig"
@@ -113,12 +117,14 @@ class UsageContext:  # pylint: disable=R0902
     estimate_nano: int = 0
     # usage_event columns, already named as such; see ATTRIBUTION_KEYS
     attribution: dict = None
+    # Project-own model: recorded for analytics, never gated and never counted toward budgets
+    budget_exempt: bool = False
 
 
 def begin_llm_call(  # pylint: disable=R0913,R0917
         project_id, user_id, model_name, endpoint, headers,
         provider=None, run_id=None, attribution=None, user_email=None,
-        max_output_tokens=None, input_size_bytes=None,
+        max_output_tokens=None, input_size_bytes=None, budget_exempt=None,
 ):
     """None when metering is inactive; a UsageContext otherwise.
 
@@ -143,6 +149,7 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
         user_email=_user_email(user_email, user_id),
         idempotency_key=uuid.uuid4().hex,
         start_time_ns=time.monotonic_ns(),
+        budget_exempt=budget_exempt is True,
     )
     ctx.attribution = _attribution(attribution, headers, ctx.project_id)
     #
@@ -153,7 +160,8 @@ def begin_llm_call(  # pylint: disable=R0913,R0917
 
 def _admit(ctx, mode, max_output_tokens, input_size_bytes):
     """Reserve this call's estimated cost. Only enforce mode turns a refusal into a response."""
-    if ctx.project_id is None:
+    # An exempt call cannot breach a budget, so it is served even when the write path is down
+    if ctx.project_id is None or ctx.budget_exempt:
         return
     #
     if not _write_path_healthy():
@@ -323,6 +331,9 @@ def _clean_attribution(attribution):
         value = attribution.get(key)
         #
         if value is None or value == "":
+            continue
+        #
+        if key == "trigger_source" and value not in TRIGGER_SOURCES:
             continue
         #
         if key in ATTRIBUTION_INT_KEYS:
@@ -557,6 +568,8 @@ def _row(ctx, reading, status):  # pylint: disable=R0914
         "token_source": reading.token_source,
         "duration_ms": _elapsed_ms(ctx),
         "is_error": status >= 400,
+        # Only set when true, so a shared call never needs the column a deploy may not have yet
+        **({"budget_exempt": True} if ctx.budget_exempt else {}),
     }
 
 

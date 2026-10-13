@@ -24,8 +24,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import EVENT_TYPE_LLM
-from .drainer import counter_deltas, event_values
+from .drainer import budgeted, counter_deltas, event_values, feature_budgeted, row_feature
 from ..models.usage_event import UsageEvent
 
 
@@ -46,10 +45,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         try:
             with db.engine.connect() as connection:
                 landed = [dict(row) for row in connection.execute(statement).mappings()]
-                # Only LLM rows feed the counters, and off the queue the drainer's RETURNING
+                # Only budgeted LLM rows feed the counters, and off the queue the drainer's RETURNING
                 # never sees them, so this is their only count
-                if payload.get("event_type") == EVENT_TYPE_LLM:
+                if budgeted([payload]):
                     self.usage_apply_counter_deltas(connection, counter_deltas(landed))
+                elif feature_budgeted([row]):
+                    feature = row_feature(row)
+                    self.usage_apply_counter_deltas(
+                        connection, counter_deltas(landed, lambda _: feature),
+                    )
                 connection.commit()
             #
             return bool(landed)

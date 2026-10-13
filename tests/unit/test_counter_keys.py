@@ -37,7 +37,33 @@ class TestPeriodStart:
 
     def test_unsupported_period_kind_raises(self):
         with pytest.raises(ValueError):
-            counters.period_start(date(2026, 9, 17), period_kind="week")
+            counters.period_start(date(2026, 9, 17), period_kind="year")
+
+    def test_day_and_week_branches_are_ready_but_only_month_is_written(self):
+        # #6006 prep: week starts Monday (2026-09-17 is a Thursday), day is the date itself
+        assert counters.period_start(date(2026, 9, 17), period_kind="week") == date(2026, 9, 14)
+        assert counters.period_start(date(2026, 9, 17), period_kind="day") == date(2026, 9, 17)
+        assert counters.PERIOD_KINDS == ("month",)
+
+
+class TestCounterKeys:
+    ROW = {"project_id": 7, "user_id": 42, "ts": datetime(2026, 9, 17, tzinfo=timezone.utc)}
+
+    def test_llm_keys_are_exactly_project_and_member(self):
+        # Golden: the drainer's LLM keys must stay what they were before counter_keys existed
+        assert counters.counter_keys(self.ROW) == [
+            counters.project_key(7, date(2026, 9, 17)),
+            counters.member_key(7, 42, date(2026, 9, 17)),
+        ]
+
+    def test_no_user_gives_project_key_only(self):
+        keys = counters.counter_keys(dict(self.ROW, user_id=None))
+        assert [key["user_id"] for key in keys] == [0]
+
+    def test_feature_keys_use_the_feature_as_model_name(self):
+        keys = counters.counter_keys(self.ROW, "web_search")
+        assert {key["model_name"] for key in keys} == {"web_search"}
+        assert {key["period_kind"] for key in keys} == {"month"}
 
     def test_wrong_type_raises(self):
         with pytest.raises(TypeError):

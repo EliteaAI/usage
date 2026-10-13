@@ -17,6 +17,14 @@ from usage.methods import gate, reconcile
 
 START = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
 END = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+# The drift pass cuts facts off at now(), so the tests pin now() inside the period
+MID_PERIOD = START + datetime.timedelta(days=15)
+
+
+class _FrozenClock(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return MID_PERIOD if tz else MID_PERIOD.replace(tzinfo=None)
 
 
 class Rows:
@@ -70,6 +78,15 @@ class TestFactTotals:
         build().usage_fact_totals(connection, START, END)
         #
         assert "event_type" in str(connection.statements[0])
+
+    def test_budget_exempt_facts_are_left_out_null_safely(self):
+        # The drainer never counts BYO rows, so summing them here would "repair" counters
+        # upward into enforcement; NULL (shared, pre-migration) rows must still be summed
+        connection = Rows([])
+        #
+        build().usage_fact_totals(connection, START, END)
+        #
+        assert "usage_event.budget_exempt IS NOT true" in str(connection.statements[0])
 
     def test_a_row_without_a_user_counts_only_towards_the_project(self):
         connection = Rows([(42, None, 10, 20, 1000, 1)])
@@ -572,6 +589,9 @@ class TestRedisDrift:
             types.SimpleNamespace(connect=lambda: FakeLockConnection()), raising=False,
         )
         monkeypatch.setattr(reconcile.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(
+            reconcile, "datetime", types.SimpleNamespace(**{**vars(datetime), "datetime": _FrozenClock}),
+        )
         #
         return instance
 

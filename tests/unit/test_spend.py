@@ -309,7 +309,7 @@ class TestUsageDetail:
         for statement in engine.connection.statements:
             where = re.split(r"GROUP BY|ORDER BY", statement.split("WHERE", 1)[1])[0]
             assert set(re.findall(r"usage_event\.(\w+)", where)) == {
-                "project_id", "ts", "event_type",
+                "project_id", "ts", "event_type", "budget_exempt",
             }
 
     def test_the_member_variant_filters_on_user_id_and_nothing_more(self, build):
@@ -320,5 +320,15 @@ class TestUsageDetail:
         for statement in engine.connection.statements:
             where = re.split(r"GROUP BY|ORDER BY", statement.split("WHERE", 1)[1])[0]
             assert set(re.findall(r"usage_event\.(\w+)", where)) == {
-                "project_id", "ts", "event_type", "user_id",
+                "project_id", "ts", "event_type", "user_id", "budget_exempt",
             }
+
+    def test_project_own_model_rows_are_left_out_null_safely(self, build):
+        # Spent-vs-limit must match enforcement: exempt (BYO) rows never count, while NULL
+        # (shared and pre-migration rows) must keep counting, hence IS NOT true, not = false
+        instance, engine = build(Engine(*DETAIL_RESULTS))
+        #
+        instance.usage_read_project_usage_detail(project_id=7, period=PERIOD)
+        #
+        for statement in engine.connection.statements:
+            assert "usage_event.budget_exempt IS NOT true" in statement

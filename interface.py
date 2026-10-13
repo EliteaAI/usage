@@ -48,6 +48,9 @@ CONTEXT_AUTH_KEY = "usage_context"
 # Raw X-Elitea-Attribution value, parked by the interface that stripped it; decoded in hooks
 ATTRIBUTION_AUTH_KEY = "platform_attribution"
 
+# True when the call used a non-shared (project-own) model: recorded, never gated or budgeted
+BUDGET_EXEMPT_AUTH_KEY = "usage_budget_exempt"
+
 # Chat/legacy completions alone gate streamed usage behind include_usage. Responses, messages,
 # converse and the rest always report it, and do not accept the field — sending it risks a 400.
 STREAM_USAGE_PATHS = ("/chat/completions", "/completions")
@@ -78,6 +81,7 @@ def prepare_llm_call(proxy_target, proxy_auth, raw_model_name=None, model_projec
             attribution=proxy_auth.get(ATTRIBUTION_AUTH_KEY),
             max_output_tokens=requested_output_tokens(proxy_target),
             input_size_bytes=request_size_of(proxy_target),
+            budget_exempt=proxy_auth.get(BUDGET_EXEMPT_AUTH_KEY) is True,
         )
         #
         proxy_auth[CONTEXT_AUTH_KEY] = usage_context

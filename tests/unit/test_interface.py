@@ -178,6 +178,20 @@ class TestTheParkedRunFacts:
         #
         assert (began[0]["run_id"], began[0]["attribution"]) == (None, None)
 
+    def test_a_parked_exemption_reaches_the_hook(self, rpc, began):
+        # Parked on proxy_auth rather than passed as an argument, so the litellm interface
+        # can ship before or after this plugin without a TypeError either way
+        self.meter(auth(**{interface.BUDGET_EXEMPT_AUTH_KEY: True}))
+        #
+        assert began[0]["budget_exempt"] is True
+
+    @pytest.mark.parametrize("parked", [None, False, "true", 1])
+    def test_anything_but_true_is_budgeted(self, rpc, began, parked):
+        extra = {} if parked is None else {interface.BUDGET_EXEMPT_AUTH_KEY: parked}
+        self.meter(auth(**extra))
+        #
+        assert began[0]["budget_exempt"] is False
+
 
 class TestTheUsageFrame:
     """Streamed OpenAI-family calls report no tokens unless include_usage is asked for."""

@@ -37,3 +37,8 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
     def usage_get_warnings_dismissible_rpc(self, **kwargs):  # pylint: disable=W0613
         """Whether users may dismiss the budget warning banner."""
         return self.usage_get_warnings_dismissible()
+
+    @web.rpc("usage_get_feature_warning_state", "usage_feature_warning_state_now")
+    def usage_get_feature_warning_state_rpc(self, feature, project_id, user_id=None, **kwargs):  # pylint: disable=W0613
+        """Whether a tool-spend feature limit is nearing for this user, and which scope."""
+        return self.usage_get_feature_warning_state(feature, project_id, user_id)

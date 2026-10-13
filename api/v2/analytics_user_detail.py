@@ -303,11 +303,11 @@ if _API_AVAILABLE:
             usage_event tags every llm/tool row with its run's own root_entity_type/id, but
             has no root_entity_name column — only entity_name, which names the node that made
             one call. The name is therefore read off whichever row IS the run
-            (entity_id == root_entity_id) so a nested run cannot title its parent with a
+            (an.is_run_row()) so a nested run cannot title its parent with a
             sub-agent's name.
             """
             root_name = func.max(case(
-                (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
+                (an.is_run_row(), UsageEvent.entity_name),
                 else_=None,
             ))
             #

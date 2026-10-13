@@ -20,7 +20,7 @@
 import json
 import time
 
-from sqlalchemy import func
+from sqlalchemy import func, literal_column
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import CompileError, ProgrammingError
 
@@ -29,7 +29,8 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._counters import EVENT_TYPE_LLM, member_key, project_key
+from . import _analytics as an
+from ._counters import ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, EVENT_TYPE_TOOL_COST, counter_keys
 from .gate import DEAD_QUEUE_KEY, QUEUE_KEY
 from ..models.usage_counter import UsageCounter
 from ..models.usage_event import UsageEvent
@@ -80,7 +81,7 @@ MEASURES = ("input_tokens", "output_tokens", "cost_nano_usd")
 RETURNING_COLUMNS = (
     UsageEvent.ts, UsageEvent.project_id, UsageEvent.user_id,
     UsageEvent.input_tokens, UsageEvent.output_tokens, UsageEvent.cost_nano_usd,
-    UsageEvent.event_type,
+    UsageEvent.event_type, UsageEvent.idempotency_key,
 )
 
 
@@ -102,7 +103,23 @@ def event_values(rows):
         for column in COST_SPLIT_COLUMNS:
             value.setdefault(column, 0)
         #
+        # The one choke point every usage_event insert passes through regardless of caller, so
+        # stamping it here (rather than in whatever built the row) covers both llm and tool
+        # events. None on lookup failure/no roles, same as a pre-existing row: the reader falls
+        # back to the live project_user_role join for it (#6796).
+        if "role_snapshot" in columns and not value.get("role_snapshot"):
+            value["role_snapshot"] = an.role_names_snapshot(
+                value.get("project_id"), value.get("user_id"),
+            )
+        #
         values.append(value)
+    #
+    # A multi-row VALUES needs the same keys in every row; DEFAULT keeps NULL/server_default
+    present = set().union(*values)
+    #
+    for value in values:
+        for name in present - set(value):
+            value[name] = literal_column("DEFAULT")
     #
     if unknown:
         log.warning(
@@ -112,17 +129,35 @@ def event_values(rows):
     return values
 
 
-def counter_deltas(rows):
+def budgeted(rows):
+    """LLM rows that count toward budgets; exempt ones stay facts only."""
+    return [
+        row for row in rows
+        if row.get("event_type") == EVENT_TYPE_LLM and row.get("budget_exempt") is not True
+    ]
+
+
+def feature_budgeted(rows):
+    """tool_cost rows that count toward their feature's limits; exempt ones stay facts only."""
+    return [
+        row for row in rows
+        if row.get("event_type") == EVENT_TYPE_TOOL_COST and row.get("budget_exempt") is not True
+        and row_feature(row)
+    ]
+
+
+def row_feature(row):
+    """Feature a tool_cost row is counted under (its counter model_name)."""
+    meta = row.get("meta")
+    return meta.get("feature") if isinstance(meta, dict) else None
+
+
+def counter_deltas(rows, model_name=lambda row: ALL_MODELS_SENTINEL):
     """Per-counter-key sums for rows that actually landed. Two keys per row: project and member."""
     deltas = {}
     #
     for row in rows:
-        keys = [project_key(row["project_id"], row["ts"])]
-        #
-        if row.get("user_id"):
-            keys.append(member_key(row["project_id"], row["user_id"], row["ts"]))
-        #
-        for key in keys:
+        for key in counter_keys(row, model_name(row)):
             bucket = deltas.setdefault(
                 tuple(sorted(key.items())),
                 dict(key, call_count=0, **{measure: 0 for measure in MEASURES}),
@@ -133,6 +168,11 @@ def counter_deltas(rows):
                 bucket[measure] += int(row.get(measure) or 0)
     #
     return list(deltas.values())
+
+
+def landed_deltas(landed):
+    """LLM deltas (unchanged) plus per-feature deltas for landed tool_cost rows."""
+    return counter_deltas(budgeted(landed)) + counter_deltas(feature_budgeted(landed), row_feature)
 
 
 def counter_upsert(delta):
@@ -397,9 +437,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         ).returning(*RETURNING_COLUMNS)
         #
         landed = [dict(row) for row in connection.execute(statement).mappings()]
+        # Read off the input rows: RETURNING the column would fail every insert pre-migration
+        exempt = {row.get("idempotency_key") for row in rows if row.get("budget_exempt") is True}
+        meta = {row.get("idempotency_key"): row.get("meta") for row in rows if row.get("meta")}
         #
-        self.usage_apply_counter_deltas(connection, counter_deltas([
-            row for row in landed if row.get("event_type") == EVENT_TYPE_LLM
+        self.usage_apply_counter_deltas(connection, landed_deltas([
+            dict(
+                row, budget_exempt=row.get("idempotency_key") in exempt,
+                meta=meta.get(row.get("idempotency_key")),
+            ) for row in landed
         ]))
         #
         return landed

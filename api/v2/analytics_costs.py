@@ -24,9 +24,9 @@ if _API_AVAILABLE:
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
 
-    _MODEL_LIMIT = 30
-    _AGENT_LIMIT = 20
-    _USER_LIMIT = 20
+    _MODEL_DISPLAY = 30
+    _AGENT_DISPLAY = 20
+    _USER_DISPLAY = 20
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """LLM cost breakdown analytics for the project."""
@@ -223,6 +223,40 @@ if _API_AVAILABLE:
                 log.error("Analytics cost query failed", exc_info=True)
                 return {"error": "Failed to query analytics costs"}, 500
 
+        # Keys that are summed into the Other row; everything else is left None.
+        # Explicit list avoids the Decimal/int isinstance trap and prevents ID columns
+        # (root_entity_id, root_project_id, user_id …) from being accidentally summed.
+        _COLLAPSE_SUM_KEYS = (
+            "calls", "eval_runs",
+            "input_tokens", "output_tokens", "cache_read_tokens",
+            "cache_creation_tokens", "total_tokens",
+            "cost_nano",
+            "input_cost_nano", "output_cost_nano",
+            "cache_read_cost_nano", "cache_creation_cost_nano",
+            "total_cost_sub_nano", "input_cost_sub_nano", "output_cost_sub_nano",
+            "cache_read_cost_sub_nano", "cache_creation_cost_sub_nano",
+        )
+
+        @staticmethod
+        def _collapse_tail(rows, display_limit):
+            """Return rows unchanged when at or under the limit.
+
+            Otherwise keep the top display_limit rows and append one synthetic
+            "Other" row with is_other=True whose numeric fields are the sum of
+            the dropped tail.  Non-summed fields (IDs, names, emails) are None.
+            """
+            if len(rows) <= display_limit:
+                return rows
+            top = rows[:display_limit]
+            tail = rows[display_limit:]
+            other = {k: None for k in tail[0]}
+            for k in PromptLibAPI._COLLAPSE_SUM_KEYS:
+                if k in other:
+                    other[k] = sum(int(r.get(k) or 0) for r in tail)
+            other["is_other"] = True
+            other["below_resolution"] = {}
+            return top + [other]
+
         @staticmethod
         def _kpis(conditions):
             """One scan for every headline number.
@@ -297,15 +331,20 @@ if _API_AVAILABLE:
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
             ).group_by(UsageEvent.model_name).order_by(
                 func.sum(UsageEvent.cost_nano_usd).desc(),
-            ).limit(_MODEL_LIMIT)
+            )
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, _MODEL_DISPLAY)
             display_names = an.model_display_names(project_id) if rows else {}
 
             return [
                 {
                     "model_name": r["model_name"],
-                    "display_name": display_names.get(r["model_name"], r["model_name"]),
+                    "display_name": (
+                        "Other models"
+                        if r.get("is_other")
+                        else display_names.get(r["model_name"], r["model_name"])
+                    ),
                     "calls": r["calls"],
                     "input_tokens": int(r["input_tokens"] or 0),
                     "output_tokens": int(r["output_tokens"] or 0),
@@ -327,19 +366,18 @@ if _API_AVAILABLE:
             root of the run it belongs to, so this reads straight off the row instead of the
             elitea_core original's trace_id join to a separate application-type event.
 
-            entity_name names the node that made one call and there is no root_entity_name, so
-            the label is read only off whichever row IS the run (entity_id == root_entity_id) —
-            otherwise a nested run titles its parent with a sub-agent's name.
+            The label is the application's own name from elitea_core, falling back to the run
+            row's stored name without its version suffix (#6910): rows span every version.
 
             entity_kind (agent/pipeline) comes from elitea_core: root_entity_type is always
-            'application' on the row, pipelines included (#6678).
+            'application' on the row, pipelines included (#6678). The root's own project is
+            part of the key, since a public agent's id belongs to the public project (#6902).
             """
-            root_name = func.max(case(
-                (UsageEvent.entity_id == UsageEvent.root_entity_id, UsageEvent.entity_name),
-                else_=None,
-            ))
+            root_name = an.run_name_expr()
+            root_project = an.root_project_expr()
             columns = [
                 UsageEvent.root_entity_id,
+                root_project.label("root_project_id"),
                 root_name.label("entity_name"),
                 func.count().label("calls"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
@@ -353,21 +391,31 @@ if _API_AVAILABLE:
             statement = select(*columns).where(
                 *conditions, an.is_agent_row(run_scope), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
-                UsageEvent.root_entity_type, UsageEvent.root_entity_id,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
+                UsageEvent.root_entity_type, UsageEvent.root_entity_id, root_project,
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
-            applications, _ = an.entity_meta(project_id, application_ids=[r["root_entity_id"] for r in rows])
+            rows = PromptLibAPI._collapse_tail(rows, _AGENT_DISPLAY)
+            applications = an.application_meta(
+                project_id, refs=[
+                    (r["root_project_id"], r["root_entity_id"]) for r in rows
+                    if not r.get("is_other")
+                ],
+            )
 
             return [
                 {
                     "entity_name": (
-                        r["entity_name"]
-                        or applications.get(r["root_entity_id"], {}).get("name")
-                        or f"Agent #{r['root_entity_id']}"
+                        "Other agents"
+                        if r.get("is_other")
+                        else (
+                            applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("name")
+                            or r["entity_name"]
+                            or f"Agent #{r['root_entity_id']}"
+                        )
                     ),
-                    "entity_id": r["root_entity_id"],
-                    "entity_kind": applications.get(r["root_entity_id"], {}).get("kind"),
+                    "entity_id": None if r.get("is_other") else r["root_entity_id"],
+                    "entity_kind": None if r.get("is_other") else applications.get((r["root_project_id"], r["root_entity_id"]), {}).get("kind"),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),
@@ -409,17 +457,42 @@ if _API_AVAILABLE:
                 *conditions, an.is_evaluation_row(), UsageEvent.root_entity_id.isnot(None),
             ).group_by(
                 UsageEvent.root_entity_id, UsageEvent.root_entity_version_id,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_AGENT_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, _AGENT_DISPLAY)
+            real_rows = [r for r in rows if not r.get("is_other")]
             applications, versions = an.entity_meta(
                 project_id,
-                application_ids=[r["root_entity_id"] for r in rows],
-                version_ids=[r["root_entity_version_id"] for r in rows],
+                application_ids=[r["root_entity_id"] for r in real_rows],
+                version_ids=[r["root_entity_version_id"] for r in real_rows],
             )
 
             result = []
             for r in rows:
+                if r.get("is_other"):
+                    result.append({
+                        "entity_name": "Other agents",
+                        "entity_id": None,
+                        "entity_kind": None,
+                        "version_id": None,
+                        "version_name": None,
+                        "eval_runs": int(r.get("eval_runs") or 0),
+                        "total_cost": an.cost_usd(r["cost_nano"]),
+                        **an.cost_split_usd(r),
+                        "below_resolution": an.below_resolution(r),
+                        "input_tokens": int(r.get("input_tokens") or 0),
+                        "output_tokens": int(r.get("output_tokens") or 0),
+                        "cache_read_tokens": int(r.get("cache_read_tokens") or 0),
+                        "cache_creation_tokens": int(r.get("cache_creation_tokens") or 0),
+                        "total_tokens": int(r.get("total_tokens") or 0),
+                        "calls": int(r.get("calls") or 0),
+                        "avg_cost": (
+                            round(an.cost_usd(r["cost_nano"]) / r["calls"], 9)
+                            if r.get("cost_nano") and r.get("calls") else 0.0
+                        ),
+                    })
+                    continue
                 application = applications.get(r["root_entity_id"], {})
                 version = versions.get(r["root_entity_version_id"], {})
                 result.append({
@@ -465,19 +538,24 @@ if _API_AVAILABLE:
 
             statement = select(*columns).where(*conditions).group_by(
                 UsageEvent.user_id,
-            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc()).limit(_USER_LIMIT)
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
 
             rows = an.fetch_all(statement)
+            rows = PromptLibAPI._collapse_tail(rows, _USER_DISPLAY)
 
             emails = an.label_users(
-                [r["user_id"] for r in rows],
-                {r["user_id"]: r["user_email"] for r in rows if r["user_id"] is not None},
+                [r["user_id"] for r in rows if not r.get("is_other")],
+                {r["user_id"]: r["user_email"] for r in rows if not r.get("is_other") and r["user_id"] is not None},
             )
 
             return [
                 {
-                    "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    "user_id": None if r.get("is_other") else r["user_id"],
+                    "user_email": (
+                        "Other users"
+                        if r.get("is_other")
+                        else emails.get(r["user_id"])
+                    ),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),
                     "below_resolution": an.below_resolution(r),

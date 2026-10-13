@@ -47,23 +47,12 @@ def _strip_model_prefixes(model: str):
 def _model_display_names(project_id: int):
     """Map of configured model name -> display name, for the usage-by-model table.
 
-    Same source of truth as the analytics pages, so one model reads identically in both.
+    The analytics lookup itself, so one model reads identically in both.
     An empty map is a safe outcome: callers keep the raw model name.
     """
-    try:
-        response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-            project_id=project_id, section="llm", include_shared=True,
-        ) or {}
-    except Exception:  # pylint: disable=W0703
-        return {}
+    from ...methods import _analytics as an  # pylint: disable=C0415
     #
-    result = {}
-    #
-    for item in response.get("items") or []:
-        if isinstance(item, dict) and item.get("name"):
-            result[item["name"]] = item.get("display_name") or item["name"]
-    #
-    return result
+    return an.model_display_names(project_id)
 
 
 def _attach_display_names(models: list, display_names: dict):

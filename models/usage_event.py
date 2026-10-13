@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c  # pylint: disable=E0401
@@ -41,6 +41,12 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The actor's project role names, captured once at write time (#6796): project_user_role
+    # is live and hard-deletes a row on a role change or removal, so a role-filtered read that
+    # joined against it lost a user's historical activity the moment their role changed. NULL
+    # on a row written before this column existed; resolve_role_filter's live join stays the
+    # fallback for exactly those rows -- see methods/_analytics.py role_filter_condition.
+    role_snapshot: Mapped[Optional[list]] = mapped_column(ARRAY(Text), nullable=True)
     # Text, not UUID/BIGINT: ids arrive as opaque strings from several entry points
     run_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     conversation_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -49,6 +55,9 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     root_entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     root_entity_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     root_entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Schema the root entity lives in; differs from project_id for a public agent (#6902).
+    # NULL on rows written before it existed, which readers treat as project_id.
+    root_entity_project_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     # Which node inside the run made this call
     entity_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -99,6 +108,10 @@ class UsageEvent(db.Base):  # pylint: disable=R0903
     tool_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # scheduled/webhook/index; NULL is a manual (UI/API) run
+    trigger_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # TRUE for a project-own model: never counted toward budgets. NULL counts, so filter IS NOT TRUE
+    budget_exempt: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     # Sparse extras only. Nothing a report filters on goes here.
     meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
