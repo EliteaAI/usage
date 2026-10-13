@@ -17,7 +17,7 @@
 
 """ Skills analytics over usage_event (#6929) """
 
-from sqlalchemy import Date, and_, asc, case, desc, distinct, func, nulls_last, or_, select
+from sqlalchemy import Date, Integer, String, and_, asc, case, cast, desc, distinct, func, nulls_last, or_, select
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -35,6 +35,7 @@ DETAIL_USERS_LIMIT = 50
 DETAIL_AGENTS_LIMIT = 20
 RECENT_RUNS_LIMIT = 20
 VERSION_SUFFIX_PATTERN = r" \([^()]*\)$"
+PROJECT_ID_PATTERN = r"^[1-9][0-9]{0,8}$"
 
 
 def is_skill_use(event):
@@ -43,6 +44,13 @@ def is_skill_use(event):
 
 def resolve_skill_id(event):
     return case((is_skill_use(event), event.entity_id), else_=event.root_entity_id)
+
+
+def resolve_skill_project_id(event):
+    stored = cast(event.meta["skill_project_id"].as_string(), String)
+    is_project_id = and_(stored != "", func.regexp_replace(stored, PROJECT_ID_PATTERN, "") == "")
+    own_project_id = case((is_project_id, cast(stored, Integer)), else_=None)
+    return func.coalesce(case((is_skill_use(event), own_project_id), else_=None), an.root_project_expr())
 
 
 def build_skill_row_conditions(project_id, dt_from, dt_to, skill_ref=None):
@@ -63,7 +71,7 @@ def build_single_skill_conditions(skill_project_id, skill_id):
             and_(is_skill_use(event), event.entity_id == skill_id),
             and_(~is_skill_use(event), event.root_entity_id == skill_id),
         ),
-        an.root_project_expr() == skill_project_id,
+        resolve_skill_project_id(event) == skill_project_id,
     ]
 
 
@@ -72,7 +80,8 @@ def select_skill_rows(project_id, dt_from, dt_to, skill_ref=None):
     is_use = is_skill_use(event)
     return select(
         resolve_skill_id(event).label("skill_id"),
-        an.root_project_expr().label("skill_project_id"),
+        resolve_skill_project_id(event).label("skill_project_id"),
+        an.root_project_expr().label("root_project_id"),
         case((is_use, 1), else_=0).label("is_use"),
         case((is_use, event.entity_version_id), else_=event.root_entity_version_id).label("version_id"),
         case((or_(is_use, an.is_run_row()), event.entity_name), else_=None).label("skill_name"),
@@ -330,12 +339,13 @@ def fetch_agent_uses(measures):
     return an.fetch_all(select(
         c.root_entity_type,
         c.root_entity_id,
+        c.root_project_id,
         func.count().label("uses"),
         func.count(distinct(c.run_id)).label("runs"),
         func.count(distinct(c.user_id)).label("users"),
         func.max(c.ts).label("last_used"),
     ).where(measures.is_use, c.root_entity_type.in_(an.AGENT_ROOT_TYPES)).group_by(
-        c.root_entity_type, c.root_entity_id,
+        c.root_entity_type, c.root_entity_id, c.root_project_id,
     ).order_by(desc(func.count()), c.root_entity_id).limit(DETAIL_AGENTS_LIMIT))
 
 
@@ -388,17 +398,14 @@ def format_model_breakdown(rows, model_names):
     ]
 
 
-def format_agent_uses(rows, skill_project_id, agents):
-    def describe_agent(agent_id):
-        return agents.get((skill_project_id, agent_id), {})
-
+def format_agent_uses(rows, agents):
     return [
         {
             "entity_id": a["root_entity_id"],
-            "entity_project_id": skill_project_id,
-            "entity_name": describe_agent(a["root_entity_id"]).get("name") or f"Agent #{a['root_entity_id']}",
-            "kind": describe_agent(a["root_entity_id"]).get("kind"),
-            "deleted": (skill_project_id, a["root_entity_id"]) not in agents,
+            "entity_project_id": a["root_project_id"],
+            "entity_name": agents.get(agent_ref(a), {}).get("name") or f"Agent #{a['root_entity_id']}",
+            "kind": agents.get(agent_ref(a), {}).get("kind"),
+            "deleted": agent_ref(a) not in agents,
             "uses": int(a["uses"] or 0),
             "runs": int(a["runs"] or 0),
             "users": int(a["users"] or 0),
@@ -406,6 +413,10 @@ def format_agent_uses(rows, skill_project_id, agents):
         }
         for a in rows
     ]
+
+
+def agent_ref(agent_use):
+    return agent_use["root_project_id"], agent_use["root_entity_id"]
 
 
 def format_recent_runs(rows, conversations, emails, version_names, model_names):
@@ -458,7 +469,7 @@ def build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to):
     identity = describe_skill(skill_id, skill_project_id, head["skill_name"], skills)
     version_names = {v.get("id"): v.get("name") for v in identity["versions"]}
     model_names = an.model_display_names(project_id) if models or recent else {}
-    agent_meta = an.application_meta(project_id, refs=[(skill_project_id, a["root_entity_id"]) for a in agents])
+    agent_meta = an.application_meta(project_id, refs=[agent_ref(a) for a in agents])
     emails = resolve_user_emails(users, recent)
 
     return {
@@ -480,7 +491,7 @@ def build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to):
         "by_trigger_source": [
             {"trigger_source": r["trigger_source"] or TRIGGER_MANUAL, **summarize_totals(r)} for r in triggers
         ],
-        "agents": format_agent_uses(agents, skill_project_id, agent_meta),
+        "agents": format_agent_uses(agents, agent_meta),
         "by_source": [{"source": r["source"] or UNKNOWN_SOURCE, "uses": int(r["uses"] or 0)} for r in sources],
         "recent_runs": format_recent_runs(recent, conversations, emails, version_names, model_names),
     }
