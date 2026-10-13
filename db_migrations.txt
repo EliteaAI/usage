@@ -1,0 +1,15 @@
+# Add needed migrations (SQL + curl/task-based) here
+# Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
+# When release tags are moved - comment with release version will be added
+#
+# All of these only matter where centry.usage_event already exists: create_all provisions a new
+# database with every column, but never alters an existing table. Until a column is added, every
+# drained insert fails with UndefinedColumn and the ledger records nothing.
+
+# R-2.0.7
+Run admin task usage_ensure_role_snapshot_column_task
+Run admin task usage_ensure_root_entity_project_column_task
+Run admin task usage_ensure_budget_exempt_column_task
+
+# R-2.0.8
+Run admin task usage_ensure_trigger_source_column_task
