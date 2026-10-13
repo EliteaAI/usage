@@ -56,3 +56,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Add usage_event.budget_exempt if missing. Safe to rerun. No backfill: old rows count."""
         self.usage_ensure_budget_exempt_column()
         log.info("usage: admin task ensured usage_event.budget_exempt")
+
+    @web.method()
+    def usage_ensure_trigger_source_column_task(self, *args, **kwargs):  # pylint: disable=W0613
+        """Add usage_event.trigger_source if missing (#6881). Safe to rerun. No backfill: rows
+        written before it existed read as manual runs.
+        """
+        self.usage_ensure_trigger_source_column()
+        log.info("usage: admin task ensured usage_event.trigger_source")
