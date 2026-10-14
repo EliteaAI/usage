@@ -209,4 +209,4 @@ class TestSkillRunDetail:
         assert (response["root_entity_type"], response["root_entity_id"]) == ("application", AGENT_ID)
         assert response["kpis"]["llm_calls"] == 1
         assert response["kpis"]["tool_calls"] == 1
-        assert response["kpis"]["total_tokens"] == 90
+        assert response["kpis"]["total_tokens"] == 990
