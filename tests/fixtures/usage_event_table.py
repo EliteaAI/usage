@@ -40,6 +40,7 @@ FAKE_TABLE = Table(
     Column("output_cost_nano_usd", Integer, default=0),
     Column("cache_read_cost_nano_usd", Integer, default=0),
     Column("cache_creation_cost_nano_usd", Integer, default=0),
+    Column("cost_source", String),
     Column("duration_ms", Integer),
     Column("is_error", Boolean, default=False),
     Column("trigger_source", String),
@@ -52,6 +53,7 @@ FakeUsageEvent = types.SimpleNamespace(**{column.name: column for column in FAKE
 def install_engine(monkeypatch, analytics):
     monkeypatch.setattr(analytics, "UsageEvent", FakeUsageEvent)
     monkeypatch.setattr(analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != analytics.SYSTEM_USER_ID)
+    monkeypatch.setattr(analytics, "MANUAL_RUN", FakeUsageEvent.trigger_source.is_(None))
     monkeypatch.setattr(analytics, "COST_SPLIT_COLUMNS", {
         "input_cost": FakeUsageEvent.input_cost_nano_usd,
         "output_cost": FakeUsageEvent.output_cost_nano_usd,
@@ -87,6 +89,10 @@ def trace_rows(db_engine, analytics, *conditions):
 
 
 def load_run_detail(monkeypatch):
+    return load_api_module(monkeypatch, "analytics_run_detail")
+
+
+def load_api_module(monkeypatch, name):
     tools = sys.modules["tools"]
     monkeypatch.setattr(tools, "api_tools", types.SimpleNamespace(
         APIModeHandler=object, APIBase=object, with_modes=lambda params: params,
@@ -100,5 +106,7 @@ def load_run_detail(monkeypatch):
     flask_stub = types.ModuleType("flask")
     flask_stub.request = types.SimpleNamespace(args={})
     monkeypatch.setitem(sys.modules, "flask", flask_stub)
-    monkeypatch.delitem(sys.modules, "usage.api.v2.analytics_run_detail", raising=False)
-    return importlib.import_module("usage.api.v2.analytics_run_detail")
+    monkeypatch.delitem(sys.modules, f"usage.api.v2.{name}", raising=False)
+    module = importlib.import_module(f"usage.api.v2.{name}")
+    monkeypatch.setattr(module, "UsageEvent", FakeUsageEvent, raising=False)
+    return module

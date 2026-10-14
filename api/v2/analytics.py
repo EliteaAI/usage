@@ -37,7 +37,7 @@ if _API_AVAILABLE:
                 "tool calls in usage_event."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need a project's AI adoption dashboard: how many members use AI, how many LLM calls, tool runs and agent runs happened, how many tokens and how much cost they consumed, who the top AI adopters are, and the daily trend. Do not use this tool for per-user, per-tool or per-agent drill-downs — use the corresponding list endpoints. Do not use it for chat message counts or error-health views, which come from the tracing analytics endpoint.",
+            mcp_description="Use this tool when you need a project's AI adoption dashboard: how many members use AI, how many LLM calls, tool runs, agent runs and skill runs happened, how many tokens and how much cost they consumed, who the top AI adopters are, and the daily trend. Do not use this tool for per-user, per-tool or per-agent drill-downs — use the corresponding list endpoints. Do not use it for chat message counts or error-health views, which come from the tracing analytics endpoint.",
             tags=["usage/analytics"],
             parameters=[
                 {
@@ -80,6 +80,7 @@ if _API_AVAILABLE:
                                     "llm_calls": 120,
                                     "tool_runs": 45,
                                     "agent_runs": 12,
+                                    "skill_runs": 3,
                                     "total_tokens": 98304,
                                     "total_llm_cost": 1.234567,
                                     "unique_tools": 7,
@@ -93,6 +94,7 @@ if _API_AVAILABLE:
                                         "llm_calls": 60,
                                         "tool_runs": 20,
                                         "agent_runs": 5,
+                                        "skill_runs": 2,
                                     }
                                 ],
                                 "daily_activity": [
@@ -101,6 +103,7 @@ if _API_AVAILABLE:
                                         "llm_calls": 20,
                                         "tool_runs": 8,
                                         "agent_runs": 2,
+                                        "skill_runs": 1,
                                         "active_users": 3,
                                     }
                                 ],
@@ -164,6 +167,7 @@ if _API_AVAILABLE:
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
+                an.skill_runs_expr().label("skill_runs"),
                 func.sum(an.total_tokens_expr()).label("total_tokens"),
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 # nullif so a blank name is not its own distinct value
@@ -195,6 +199,7 @@ if _API_AVAILABLE:
                 "llm_calls": int(row["llm_calls"] or 0) if row else 0,
                 "tool_runs": int(row["tool_runs"] or 0) if row else 0,
                 "agent_runs": int(row["agent_runs"] or 0) if row else 0,
+                "skill_runs": int(row["skill_runs"] or 0) if row else 0,
                 "total_tokens": int(row["total_tokens"] or 0) if row else 0,
                 "total_llm_cost": an.cost_usd(row["cost_nano"] if row else 0),
                 "unique_tools": int(row["unique_tools"] or 0) if row else 0,
@@ -222,6 +227,7 @@ if _API_AVAILABLE:
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
+                an.skill_runs_expr().label("skill_runs"),
             ).where(*conditions).group_by(
                 UsageEvent.user_id,
             ).order_by(func.count().desc()).limit(_LEADERBOARD_LIMIT))
@@ -239,6 +245,7 @@ if _API_AVAILABLE:
                     "llm_calls": int(r["llm_calls"] or 0),
                     "tool_runs": int(r["tool_runs"] or 0),
                     "agent_runs": int(r["agent_runs"] or 0),
+                    "skill_runs": int(r["skill_runs"] or 0),
                 }
                 for r in rows
             ]
@@ -253,6 +260,7 @@ if _API_AVAILABLE:
                 an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
+                an.skill_runs_expr().label("skill_runs"),
                 an.manual_users_expr().label("active_users"),
             ).where(*conditions).group_by(day).order_by(day))
             #
@@ -262,6 +270,7 @@ if _API_AVAILABLE:
                     "llm_calls": int(r["llm_calls"] or 0),
                     "tool_runs": int(r["tool_runs"] or 0),
                     "agent_runs": int(r["agent_runs"] or 0),
+                    "skill_runs": int(r["skill_runs"] or 0),
                     "active_users": r["active_users"] or 0,
                 }
                 for r in rows

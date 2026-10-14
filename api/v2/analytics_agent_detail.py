@@ -20,10 +20,12 @@ if _API_AVAILABLE:
     from sqlalchemy import case, distinct, func, select
 
     from ...methods import _analytics as an
+    from ...methods import _skill_analytics as sa
     from ...models.usage_event import UsageEvent
 
     _USERS_LIMIT = 50
     _TOOLS_LIMIT = 30
+    _SKILLS_LIMIT = 30
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """Full breakdown for one agent/pipeline."""
@@ -32,12 +34,12 @@ if _API_AVAILABLE:
             name="Get Agent Analytics Detail",
             description=(
                 "Returns the full usage breakdown for one agent/pipeline: KPIs, its users, "
-                "the tools it called, and its daily activity trend. Evaluation tokens and spend "
+                "the tools it called, the skills it used, and its daily activity trend. Evaluation tokens and spend "
                 "are reported separately under evaluation (null for a single run) and are not "
                 "part of kpis."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need the full drill-down for one specific agent or pipeline: its KPIs, which users ran it, which tools it called, and its daily trend. Do not use this tool for a leaderboard across agents — use List Agent Analytics. Do not use for project-wide KPIs — use Get Project AI Analytics.",
+            mcp_description="Use this tool when you need the full drill-down for one specific agent or pipeline: its KPIs, which users ran it, which tools it called, which skills it used, and its daily trend. Do not use this tool for a leaderboard across agents — use List Agent Analytics. Do not use for project-wide KPIs — use Get Project AI Analytics.",
             tags=["usage/analytics"],
             parameters=[
                 {
@@ -123,6 +125,18 @@ if _API_AVAILABLE:
                                 "tools": [
                                     {"tool_name": "web_search", "calls": 30},
                                 ],
+                                "skills_total": 1,
+                                "skills_truncated": False,
+                                "skills": [
+                                    {
+                                        "skill_id": 174,
+                                        "skill_project_id": 1,
+                                        "skill_name": "summarizer",
+                                        "deleted": False,
+                                        "uses": 9,
+                                        "runs": 6,
+                                    },
+                                ],
                                 "daily_usage": [
                                     {"date": "2025-01-01", "events": 20, "errors": 1},
                                 ],
@@ -166,6 +180,9 @@ if _API_AVAILABLE:
                     return {"error": "Agent not found in the selected range"}, 404
 
                 users_total, users_truncated, users = self._users(conditions, run_scope)
+                skills_total, skills_truncated, skills = self._skills(
+                    project_id, self._skill_conditions(project_id, entity_id, dt_from, dt_to, run_scope),
+                )
 
                 evaluation = None if run_scope else self._evaluation(
                     an.base_filters(project_id, dt_from, dt_to) + [
@@ -183,6 +200,9 @@ if _API_AVAILABLE:
                     "users_truncated": users_truncated,
                     "users": users,
                     "tools": self._tools(conditions),
+                    "skills_total": skills_total,
+                    "skills_truncated": skills_truncated,
+                    "skills": skills,
                     "daily_usage": self._daily_usage(conditions, run_scope),
                 }, 200
             except Exception:  # pylint: disable=W0703
@@ -339,6 +359,42 @@ if _API_AVAILABLE:
             #
             return [
                 {"tool_name": r["tool_name"], "calls": r["calls"]}
+                for r in rows
+            ]
+
+        @staticmethod
+        def _skill_conditions(project_id, entity_id, dt_from, dt_to, run_scope=None):
+            return an.base_filters(
+                project_id, dt_from, dt_to, run_scope=run_scope, event_types=(an.EVENT_SKILL,),
+            ) + [
+                an.is_agent_row(run_scope),
+                UsageEvent.root_entity_id == entity_id,
+                UsageEvent.entity_id.isnot(None),
+            ]
+
+        @staticmethod
+        def _skills(project_id, conditions):
+            skill_project = sa.resolve_skill_project_id(UsageEvent)
+            uses_col = func.count().label("uses")
+            grouped = select(
+                UsageEvent.entity_id,
+                skill_project.label("skill_project_id"),
+                func.max(UsageEvent.entity_name).label("skill_name"),
+                uses_col,
+                func.count(distinct(UsageEvent.run_id)).label("runs"),
+            ).where(*conditions).group_by(
+                UsageEvent.entity_id, skill_project,
+            )
+            rows = an.fetch_all(grouped.order_by(uses_col.desc()).limit(_SKILLS_LIMIT))
+            total_row = an.fetch_one(select(func.count().label("total")).select_from(grouped.subquery()))
+            skills_total = (total_row["total"] if total_row else 0) or 0
+            skills, _ = sa.fetch_skill_meta(project_id, [(r["skill_project_id"], r["entity_id"]) for r in rows])
+            return skills_total, skills_total > len(rows), [
+                {
+                    **sa.identify_skill(r["entity_id"], r["skill_project_id"], r["skill_name"], skills),
+                    "uses": int(r["uses"] or 0),
+                    "runs": int(r["runs"] or 0),
+                }
                 for r in rows
             ]
 

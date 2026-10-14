@@ -22,10 +22,12 @@ if _API_AVAILABLE:
     from sqlalchemy import and_, case, distinct, func, select
 
     from ...methods import _analytics as an
+    from ...methods import _skill_analytics as sa
     from ...models.usage_event import UsageEvent
 
     _MODEL_DISPLAY = 30
     _AGENT_DISPLAY = 20
+    _SKILL_DISPLAY = 20
     _USER_DISPLAY = 20
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -34,13 +36,13 @@ if _API_AVAILABLE:
         @register_openapi(
             name="Get Analytics Cost Breakdown",
             description=(
-                "Returns cost and token KPIs plus per-model, per-agent, per-evaluation, per-user "
-                "and daily breakdowns of LLM spend for a project, aggregated from usage_event. "
+                "Returns cost and token KPIs plus per-model, per-agent, per-skill, per-evaluation, "
+                "per-user and daily breakdowns of LLM spend for a project, aggregated from usage_event. "
                 "Evaluation spend is included in the totals, per-model, per-user and daily "
                 "figures, and excluded from per-agent."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need LLM cost or token breakdowns by model, by agent, by user, or over time. Do not use this tool for AI adoption KPIs or a project's overall activity dashboard — use Get Project AI Analytics. Do not use for per-tool drill-downs — use the tool analytics endpoints. This endpoint is best for 'where is the money/tokens going.'",
+            mcp_description="Use this tool when you need LLM cost or token breakdowns by model, by agent, by skill, by user, or over time. Do not use this tool for AI adoption KPIs or a project's overall activity dashboard — use Get Project AI Analytics. Do not use for per-tool drill-downs — use the tool analytics endpoints. This endpoint is best for 'where is the money/tokens going.'",
             tags=["usage/analytics"],
             parameters=[
                 {
@@ -124,6 +126,25 @@ if _API_AVAILABLE:
                                         "total_tokens": 2100000,
                                         "calls": 300,
                                         "avg_cost": 0.014,
+                                    }
+                                ],
+                                "by_skill": [
+                                    {
+                                        "skill_id": 174,
+                                        "skill_project_id": 1,
+                                        "skill_name": "summarizer",
+                                        "deleted": False,
+                                        "total_cost": 0.84,
+                                        "input_cost": 0.6,
+                                        "output_cost": 0.2,
+                                        "cache_read_cost": 0.03,
+                                        "cache_creation_cost": 0.01,
+                                        "input_tokens": 300000,
+                                        "output_tokens": 90000,
+                                        "cache_read_tokens": 12000,
+                                        "cache_creation_tokens": 4000,
+                                        "total_tokens": 406000,
+                                        "calls": 40,
                                     }
                                 ],
                                 "by_evaluation": [
@@ -214,6 +235,7 @@ if _API_AVAILABLE:
                     "kpis": self._kpis(conditions),
                     "by_model": self._by_model(project_id, conditions),
                     "by_agent": self._by_agent(project_id, conditions, run_scope),
+                    "by_skill": self._by_skill(project_id, conditions),
                     "by_evaluation": self._by_evaluation(project_id, conditions),
                     "by_user": self._by_user(conditions),
                     "daily": self._daily(conditions),
@@ -432,6 +454,58 @@ if _API_AVAILABLE:
                 }
                 for r in rows
             ]
+
+        @staticmethod
+        def _by_skill(project_id, conditions):
+            root_project = an.root_project_expr()
+            columns = [
+                UsageEvent.root_entity_id,
+                root_project.label("root_project_id"),
+                an.run_name_expr().label("skill_name"),
+                func.count().label("calls"),
+                func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
+                func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens"),
+                func.sum(func.coalesce(UsageEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                func.sum(func.coalesce(UsageEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ] + an.cost_split_sums() + an.below_resolution_sums()
+
+            statement = select(*columns).where(
+                *conditions, an.is_skill_run_row(),
+            ).group_by(
+                UsageEvent.root_entity_id, root_project,
+            ).order_by(func.sum(UsageEvent.cost_nano_usd).desc())
+
+            rows = PromptLibAPI._collapse_tail(an.fetch_all(statement), _SKILL_DISPLAY)
+            skills, _ = sa.fetch_skill_meta(project_id, [
+                (r["root_project_id"], r["root_entity_id"]) for r in rows if not r.get("is_other")
+            ])
+
+            return [
+                {
+                    **PromptLibAPI._skill_identity(r, skills),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
+                    **an.cost_split_usd(r),
+                    "below_resolution": an.below_resolution(r),
+                    "input_tokens": int(r["input_tokens"] or 0),
+                    "output_tokens": int(r["output_tokens"] or 0),
+                    "cache_read_tokens": int(r["cache_read_tokens"] or 0),
+                    "cache_creation_tokens": int(r["cache_creation_tokens"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "calls": r["calls"] or 0,
+                }
+                for r in rows
+            ]
+
+        @staticmethod
+        def _skill_identity(row, skills):
+            if row.get("is_other"):
+                return {
+                    "skill_id": None, "skill_project_id": None, "skill_name": "Other skills",
+                    "deleted": False, "is_other": True,
+                }
+            return sa.identify_skill(row["root_entity_id"], row["root_project_id"], row["skill_name"], skills)
 
         @staticmethod
         def _by_evaluation(project_id, conditions):
