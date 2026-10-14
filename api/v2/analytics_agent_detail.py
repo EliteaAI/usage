@@ -17,7 +17,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import case, distinct, func, select
+    from sqlalchemy import case, distinct, func, or_, select
 
     from ...methods import _analytics as an
     from ...methods import _skill_analytics as sa
@@ -364,13 +364,30 @@ if _API_AVAILABLE:
 
         @staticmethod
         def _skill_conditions(project_id, entity_id, dt_from, dt_to, run_scope=None):
-            return an.base_filters(
+            conditions = an.base_filters(
                 project_id, dt_from, dt_to, run_scope=run_scope, event_types=(an.EVENT_SKILL,),
             ) + [
                 an.is_agent_row(run_scope),
                 UsageEvent.root_entity_id == entity_id,
                 UsageEvent.entity_id.isnot(None),
             ]
+            if run_scope is None or run_scope.eval_run_id is None:
+                conditions.append(or_(
+                    UsageEvent.run_id.is_(None),
+                    UsageEvent.run_id.notin_(
+                        PromptLibAPI._evaluation_run_ids(project_id, entity_id, dt_from, dt_to),
+                    ),
+                ))
+            return conditions
+
+        @staticmethod
+        def _evaluation_run_ids(project_id, entity_id, dt_from, dt_to):
+            return select(UsageEvent.run_id).where(
+                *an.base_filters(project_id, dt_from, dt_to, human_only=False, event_types=None),
+                UsageEvent.root_entity_id == entity_id,
+                an.is_evaluation_row(),
+                UsageEvent.run_id.isnot(None),
+            ).correlate(None)
 
         @staticmethod
         def _skills(project_id, conditions):

@@ -344,6 +344,43 @@ class TestAgentDetailSkills:
 
         assert agent_skills(api) == []
 
+    def test_an_evaluation_cases_uses_never_count(self, engine, api, meta):
+        agent_call(engine, run_id="eval-run-1", entity_type="evaluation", entity_id=7)
+        use(engine, seconds=1, run_id="eval-run-1")
+
+        assert agent_skills(api) == []
+
+    def test_a_plain_run_counts_beside_an_evaluation(self, engine, api, meta):
+        agent_call(engine, run_id="eval-run-1", entity_type="evaluation", entity_id=7)
+        use(engine, seconds=1, run_id="eval-run-1")
+        agent_call(engine, seconds=2, run_id=None, entity_type="evaluation", entity_id=8)
+        agent_call(engine, seconds=2)
+        use(engine, seconds=3)
+
+        assert [(r["skill_id"], r["uses"], r["runs"]) for r in agent_skills(api)] == [(SKILL_ID, 1, 1)]
+
+    def test_a_use_without_a_run_id_still_counts_beside_an_evaluation(self, engine, api, meta):
+        agent_call(engine, run_id="eval-run-1", entity_type="evaluation", entity_id=7)
+        use(engine, seconds=1, run_id=None)
+
+        assert [(r["skill_id"], r["uses"]) for r in agent_skills(api)] == [(SKILL_ID, 1)]
+
+    def test_another_agents_evaluation_leaves_this_agents_run_alone(self, engine, api, meta):
+        agent_call(engine, root_entity_id=OTHER_AGENT_ID, entity_type="evaluation", entity_id=7)
+        use(engine, seconds=1)
+
+        assert [(r["skill_id"], r["uses"]) for r in agent_skills(api)] == [(SKILL_ID, 1)]
+
+    def test_an_eval_run_scope_keeps_its_cases_uses(self, engine, api, meta):
+        agent_call(engine, run_id="eval-run-1", entity_type="evaluation", entity_id=7)
+        use(engine, seconds=1, run_id="eval-run-1")
+        detail = api.analytics_agent_detail.PromptLibAPI
+        run_scope = _analytics.RunScope(eval_run_id=7, platform_run_id="eval-run-1")
+
+        _, _, rows = detail._skills(PROJECT_ID, detail._skill_conditions(PROJECT_ID, AGENT_ID, *WINDOW, run_scope))
+
+        assert [(r["skill_id"], r["uses"]) for r in rows] == [(SKILL_ID, 1)]
+
     def test_every_skill_is_counted_when_the_list_is_capped(self, engine, api, meta, monkeypatch):
         monkeypatch.setattr(api.analytics_agent_detail, "_SKILLS_LIMIT", 2)
         use(engine, entity_id=OTHER_SKILL_ID, entity_name="pirate")
