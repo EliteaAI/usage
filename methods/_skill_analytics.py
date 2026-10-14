@@ -36,6 +36,7 @@ DETAIL_AGENTS_LIMIT = 20
 RECENT_RUNS_LIMIT = 20
 VERSION_SUFFIX_PATTERN = r" \([^()]*\)$"
 PROJECT_ID_PATTERN = r"^[1-9][0-9]{0,8}$"
+SKILL_IDENTITY_KEYS = ("skill_id", "skill_project_id", "skill_name", "deleted")
 
 
 def is_skill_use(event):
@@ -234,6 +235,11 @@ def describe_skill(skill_id, skill_project_id, stored_name, skills):
         "icon_meta": (meta or {}).get("icon_meta") or {},
         "versions": (meta or {}).get("versions") or [],
     }
+
+
+def identify_skill(skill_id, skill_project_id, stored_name, skills):
+    described = describe_skill(skill_id, skill_project_id, stored_name, skills)
+    return {key: described[key] for key in SKILL_IDENTITY_KEYS}
 
 
 def resolve_sort_column(sort_by, name_column, columns_by_label):

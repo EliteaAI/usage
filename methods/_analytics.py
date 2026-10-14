@@ -469,6 +469,14 @@ def agent_error_runs_expr(run_scope=None):
     )))
 
 
+def is_skill_run_row():
+    return and_(UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, UsageEvent.root_entity_id.isnot(None))
+
+
+def skill_runs_expr():
+    return func.count(distinct(case((is_skill_run_row(), UsageEvent.run_id), else_=None)))
+
+
 def is_agent_row(run_scope=None):
     """Agent/pipeline runs, excluding evaluation calls against them (#6677).
 

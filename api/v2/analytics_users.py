@@ -209,6 +209,7 @@ if _API_AVAILABLE:
                 tool_col = an.tool_runs_expr().label("tool_events")
                 # D4 fix: distinct run_id, not a row count — an agent run makes many calls
                 agent_col = an.agent_runs_expr(run_scope).label("agent_events")
+                skill_col = an.skill_runs_expr().label("skill_events")
                 errors_col = an.count_where(UsageEvent.is_error.is_(True)).label("errors")
                 # D1 fix: no is_error zeroing — a provider that charged for an errored call
                 # is still owed that charge
@@ -237,6 +238,7 @@ if _API_AVAILABLE:
                     llm_col,
                     tool_col,
                     agent_col,
+                    skill_col,
                     errors_col,
                     total_tokens_col,
                     input_tokens_col,
@@ -283,6 +285,7 @@ if _API_AVAILABLE:
                             "llm_events": int(r["llm_events"] or 0),
                             "tool_events": int(r["tool_events"] or 0),
                             "agent_events": int(r["agent_events"] or 0),
+                            "skill_events": int(r["skill_events"] or 0),
                             # No socketio-style chat event exists in usage_event; the UI
                             # renders this column, so the key stays, always zero
                             "chat_events": 0,
