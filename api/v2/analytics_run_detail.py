@@ -86,6 +86,7 @@ if _API_AVAILABLE:
                     UsageEvent.model_name,
                     UsageEvent.tool_name,
                     UsageEvent.input_tokens,
+                    UsageEvent.billable_input_tokens,
                     UsageEvent.output_tokens,
                     UsageEvent.cache_read_tokens,
                     UsageEvent.cache_creation_tokens,
@@ -126,7 +127,11 @@ if _API_AVAILABLE:
             errors = 0
 
             for row in rows:
-                total_tokens += int(row["input_tokens"] or 0) + int(row["output_tokens"] or 0)
+                # Same rule as an.total_tokens_expr(), so a run adds up to its agent's total
+                total_tokens += (
+                    int(row["billable_input_tokens"] or 0) + int(row["output_tokens"] or 0)
+                    + int(row["cache_read_tokens"] or 0) + int(row["cache_creation_tokens"] or 0)
+                )
                 total_cost_nano_usd += int(row["cost_nano_usd"] or 0)
                 if row["is_error"]:
                     errors += 1
@@ -138,6 +143,7 @@ if _API_AVAILABLE:
                         "entity_name": row["entity_name"],
                         "model_name": row["model_name"],
                         "input_tokens": int(row["input_tokens"] or 0),
+                        "billable_input_tokens": int(row["billable_input_tokens"] or 0),
                         "output_tokens": int(row["output_tokens"] or 0),
                         "cache_read_tokens": int(row["cache_read_tokens"] or 0),
                         "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
