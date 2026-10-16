@@ -22,8 +22,10 @@ if _API_AVAILABLE:
 
     _SORT_WHITELIST = frozenset([
         "total_events", "active_days", "llm_events", "tool_events",
-        "agent_events", "chat_events", "errors", "user_email",
+        "agent_events", "skill_events", "chat_events", "errors", "user_email",
         "total_tokens", "llm_cost",
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+        *an.COST_SPLIT_COLUMNS,
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -92,8 +94,10 @@ if _API_AVAILABLE:
                         "type": "string",
                         "enum": [
                             "total_events", "active_days", "llm_events",
-                            "tool_events", "agent_events", "chat_events",
+                            "tool_events", "agent_events", "skill_events", "chat_events",
                             "errors", "user_email", "total_tokens", "llm_cost",
+                            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+                            "input_cost", "output_cost", "cache_read_cost", "cache_creation_cost",
                         ],
                         "default": "total_events",
                     },
@@ -230,6 +234,10 @@ if _API_AVAILABLE:
                     func.coalesce(UsageEvent.cost_nano_usd, 0),
                 ).label("cost_nano")
 
+                cost_split_cols = {
+                    key: func.sum(func.coalesce(column, 0)).label(f"{key}_nano")
+                    for key, column in an.COST_SPLIT_COLUMNS.items()
+                }
                 statement = select(
                     UsageEvent.user_id,
                     email_col,
@@ -246,7 +254,7 @@ if _API_AVAILABLE:
                     cache_read_tokens_col,
                     cache_creation_tokens_col,
                     cost_nano_col,
-                    *an.cost_split_sums(),
+                    *cost_split_cols.values(),
                 ).where(*conditions).group_by(UsageEvent.user_id)
 
                 sort_map = {
@@ -255,6 +263,7 @@ if _API_AVAILABLE:
                     "llm_events": llm_col,
                     "tool_events": tool_col,
                     "agent_events": agent_col,
+                    "skill_events": skill_col,
                     # chat_events has no usage_event equivalent; unsortable, kept in the
                     # whitelist only so a client passing it does not fall through to an error
                     "chat_events": literal(0),
@@ -262,10 +271,15 @@ if _API_AVAILABLE:
                     "user_email": email_col,
                     "total_tokens": total_tokens_col,
                     "llm_cost": cost_nano_col,
+                    "input_tokens": input_tokens_col,
+                    "output_tokens": output_tokens_col,
+                    "cache_read_tokens": cache_read_tokens_col,
+                    "cache_creation_tokens": cache_creation_tokens_col,
+                    **{key: col for key, col in zip(an.COST_SPLIT_COLUMNS, cost_split_cols.values())},
                 }
                 col = sort_map.get(sort_by, total_events_col)
                 order_fn = desc if sort_order == "desc" else asc
-                statement = statement.order_by(order_fn(col)).offset(offset).limit(limit)
+                statement = statement.order_by(order_fn(col), UsageEvent.user_id).offset(offset).limit(limit)
 
                 rows = an.fetch_all(statement)
 
