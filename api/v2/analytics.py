@@ -279,8 +279,10 @@ if _API_AVAILABLE:
         @staticmethod
         def _models(project_id, conditions):
             """ Per-model call volume """
+            model_scope = an.model_scope_expr()
             rows = an.fetch_all(select(
                 UsageEvent.model_name,
+                model_scope.label("model_scope"),
                 func.count().label("calls"),
                 func.count(distinct(UsageEvent.user_id)).label("users"),
                 func.avg(UsageEvent.duration_ms).label("avg_duration_ms"),
@@ -289,15 +291,16 @@ if _API_AVAILABLE:
                 UsageEvent.model_name.isnot(None),
                 UsageEvent.model_name != "",
             ).group_by(
-                UsageEvent.model_name,
+                UsageEvent.model_name, model_scope,
             ).order_by(func.count().desc()).limit(_MODEL_LIMIT))
             #
-            display_names = an.model_display_names(project_id) if rows else {}
+            labels = an.model_labels(project_id, rows) if rows else an.ModelLabels()
             #
             return [
                 {
                     "model_name": r["model_name"],
-                    "display_name": display_names.get(r["model_name"], r["model_name"]),
+                    "model_scope": r["model_scope"],
+                    "display_name": labels.label(r["model_name"], r["model_scope"]),
                     "calls": r["calls"],
                     "users": r["users"],
                     "avg_duration_ms": an.rounded(r["avg_duration_ms"], 1),

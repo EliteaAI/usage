@@ -94,6 +94,7 @@ def select_skill_rows(project_id, dt_from, dt_to, skill_ref=None):
         event.root_entity_id,
         event.event_type,
         event.model_name,
+        an.model_scope_expr().label("model_scope"),
         event.trigger_source,
         event.duration_ms,
         event.is_error,
@@ -317,11 +318,12 @@ def fetch_model_breakdown(measures):
     c = measures.rows.c
     return an.fetch_all(select(
         c.model_name,
+        c.model_scope,
         measures.count_runs().label("runs"),
         func.count().label("calls"),
         measures.sum_over_runs(c.total_tokens).label("total_tokens"),
         measures.sum_over_runs(c.cost_nano_usd).label("cost_nano"),
-    ).where(measures.is_run, c.event_type == an.EVENT_LLM).group_by(c.model_name).order_by(
+    ).where(measures.is_run, c.event_type == an.EVENT_LLM).group_by(c.model_name, c.model_scope).order_by(
         desc(func.count()), c.model_name,
     ))
 
@@ -372,6 +374,7 @@ def fetch_recent_runs(measures):
         func.max(c.user_id).label("user_id"),
         func.max(c.version_id).label("version_id"),
         func.max(c.model_name).label("model_name"),
+        func.max(c.model_scope).label("model_scope"),
         func.max(c.trigger_source).label("trigger_source"),
         measures.sum_over_runs(c.total_tokens).label("total_tokens"),
         measures.sum_over_runs(c.cost_nano_usd).label("cost_nano"),
@@ -386,7 +389,9 @@ def label_version(version_id, version_names):
     return version_names.get(version_id) or f"Version #{version_id}"
 
 
-def label_model(model_name, model_names):
+def label_model(model_name, model_names, scope=None):
+    if isinstance(model_names, an.ModelLabels):
+        return model_names.label(model_name, scope or an.MODEL_SCOPE_SHARED)
     return model_names.get(model_name) or model_name
 
 
@@ -394,7 +399,8 @@ def format_model_breakdown(rows, model_names):
     return [
         {
             "model_name": r["model_name"],
-            "display_name": label_model(r["model_name"], model_names),
+            "model_scope": r.get("model_scope"),
+            "display_name": label_model(r["model_name"], model_names, r.get("model_scope")),
             "runs": int(r["runs"] or 0),
             "calls": int(r["calls"] or 0),
             "total_tokens": int(r["total_tokens"] or 0),
@@ -436,7 +442,7 @@ def format_recent_runs(rows, conversations, emails, version_names, model_names):
             "user_email": emails.get(r["user_id"]),
             "version_id": r["version_id"],
             "version_name": label_version(r["version_id"], version_names),
-            "model_name": label_model(r["model_name"], model_names),
+            "model_name": label_model(r["model_name"], model_names, r.get("model_scope")),
             "trigger_source": r["trigger_source"] or TRIGGER_MANUAL,
             "total_tokens": int(r["total_tokens"] or 0),
             "cost": an.cost_usd(r["cost_nano"]),
@@ -474,7 +480,7 @@ def build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to):
     )
     identity = describe_skill(skill_id, skill_project_id, head["skill_name"], skills)
     version_names = {v.get("id"): v.get("name") for v in identity["versions"]}
-    model_names = an.model_display_names(project_id) if models or recent else {}
+    model_names = an.model_labels(project_id, models) if models or recent else {}
     agent_meta = an.application_meta(project_id, refs=[agent_ref(a) for a in agents])
     emails = resolve_user_emails(users, recent)
 

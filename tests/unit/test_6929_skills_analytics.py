@@ -33,7 +33,7 @@ def engine(monkeypatch):
     monkeypatch.setattr(_analytics, "application_meta", lambda project_id, refs=(): {
         (PROJECT_ID, AGENT_ID): {"id": AGENT_ID, "name": "reviewer", "kind": "agent"},
     })
-    monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {"gpt-x": "GPT X"})
+    monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {"gpt-x": {"shared": "GPT X"}})
     monkeypatch.setattr(_analytics, "label_users", lambda user_ids, stored=None: {
         11: "ann@example.com", 12: "bob@example.com",
     })
