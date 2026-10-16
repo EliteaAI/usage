@@ -79,6 +79,8 @@ HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 # Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881)
 MANUAL_RUN = UsageEvent.trigger_source.is_(None)
 
+VERSION_SUFFIX_PATTERN = r" \(([^()]*)\)$"
+
 # Platform-managed roles that project creation copies into every project's role set (#6794):
 # super_admin is seeded into mode="default" and system is the pre-existing per-project role.
 # Neither is a role a user picks, so both are hidden from the analytics role filter — mirrors
@@ -520,6 +522,7 @@ def run_trace_statement(conditions):
         UsageEvent.root_entity_type,
         UsageEvent.root_entity_id,
         UsageEvent.root_entity_version_id,
+        root_project_expr().label("root_project_id"),
         UsageEvent.user_id,
         UsageEvent.event_type,
         UsageEvent.model_name,
@@ -537,19 +540,17 @@ def run_trace_statement(conditions):
     ).where(*conditions).order_by(UsageEvent.ts.asc())
 
 
+def pick_run_row_name():
+    return func.max(case((is_run_row(), UsageEvent.entity_name), else_=None))
+
+
 def run_name_expr():
     """Name of the run row (is_run_row), never a child call's, without its version.
 
     The run row is stored as "<name> (<version>)", but agent tables aggregate every version of
     an entity, so the suffix would label the whole row as one version (#6910).
     """
-    return func.regexp_replace(
-        func.max(case(
-            (is_run_row(), UsageEvent.entity_name),
-            else_=None,
-        )),
-        r" \([^()]*\)$", "",
-    )
+    return func.regexp_replace(pick_run_row_name(), VERSION_SUFFIX_PATTERN, "")
 
 
 def _entity_meta_rpc(project_id, **kwargs):

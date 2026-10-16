@@ -34,7 +34,6 @@ DEFAULT_SORT = "runs"
 DETAIL_USERS_LIMIT = 50
 DETAIL_AGENTS_LIMIT = 20
 RECENT_RUNS_LIMIT = 20
-VERSION_SUFFIX_PATTERN = r" \([^()]*\)$"
 PROJECT_ID_PATTERN = r"^[1-9][0-9]{0,8}$"
 SKILL_IDENTITY_KEYS = ("skill_id", "skill_project_id", "skill_name", "deleted")
 
@@ -150,7 +149,7 @@ class SkillMeasures:
         return func.max(self.rows.c.ts)
 
     def pick_skill_name(self):
-        return func.regexp_replace(func.max(self.rows.c.skill_name), VERSION_SUFFIX_PATTERN, "")
+        return func.regexp_replace(func.max(self.rows.c.skill_name), an.VERSION_SUFFIX_PATTERN, "")
 
     def label_totals(self):
         c = self.rows.c
