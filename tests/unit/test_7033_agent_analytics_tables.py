@@ -222,12 +222,16 @@ class TestVersionNames:
 
 
 class TestIdentity:
-    def test_kind_and_project_come_from_the_runs_root_project(self, api, engine, monkeypatch):
-        call(engine, "run-1", root_entity_project_id=PUBLIC_PROJECT_ID)
+    def test_kind_is_the_local_apps_beside_a_higher_catalog_project(self, api, engine, core, monkeypatch):
+        catalog_project_id = PROJECT_ID + 7
+        core["applications"] = {(PROJECT_ID, AGENT_ID): "pipeline", (catalog_project_id, AGENT_ID): "agent"}
+        call(engine, "run-local")
+        call(engine, "run-catalog", seconds=1, root_entity_project_id=catalog_project_id)
 
         body = detail(api, monkeypatch)
 
-        assert (body["entity_project_id"], body["kind"]) == (PUBLIC_PROJECT_ID, "agent")
+        assert body["kind"] == "pipeline"
+        assert "entity_project_id" not in body
 
     def test_an_agent_core_cannot_find_has_no_kind(self, api, engine, core, monkeypatch):
         call(engine, "run-1")
@@ -235,7 +239,8 @@ class TestIdentity:
 
         body = detail(api, monkeypatch)
 
-        assert (body["entity_project_id"], body["kind"]) == (PROJECT_ID, None)
+        assert body["kind"] is None
+        assert "entity_project_id" not in body
 
 
 class TestRecentRuns:
@@ -403,6 +408,17 @@ class TestVersionNamesInContext:
 
         assert [(r["run_id"], r["version_id"], r["version_name"]) for r in rows] == [
             ("run-public", 31, "catalog v2"), ("run-local", 31, "renamed"),
+        ]
+
+    def test_each_run_carries_its_own_root_project(self, api, engine, monkeypatch):
+        call(engine, "run-local")
+        call(engine, "run-public", seconds=1, root_entity_project_id=PUBLIC_PROJECT_ID)
+        call(engine, "run-legacy", seconds=2, root_entity_project_id=None)
+
+        rows = run_page(api, monkeypatch)["rows"]
+
+        assert [(r["run_id"], r["root_project_id"]) for r in rows] == [
+            ("run-legacy", PROJECT_ID), ("run-public", PUBLIC_PROJECT_ID), ("run-local", PROJECT_ID),
         ]
 
     def test_a_local_version_of_another_agent_falls_back_to_the_stored_name(self, api, engine, monkeypatch):

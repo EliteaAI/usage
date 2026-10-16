@@ -119,6 +119,7 @@ if _API_AVAILABLE:
                                         "is_error": False,
                                         "conversation_id": 1701,
                                         "conversation_uuid": "0b6f3c7a-5d2e-4f8a-b1c9-7e4d2a6f9c30",
+                                        "root_project_id": 1,
                                     },
                                 ],
                             }
@@ -234,6 +235,7 @@ if _API_AVAILABLE:
                     "is_error": bool(r["is_error"]),
                     "conversation_id": conversations.get(r["conversation_uuid"]),
                     "conversation_uuid": r["conversation_uuid"],
+                    "root_project_id": r["root_project_id"],
                 }
                 for r in page
             ]
