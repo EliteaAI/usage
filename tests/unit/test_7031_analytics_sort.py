@@ -92,3 +92,9 @@ def test_ties_page_without_repeats(api, monkeypatch, module, id_key):
     for offset in range(5):
         seen += [r[id_key] for r in get(api, module, monkeypatch, sort_by="errors", limit=1, offset=offset)["rows"]]
     assert sorted(seen) == [1, 2, 3, 4, 5]
+
+
+def test_users_chat_events_sorts_by_total_events(api, monkeypatch):
+    seed(api.engine)
+    rows = get(api, "analytics_users", monkeypatch, sort_by="chat_events", sort_order="desc")["rows"]
+    assert [r["user_id"] for r in rows] == [5, 4, 3, 2, 1]

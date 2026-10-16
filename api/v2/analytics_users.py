@@ -15,7 +15,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import asc, desc, distinct, func, literal, or_, select
+    from sqlalchemy import asc, desc, distinct, func, or_, select
 
     from ...methods import _analytics as an
     from ...models.usage_event import UsageEvent
@@ -264,9 +264,8 @@ if _API_AVAILABLE:
                     "tool_events": tool_col,
                     "agent_events": agent_col,
                     "skill_events": skill_col,
-                    # chat_events has no usage_event equivalent; unsortable, kept in the
-                    # whitelist only so a client passing it does not fall through to an error
-                    "chat_events": literal(0),
+                    # chat_events has no usage_event equivalent; omitted here so the key
+                    # falls back to total_events (literal(0) compiles to ORDER BY 0 on Postgres)
                     "errors": errors_col,
                     "user_email": email_col,
                     "total_tokens": total_tokens_col,
