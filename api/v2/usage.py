@@ -45,14 +45,14 @@ def _strip_model_prefixes(model: str):
 
 
 def _model_display_names(project_id: int):
-    """Map of configured model name -> display name, for the usage-by-model table.
+    """Configured model labels for the usage-by-model table.
 
     The analytics lookup itself, so one model reads identically in both.
-    An empty map is a safe outcome: callers keep the raw model name.
+    Empty labels are a safe outcome: callers keep the raw model name.
     """
     from ...methods import _analytics as an  # pylint: disable=C0415
     #
-    return an.model_display_names(project_id)
+    return an.model_labels(project_id)
 
 
 def _attach_display_names(models: list, display_names: dict):

@@ -88,6 +88,11 @@ RESTRICTED_ROLES = {"super_admin", "system"}
 # Configuration sections a metered call can name its model from (#6901)
 MODEL_SECTIONS = ("llm", "embedding", "image_generation", "asr", "tts")
 
+# Whose deployment served a call (#7002): the project's own config or one shared from the public project
+MODEL_SCOPE_OWN = "own"
+MODEL_SCOPE_SHARED = "shared"
+MODEL_SCOPE_SUFFIX = {MODEL_SCOPE_OWN: "project", MODEL_SCOPE_SHARED: "shared"}
+
 # Global super-admin verdicts, cached per user_id: {user_id: (monotonic_stamp, is_super_admin)}
 SUPER_ADMIN_TTL_SECONDS = 300
 SUPER_ADMIN_CACHE_MAX = 2048
@@ -1137,11 +1142,66 @@ def outsider_admin_ids(project_id, conditions):
     }
 
 
+def model_scope_expr():
+    """own/shared per row. The proxy sets budget_exempt only when the project's own deployment
+    served the call, so a NULL (shared, unresolved or pre-column) row reads as shared.
+    """
+    return case(
+        (UsageEvent.budget_exempt.is_(True), MODEL_SCOPE_OWN),
+        else_=MODEL_SCOPE_SHARED,
+    )
+
+
+class ModelLabels:
+    """Display names per (model_name, scope).
+
+    A name used both as the project's own model and as a shared one gets the scope appended,
+    so the two analytics rows never read the same; any other name keeps its plain display name.
+    """
+
+    def __init__(self, entries=None, split=()):
+        self.entries = entries or {}
+        self.split = {name for name, scopes in self.entries.items() if len(scopes) > 1} | set(split)
+
+    def __bool__(self):
+        return bool(self.entries or self.split)
+
+    def label(self, model_name, scope=MODEL_SCOPE_SHARED):
+        scopes = self.entries.get(model_name) or {}
+        display = scopes.get(scope) or next(iter(scopes.values()), None) or model_name
+        #
+        if model_name in self.split and scope in MODEL_SCOPE_SUFFIX:
+            return f"{display} ({MODEL_SCOPE_SUFFIX[scope]})"
+        #
+        return display
+
+    def get(self, model_name, scope=MODEL_SCOPE_SHARED):
+        """The configured display name, or None when the name is not configured and not split."""
+        if model_name not in self.entries and model_name not in self.split:
+            return None
+        return self.label(model_name, scope)
+
+
+def model_labels(project_id, rows=()):
+    """ModelLabels for the project's configured models; rows (model_name, model_scope) mark
+    the names that analytics actually shows under both scopes.
+    """
+    seen = {}
+    for row in rows:
+        if row.get("model_name") and row.get("model_scope"):
+            seen.setdefault(row["model_name"], set()).add(row["model_scope"])
+    #
+    return ModelLabels(
+        model_display_names(project_id),
+        split=[name for name, scopes in seen.items() if len(scopes) > 1],
+    )
+
+
 def model_display_names(project_id):
-    """model_name -> display name, from the project's configured models of every section.
+    """model_name -> {scope: display name}, from the project's configured models of every section.
 
     Each section is read on its own, so one unavailable section does not blank the others;
-    the first section listing a name wins.
+    the first section listing a name in a scope wins.
     """
     from tools import rpc_tools  # pylint: disable=C0415,E0401
     #
@@ -1160,7 +1220,10 @@ def model_display_names(project_id):
         #
         for item in (response or {}).get("items", []) or []:
             if isinstance(item, dict) and item.get("name"):
-                names.setdefault(item["name"], item.get("display_name") or item["name"])
+                scope = MODEL_SCOPE_SHARED if item.get("shared") else MODEL_SCOPE_OWN
+                names.setdefault(item["name"], {}).setdefault(
+                    scope, item.get("display_name") or item["name"],
+                )
     #
     return names
 

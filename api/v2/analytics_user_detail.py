@@ -255,23 +255,26 @@ if _API_AVAILABLE:
         @staticmethod
         def _models(project_id, conditions):
             """ Models used by this user """
+            model_scope = an.model_scope_expr()
             rows = an.fetch_all(select(
                 UsageEvent.model_name,
+                model_scope.label("model_scope"),
                 func.count().label("calls"),
             ).where(
                 *conditions,
                 UsageEvent.model_name.isnot(None),
                 UsageEvent.model_name != "",
             ).group_by(
-                UsageEvent.model_name,
+                UsageEvent.model_name, model_scope,
             ).order_by(func.count().desc()))
 
-            display_names = an.model_display_names(project_id) if rows else {}
+            labels = an.model_labels(project_id, rows) if rows else an.ModelLabels()
 
             return [
                 {
                     "model_name": r["model_name"],
-                    "display_name": display_names.get(r["model_name"], r["model_name"]),
+                    "model_scope": r["model_scope"],
+                    "display_name": labels.label(r["model_name"], r["model_scope"]),
                     "calls": r["calls"],
                 }
                 for r in rows

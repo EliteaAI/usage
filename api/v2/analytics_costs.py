@@ -338,8 +338,10 @@ if _API_AVAILABLE:
         @staticmethod
         def _by_model(project_id, conditions):
             """Cost/token breakdown per model."""
+            model_scope = an.model_scope_expr()
             columns = [
                 UsageEvent.model_name,
+                model_scope.label("model_scope"),
                 func.count().label("calls"),
                 func.sum(func.coalesce(UsageEvent.input_tokens, 0)).label("input_tokens"),
                 func.sum(func.coalesce(UsageEvent.output_tokens, 0)).label("output_tokens"),
@@ -351,21 +353,22 @@ if _API_AVAILABLE:
 
             statement = select(*columns).where(
                 *conditions, UsageEvent.model_name.isnot(None), UsageEvent.model_name != "",
-            ).group_by(UsageEvent.model_name).order_by(
+            ).group_by(UsageEvent.model_name, model_scope).order_by(
                 func.sum(UsageEvent.cost_nano_usd).desc(),
             )
 
             rows = an.fetch_all(statement)
+            labels = an.model_labels(project_id, rows) if rows else an.ModelLabels()
             rows = PromptLibAPI._collapse_tail(rows, _MODEL_DISPLAY)
-            display_names = an.model_display_names(project_id) if rows else {}
 
             return [
                 {
                     "model_name": r["model_name"],
+                    "model_scope": r["model_scope"],
                     "display_name": (
                         "Other models"
                         if r.get("is_other")
-                        else display_names.get(r["model_name"], r["model_name"])
+                        else labels.label(r["model_name"], r["model_scope"])
                     ),
                     "calls": r["calls"],
                     "input_tokens": int(r["input_tokens"] or 0),

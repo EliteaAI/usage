@@ -44,6 +44,7 @@ FAKE_TABLE = Table(
     Column("duration_ms", Integer),
     Column("is_error", Boolean, default=False),
     Column("trigger_source", String),
+    Column("budget_exempt", Boolean),
     Column("meta", JSON),
 )
 
