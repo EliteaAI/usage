@@ -275,7 +275,7 @@ if _API_AVAILABLE:
                     "output_tokens": output_tokens_col,
                     "cache_read_tokens": cache_read_tokens_col,
                     "cache_creation_tokens": cache_creation_tokens_col,
-                    **{key: col for key, col in zip(an.COST_SPLIT_COLUMNS, cost_split_cols.values())},
+                    **cost_split_cols,
                 }
                 col = sort_map.get(sort_by, total_events_col)
                 order_fn = desc if sort_order == "desc" else asc
