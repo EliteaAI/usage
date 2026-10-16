@@ -25,6 +25,8 @@ if _API_AVAILABLE:
     _SORT_WHITELIST = frozenset([
         "events", "users", "avg_duration_ms", "errors", "entity_name",
         "total_tokens", "llm_cost",
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+        *an.COST_SPLIT_COLUMNS,
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -91,7 +93,12 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {
                         "type": "string",
-                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name", "total_tokens", "llm_cost"],
+                        "enum": [
+                            "events", "users", "avg_duration_ms", "errors", "entity_name",
+                            "total_tokens", "llm_cost",
+                            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+                            "input_cost", "output_cost", "cache_read_cost", "cache_creation_cost",
+                        ],
                         "default": "events",
                     },
                     "description": "Column to sort by.",
@@ -207,6 +214,10 @@ if _API_AVAILABLE:
             cost_nano_col = func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano")
             llm_calls_col = an.llm_calls_expr().label("llm_calls")
 
+            cost_split_cols = {
+                key: func.sum(func.coalesce(column, 0)).label(f"{key}_nano")
+                for key, column in an.COST_SPLIT_COLUMNS.items()
+            }
             columns = [
                 UsageEvent.root_entity_id.label("entity_id"),
                 entity_name_expr.label("entity_name"),
@@ -215,9 +226,7 @@ if _API_AVAILABLE:
                 input_tokens_col, output_tokens_col,
                 cache_read_tokens_col, cache_creation_tokens_col,
                 total_tokens_col, cost_nano_col, llm_calls_col,
-            ] + [
-                func.sum(func.coalesce(column, 0)).label(f"{key}_nano")
-                for key, column in an.COST_SPLIT_COLUMNS.items()
+                *cost_split_cols.values(),
             ]
 
             stmt = select(*columns).where(*conditions).group_by(UsageEvent.root_entity_id)
@@ -235,10 +244,18 @@ if _API_AVAILABLE:
                 "entity_name": entity_name_expr,
                 "total_tokens": total_tokens_col,
                 "llm_cost": cost_nano_col,
+                "input_tokens": input_tokens_col,
+                "output_tokens": output_tokens_col,
+                "cache_read_tokens": cache_read_tokens_col,
+                "cache_creation_tokens": cache_creation_tokens_col,
+                **cost_split_cols,
             }
             order_fn = desc if sort_order == "desc" else asc
             rows = an.fetch_all(
-                stmt.order_by(order_fn(sort_map.get(sort_by, events_col))).limit(limit).offset(offset)
+                stmt.order_by(
+                    order_fn(sort_map.get(sort_by, events_col)),
+                    UsageEvent.root_entity_id,
+                ).limit(limit).offset(offset)
             )
             applications = an.application_meta(
                 project_id, refs=[(r["root_project_id"], r["entity_id"]) for r in rows],
