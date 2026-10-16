@@ -221,7 +221,7 @@ if _API_AVAILABLE:
                 return {
                     "entity_name": entity_name,
                     "entity_id": entity_id,
-                    "kind": self._resolve_local_kind(project_id, entity_id),
+                    "kind": self._resolve_entity_kind(project_id, conditions, entity_id),
                     "kpis": kpis,
                     "evaluation": evaluation,
                     "users_total": users_total,
@@ -300,9 +300,14 @@ if _API_AVAILABLE:
             return entity_name, kpis
 
         @staticmethod
-        def _resolve_local_kind(project_id, entity_id):
-            application = an.application_meta(project_id, refs=[(project_id, entity_id)])
-            return application.get((project_id, entity_id), {}).get("kind")
+        def _resolve_entity_kind(project_id, conditions, entity_id):
+            root_project_rows = an.fetch_all(
+                select(an.root_project_expr().label("root_project_id")).where(*conditions).distinct()
+            )
+            root_projects = {r["root_project_id"] for r in root_project_rows}
+            kind_project_id = project_id if project_id in root_projects else max(root_projects, default=project_id)
+            application = an.application_meta(project_id, refs=[(kind_project_id, entity_id)])
+            return application.get((kind_project_id, entity_id), {}).get("kind")
 
         @staticmethod
         def _fetch_version_breakdown(project_id, conditions, run_scope=None):

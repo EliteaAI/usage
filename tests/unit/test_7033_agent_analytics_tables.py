@@ -233,6 +233,29 @@ class TestIdentity:
         assert body["kind"] == "pipeline"
         assert "entity_project_id" not in body
 
+    def test_a_local_only_agent_takes_the_local_kind(self, api, engine, monkeypatch):
+        call(engine, "run-local")
+
+        assert detail(api, monkeypatch)["kind"] == "pipeline"
+
+    def test_a_catalog_only_agent_takes_the_catalog_apps_kind(self, api, engine, core, monkeypatch):
+        core["applications"] = {(PROJECT_ID, AGENT_ID): "agent", (PUBLIC_PROJECT_ID, AGENT_ID): "pipeline"}
+        call(engine, "run-catalog", root_entity_project_id=PUBLIC_PROJECT_ID)
+
+        assert detail(api, monkeypatch)["kind"] == "pipeline"
+
+    def test_several_catalog_projects_resolve_from_the_highest(self, api, engine, core, monkeypatch):
+        other_project_id = PROJECT_ID + 7
+        core["applications"] = {
+            (PROJECT_ID, AGENT_ID): "agent",
+            (PUBLIC_PROJECT_ID, AGENT_ID): "agent",
+            (other_project_id, AGENT_ID): "pipeline",
+        }
+        call(engine, "run-public", root_entity_project_id=PUBLIC_PROJECT_ID)
+        call(engine, "run-other", seconds=1, root_entity_project_id=other_project_id)
+
+        assert detail(api, monkeypatch)["kind"] == "pipeline"
+
     def test_an_agent_core_cannot_find_has_no_kind(self, api, engine, core, monkeypatch):
         call(engine, "run-1")
         core["applications"] = {}
