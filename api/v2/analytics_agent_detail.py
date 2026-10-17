@@ -17,10 +17,11 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import case, distinct, func, or_, select
+    from sqlalchemy import case, desc, distinct, func, nulls_last, or_, select
 
     from ...methods import _analytics as an
     from ...methods import _skill_analytics as sa
+    from ...methods import _version_names as vn
     from ...models.usage_event import UsageEvent
 
     _USERS_LIMIT = 50
@@ -34,12 +35,14 @@ if _API_AVAILABLE:
             name="Get Agent Analytics Detail",
             description=(
                 "Returns the full usage breakdown for one agent/pipeline: KPIs, its users, "
-                "the tools it called, the skills it used, and its daily activity trend. Evaluation tokens and spend "
+                "the tools it called, the skills it used, its daily activity trend, and its runs, tokens "
+                "and cost by version, by model (LLM calls only) and by trigger source (one trigger per run; "
+                "manual is a UI or API run). Evaluation tokens and spend "
                 "are reported separately under evaluation (null for a single run) and are not "
                 "part of kpis."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need the full drill-down for one specific agent or pipeline: its KPIs, which users ran it, which tools it called, which skills it used, and its daily trend. Do not use this tool for a leaderboard across agents — use List Agent Analytics. Do not use for project-wide KPIs — use Get Project AI Analytics.",
+            mcp_description="Use this tool when you need the full drill-down for one specific agent or pipeline: its KPIs, which users ran it, which tools it called, which skills it used, its daily trend, and its version, model and trigger-source breakdowns. For its individual runs use List Agent Runs. Do not use this tool for a leaderboard across agents — use List Agent Analytics. Do not use for project-wide KPIs — use Get Project AI Analytics.",
             tags=["usage/analytics"],
             parameters=[
                 {
@@ -84,6 +87,7 @@ if _API_AVAILABLE:
                             "example": {
                                 "entity_name": "Code Review Bot",
                                 "entity_id": 7,
+                                "kind": "agent",
                                 "kpis": {
                                     "total_events": 95,
                                     "unique_users": 5,
@@ -140,6 +144,29 @@ if _API_AVAILABLE:
                                 "daily_usage": [
                                     {"date": "2025-01-01", "events": 20, "errors": 1},
                                 ],
+                                "by_version": [
+                                    {
+                                        "version_id": 31,
+                                        "version_name": "base",
+                                        "runs": 4,
+                                        "total_tokens": 1200,
+                                        "cost": 0.0123,
+                                    },
+                                ],
+                                "by_model": [
+                                    {
+                                        "model_name": "gpt-4o",
+                                        "display_name": "GPT-4o",
+                                        "runs": 3,
+                                        "calls": 7,
+                                        "total_tokens": 1100,
+                                        "cost": 0.011,
+                                    },
+                                ],
+                                "by_trigger_source": [
+                                    {"trigger_source": "manual", "runs": 3, "total_tokens": 900, "cost": 0.009},
+                                    {"trigger_source": "scheduled", "runs": 1, "total_tokens": 300, "cost": 0.003},
+                                ],
                             },
                         }
                     },
@@ -194,6 +221,7 @@ if _API_AVAILABLE:
                 return {
                     "entity_name": entity_name,
                     "entity_id": entity_id,
+                    "kind": self._resolve_entity_kind(project_id, conditions, entity_id),
                     "kpis": kpis,
                     "evaluation": evaluation,
                     "users_total": users_total,
@@ -204,6 +232,9 @@ if _API_AVAILABLE:
                     "skills_truncated": skills_truncated,
                     "skills": skills,
                     "daily_usage": self._daily_usage(conditions, run_scope),
+                    "by_version": self._fetch_version_breakdown(project_id, conditions, run_scope),
+                    "by_model": self._fetch_model_breakdown(project_id, conditions),
+                    "by_trigger_source": self._fetch_trigger_breakdown(conditions),
                 }, 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics agent detail query failed", exc_info=True)
@@ -267,6 +298,84 @@ if _API_AVAILABLE:
             }
             #
             return entity_name, kpis
+
+        @staticmethod
+        def _resolve_entity_kind(project_id, conditions, entity_id):
+            root_project_rows = an.fetch_all(
+                select(an.root_project_expr().label("root_project_id")).where(*conditions).distinct()
+            )
+            root_projects = {r["root_project_id"] for r in root_project_rows}
+            kind_project_id = project_id if project_id in root_projects else max(root_projects, default=project_id)
+            application = an.application_meta(project_id, refs=[(kind_project_id, entity_id)])
+            return application.get((kind_project_id, entity_id), {}).get("kind")
+
+        @staticmethod
+        def _fetch_version_breakdown(project_id, conditions, run_scope=None):
+            version_id = UsageEvent.root_entity_version_id.label("version_id")
+            runs_col = an.agent_runs_expr(run_scope).label("runs")
+            rows = an.fetch_all(select(
+                version_id,
+                an.pick_run_row_name().label("stored_name"),
+                func.max(an.root_project_expr()).label("root_project_id"),
+                func.max(UsageEvent.root_entity_type).label("root_entity_type"),
+                func.max(UsageEvent.root_entity_id).label("root_entity_id"),
+                runs_col,
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ).where(*conditions).group_by(UsageEvent.root_entity_version_id).order_by(
+                desc(runs_col), nulls_last(UsageEvent.root_entity_version_id),
+            ))
+            version_names = vn.label_versions(project_id, rows)
+            return [
+                {
+                    "version_id": r["version_id"],
+                    "version_name": version_names.get(vn.build_version_key(project_id, r)),
+                    "runs": int(r["runs"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "cost": an.cost_usd(r["cost_nano"]),
+                }
+                for r in rows
+            ]
+
+        @staticmethod
+        def _fetch_model_breakdown(project_id, conditions):
+            total_tokens_col = func.sum(an.total_tokens_expr()).label("total_tokens")
+            rows = an.fetch_all(select(
+                UsageEvent.model_name,
+                func.count(distinct(UsageEvent.run_id)).label("runs"),
+                func.count().label("calls"),
+                total_tokens_col,
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ).where(*conditions, UsageEvent.event_type == an.EVENT_LLM).group_by(UsageEvent.model_name).order_by(
+                desc(total_tokens_col), nulls_last(UsageEvent.model_name),
+            ))
+            display_names = an.model_display_names(project_id) if rows else {}
+            return sa.format_model_breakdown(rows, display_names)
+
+        @staticmethod
+        def _fetch_trigger_breakdown(conditions):
+            per_run = select(
+                UsageEvent.run_id,
+                func.max(UsageEvent.trigger_source).label("trigger_source"),
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ).where(*conditions).group_by(UsageEvent.run_id).subquery("per_run")
+            runs_col = func.count(per_run.c.run_id).label("runs")
+            rows = an.fetch_all(select(
+                per_run.c.trigger_source,
+                runs_col,
+                func.sum(per_run.c.total_tokens).label("total_tokens"),
+                func.sum(per_run.c.cost_nano).label("cost_nano"),
+            ).group_by(per_run.c.trigger_source).order_by(desc(runs_col), nulls_last(per_run.c.trigger_source)))
+            return [
+                {
+                    "trigger_source": r["trigger_source"] or sa.TRIGGER_MANUAL,
+                    "runs": int(r["runs"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "cost": an.cost_usd(r["cost_nano"]),
+                }
+                for r in rows
+            ]
 
         @staticmethod
         def _evaluation(conditions):

@@ -15,6 +15,7 @@ if _API_AVAILABLE:
     from flask import request
 
     from ...methods import _analytics as an
+    from ...methods import _version_names as vn
     from ...models.usage_event import UsageEvent
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -41,7 +42,25 @@ if _API_AVAILABLE:
                 *an.RUN_SCOPE_PARAMETERS,
             ],
             responses={
-                "200": {"description": "Run analytics detail"},
+                "200": {
+                    "description": "Run analytics detail",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "run_id": "67a08328-da8f-4c14-9bdb-1e1268d339e3",
+                                "root_entity_type": "application",
+                                "root_entity_id": 130,
+                                "root_entity_name": "Code Review Bot (v3)",
+                                "root_entity_version_ids": [242],
+                                "root_entity_versions": [{"id": 242, "name": "v3"}],
+                                "user_id": 11,
+                                "started_at": "2026-10-15T09:12:03+00:00",
+                                "ended_at": "2026-10-15T09:12:41+00:00",
+                                "duration_ms": 38000,
+                            },
+                        }
+                    },
+                },
                 "400": {"description": "run_id or eval_run_id is required"},
                 "401": {"description": "Unauthorized"},
                 "404": {"description": "Run not found"},
@@ -83,10 +102,36 @@ if _API_AVAILABLE:
                 if not rows:
                     return {"error": "Run not found"}, 404
 
-                return self._build_response(run_id, rows), 200
+                response = self._build_response(run_id, rows)
+                return {
+                    **response,
+                    "root_entity_versions": self._label_root_versions(
+                        project_id, rows, response["root_entity_version_ids"],
+                    ),
+                }, 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics run detail query failed", exc_info=True)
                 return {"error": "Failed to query analytics run detail"}, 500
+
+        @staticmethod
+        def _label_root_versions(project_id, rows, version_ids):
+            versions = {}
+            for row in rows:
+                version = versions.setdefault(row["root_entity_version_id"], {
+                    "version_id": row["root_entity_version_id"],
+                    "root_entity_type": row["root_entity_type"],
+                    "root_entity_id": row["root_entity_id"],
+                    "root_project_id": row["root_project_id"],
+                    "stored_name": None,
+                })
+                is_run_row = row["entity_type"] == row["root_entity_type"] and row["entity_id"] == row["root_entity_id"]
+                if is_run_row and version["stored_name"] is None:
+                    version["stored_name"] = row["entity_name"]
+            names = vn.label_versions(project_id, versions.values())
+            return [
+                {"id": version_id, "name": names[vn.build_version_key(project_id, versions[version_id])]}
+                for version_id in version_ids
+            ]
 
         @staticmethod
         def _build_response(run_id, rows):
