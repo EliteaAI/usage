@@ -28,7 +28,9 @@ API_MODULES = ("analytics_agent_detail", "analytics_agent_runs", "analytics_run_
 @pytest.fixture
 def engine(monkeypatch):
     db_engine = install_engine(monkeypatch, _analytics)
-    monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {"gpt-a": "GPT A", "gpt-b": "Alpha B"})
+    monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {
+        "gpt-a": {"shared": "GPT A"}, "gpt-b": {"shared": "Alpha B"},
+    })
     monkeypatch.setattr(_analytics, "label_users", lambda user_ids, stored=None: {
         11: "ann@example.com", 12: "bob@example.com",
     })
@@ -205,6 +207,19 @@ class TestModels:
             ("gpt-a", "GPT A", 2, 3, 730), ("gpt-b", "Alpha B", 1, 1, 110),
         ]
 
+    def test_a_model_served_by_both_scopes_gets_one_labelled_row_per_scope(self, api, engine, monkeypatch):
+        monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {
+            "gpt-a": {"own": "GPT A", "shared": "GPT A"},
+        })
+        call(engine, "run-1", budget_exempt=True)
+        call(engine, "run-2", seconds=1)
+
+        models = detail(api, monkeypatch)["by_model"]
+
+        assert sorted((m["model_scope"], m["display_name"]) for m in models) == [
+            ("own", "GPT A (project)"), ("shared", "GPT A (shared)"),
+        ]
+
 
 class TestVersionNames:
     def test_names_fall_back_from_core_to_stored_name_to_id(self, api, engine, monkeypatch):
@@ -282,7 +297,8 @@ class TestRecentRuns:
             "run-api", "old", None, False,
         )
         assert oldest["models"] == [
-            {"model_name": "gpt-b", "display_name": "Alpha B"}, {"model_name": "gpt-a", "display_name": "GPT A"},
+            {"model_name": "gpt-b", "model_scope": "shared", "display_name": "Alpha B"},
+            {"model_name": "gpt-a", "model_scope": "shared", "display_name": "GPT A"},
         ]
         assert (oldest["conversation_id"], oldest["conversation_uuid"], oldest["is_error"]) == (
             1701, CONVERSATION, True,
@@ -346,7 +362,7 @@ class TestRecentRunsPaging:
 
     def test_the_model_sort_follows_display_names(self, api, engine, monkeypatch):
         monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {
-            "aa-gpt4": "ZZ GPT-4", "zz-llama": "AA O'Internal",
+            "aa-gpt4": {"shared": "ZZ GPT-4"}, "zz-llama": {"shared": "AA O'Internal"},
         })
         statements = []
         event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
@@ -362,8 +378,8 @@ class TestRecentRunsPaging:
         ]
         assert not [sql for sql in statements if "O'Internal" in sql or "ZZ GPT-4" in sql]
         count_sql, page_sql = [sql for sql in statements if "GROUP BY usage_event.run_id" in sql][:2]
-        assert "CASE usage_event.model_name" not in count_sql
-        assert "CASE usage_event.model_name" in page_sql
+        assert "CASE WHEN (usage_event.model_name =" not in count_sql
+        assert "CASE WHEN (usage_event.model_name =" in page_sql
 
     def test_status_puts_failed_runs_first(self, api, engine, monkeypatch):
         self.seed(engine)

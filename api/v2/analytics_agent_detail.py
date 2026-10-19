@@ -340,17 +340,21 @@ if _API_AVAILABLE:
         @staticmethod
         def _fetch_model_breakdown(project_id, conditions):
             total_tokens_col = func.sum(an.total_tokens_expr()).label("total_tokens")
+            model_scope = an.model_scope_expr()
             rows = an.fetch_all(select(
                 UsageEvent.model_name,
+                model_scope.label("model_scope"),
                 func.count(distinct(UsageEvent.run_id)).label("runs"),
                 func.count().label("calls"),
                 total_tokens_col,
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
-            ).where(*conditions, UsageEvent.event_type == an.EVENT_LLM).group_by(UsageEvent.model_name).order_by(
+            ).where(*conditions, UsageEvent.event_type == an.EVENT_LLM).group_by(
+                UsageEvent.model_name, model_scope,
+            ).order_by(
                 desc(total_tokens_col), nulls_last(UsageEvent.model_name),
             ))
-            display_names = an.model_display_names(project_id) if rows else {}
-            return sa.format_model_breakdown(rows, display_names)
+            model_labels = an.model_labels(project_id, rows) if rows else an.ModelLabels()
+            return sa.format_model_breakdown(rows, model_labels)
 
         @staticmethod
         def _fetch_trigger_breakdown(conditions):
