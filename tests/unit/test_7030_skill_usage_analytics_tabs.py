@@ -32,6 +32,7 @@ def engine(monkeypatch):
         (PROJECT_ID, AGENT_ID): {"id": AGENT_ID, "name": "reviewer", "kind": "agent"},
     })
     monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {})
+    monkeypatch.setattr(_analytics, "entity_meta", lambda project_id, application_ids=(), version_ids=(): ({}, {}))
     monkeypatch.setattr(_analytics, "label_users", lambda user_ids, stored=None: {
         11: "ann@example.com", 12: "bob@example.com",
     })
