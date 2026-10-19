@@ -13,7 +13,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import asc, case, desc, func, nulls_last, select
+    from sqlalchemy import and_, asc, case, desc, func, nulls_last, select
 
     from ...methods import _analytics as an
     from ...methods import _skill_analytics as sa
@@ -170,12 +170,11 @@ if _API_AVAILABLE:
             started_col = func.min(UsageEvent.ts).label("started_at")
             user_email_col = func.max(UsageEvent.user_email).label("user_email")
             version_col = func.max(UsageEvent.root_entity_version_id).label("version_id")
-            display_names = an.model_display_names(project_id) if sort_by == "model" else None
-            display_model_name = (
-                case(display_names, value=UsageEvent.model_name, else_=UsageEvent.model_name)
-                if display_names else UsageEvent.model_name
+            model_pairs = PromptLibAPI._fetch_model_pairs(conditions) if sort_by == "model" else None
+            model_labels = an.model_labels(project_id, model_pairs) if model_pairs else None
+            model_col = func.min(
+                PromptLibAPI._build_model_label_expr(model_pairs, model_labels) if model_labels else UsageEvent.model_name
             )
-            model_col = func.min(display_model_name)
             total_tokens_col = func.sum(an.total_tokens_expr()).label("total_tokens")
             cost_nano_col = func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano")
             is_error_col = func.max(case((UsageEvent.is_error.is_(True), 1), else_=0)).label("is_error")
@@ -210,9 +209,11 @@ if _API_AVAILABLE:
                 nulls_last(order(sort_column)), UsageEvent.run_id,
             ).limit(limit).offset(offset))
 
-            if display_names is None:
-                display_names = an.model_display_names(project_id) if page else {}
-            models = PromptLibAPI._fetch_models_by_run(conditions, [r["run_id"] for r in page], display_names)
+            if model_labels is None:
+                model_labels = (
+                    an.model_labels(project_id, PromptLibAPI._fetch_model_pairs(conditions)) if page else an.ModelLabels()
+                )
+            models = PromptLibAPI._fetch_models_by_run(conditions, [r["run_id"] for r in page], model_labels)
             version_names = vn.label_versions(project_id, page)
             emails = an.label_users(
                 [r["user_id"] for r in page],
@@ -241,17 +242,40 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _fetch_models_by_run(conditions, run_ids, display_names):
+        def _fetch_model_pairs(conditions):
+            model_scope = an.model_scope_expr()
+            return an.fetch_all(select(UsageEvent.model_name, model_scope.label("model_scope")).where(
+                *conditions, UsageEvent.event_type == an.EVENT_LLM, UsageEvent.model_name.isnot(None),
+            ).group_by(UsageEvent.model_name, model_scope))
+
+        @staticmethod
+        def _build_model_label_expr(model_pairs, model_labels):
+            model_scope = an.model_scope_expr()
+            return case(
+                *[
+                    (
+                        and_(UsageEvent.model_name == pair["model_name"], model_scope == pair["model_scope"]),
+                        model_labels.label(pair["model_name"], pair["model_scope"]),
+                    )
+                    for pair in model_pairs
+                ],
+                else_=UsageEvent.model_name,
+            )
+
+        @staticmethod
+        def _fetch_models_by_run(conditions, run_ids, model_labels):
             if not run_ids:
                 return {}
-            rows = an.fetch_all(select(UsageEvent.run_id, UsageEvent.model_name).where(
+            model_scope = an.model_scope_expr()
+            rows = an.fetch_all(select(UsageEvent.run_id, UsageEvent.model_name, model_scope.label("model_scope")).where(
                 *conditions, UsageEvent.event_type == an.EVENT_LLM, UsageEvent.run_id.in_(run_ids),
-            ).group_by(UsageEvent.run_id, UsageEvent.model_name))
+            ).group_by(UsageEvent.run_id, UsageEvent.model_name, model_scope))
             models = {}
             for r in rows:
                 models.setdefault(r["run_id"], []).append({
                     "model_name": r["model_name"],
-                    "display_name": sa.label_model(r["model_name"], display_names),
+                    "model_scope": r["model_scope"],
+                    "display_name": sa.label_model(r["model_name"], model_labels, r["model_scope"]),
                 })
             for run_models in models.values():
                 run_models.sort(key=lambda model: (model["display_name"] is None, model["display_name"] or ""))
