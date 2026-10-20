@@ -667,7 +667,9 @@ if _API_AVAILABLE:
             ).where(*conditions, UsageEvent.budget_exempt.isnot(True)).group_by(feature, backend).order_by(
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc(), feature, backend,
             )
-            labels = an.tool_spend_labels()
+            rows = an.fetch_all(statement)
+            # Most windows have no paid tool calls; skip the labels RPC then
+            labels = an.tool_spend_labels() if rows else {}
             return [
                 {
                     "feature": r["feature"],
@@ -677,7 +679,7 @@ if _API_AVAILABLE:
                     "failed_calls": int(r["failed_calls"] or 0),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                 }
-                for r in an.fetch_all(statement)
+                for r in rows
             ]
 
         @staticmethod

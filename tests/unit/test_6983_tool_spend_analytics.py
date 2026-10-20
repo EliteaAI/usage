@@ -90,6 +90,12 @@ class TestToolSpendBreakdown:
         row(engine, cost_nano_usd=8_000_000)
         assert costs.PromptLibAPI._by_tool_spend(tool_conditions())[0]["label"] == "web_search"
 
+    def test_no_rows_skips_the_labels_rpc(self, engine, costs, monkeypatch):
+        def fail():
+            raise AssertionError("labels RPC called for an empty window")
+        monkeypatch.setattr(_analytics, "tool_spend_labels", fail)
+        assert costs.PromptLibAPI._by_tool_spend(tool_conditions()) == []
+
     def test_other_projects_are_excluded(self, engine, costs):
         row(engine, project_id=PROJECT_ID + 1, cost_nano_usd=8_000_000)
         assert costs.PromptLibAPI._by_tool_spend(tool_conditions()) == []
