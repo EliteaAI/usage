@@ -166,6 +166,19 @@ class TestRedaction(unittest.TestCase):
         out = usage._redact(payload)
         self.assertEqual(out["models"][0]["display_name"], "GPT-5")
 
+    def test_tool_spend_amounts_removed_but_percent_and_calls_kept(self):
+        # Web search spend is platform money too, so members see only percent and call count
+        payload = self._payload()
+        payload["tool_spend"] = [{
+            "feature": "web_search", "label": "Web search", "spend": 2.5, "effective_limit": 10.0,
+            "remaining": 7.5, "currency": "USD", "percent_used": 25.0, "calls": 31,
+        }]
+        #
+        row = usage._redact(payload)["tool_spend"][0]
+        for field in ("spend", "effective_limit", "remaining", "currency"):
+            self.assertNotIn(field, row)
+        self.assertEqual((row["percent_used"], row["calls"], row["label"]), (25.0, 31, "Web search"))
+
 
 class TestStripModelPrefixes(unittest.TestCase):
     """LiteLLM reports a resolved name; the registry stores it without prefixes."""
@@ -255,3 +268,32 @@ class TestAttachDisplayNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestToolSpendRow(unittest.TestCase):
+    """Paid-tool rows on the Usage page: spend from usage's own counters, limits from elitea_core."""
+
+    FEATURE = {"feature": "web_search", "label": "Web search", "limit_usd": 10.0, "limit_source": "explicit", "enabled": True}
+
+    def test_project_row_uses_project_counters(self):
+        spend = {"available": True, "project_spent_nano": 2_500_000_000, "member_spent_nano": 1, "project_calls": 31}
+        row = usage._feature_row(self.FEATURE, spend, usage.SCOPE_PROJECT)
+        self.assertEqual((row["spend"], row["calls"], row["percent_used"], row["remaining"]), (2.5, 31, 25.0, 7.5))
+
+    def test_member_row_uses_member_counters(self):
+        spend = {"available": True, "project_spent_nano": 9, "member_spent_nano": 1_000_000_000, "member_calls": 4}
+        row = usage._feature_row(self.FEATURE, spend, usage.SCOPE_USER)
+        self.assertEqual((row["spend"], row["calls"]), (1.0, 4))
+
+    def test_failed_read_is_marked_not_zeroed(self):
+        # A DB error must not read as "$0 of $10": no spend, calls or percent at all
+        row = usage._feature_row(self.FEATURE, {"available": False}, usage.SCOPE_PROJECT)
+        self.assertFalse(row["spend_available"])
+        for field in ("spend", "calls", "percent_used", "remaining"):
+            self.assertNotIn(field, row)
+
+    def test_unlimited_has_no_percent(self):
+        feature = dict(self.FEATURE, limit_usd=None, limit_source="unlimited")
+        row = usage._feature_row(feature, {"available": True, "project_spent_nano": 5}, usage.SCOPE_PROJECT)
+        self.assertIsNone(row["percent_used"])
+

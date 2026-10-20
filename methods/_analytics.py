@@ -52,6 +52,8 @@ SYSTEM_USER_ID = 0
 EVENT_LLM = "llm"
 EVENT_TOOL = "tool"
 EVENT_SKILL = "skill"
+# Paid tool spend (web search etc.); reported on its own, never inside LLM totals
+EVENT_TOOL_COST = "tool_cost"
 METERED_EVENT_TYPES = (EVENT_LLM, EVENT_TOOL)
 
 # What the user launched. entity_* is the node that made one call; root_entity_* is the run it
@@ -1425,3 +1427,13 @@ def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
         }
         for row in rows
     ]
+
+
+def tool_spend_labels():
+    """{feature: label} from elitea_core; empty when unreachable, so raw names show instead."""
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_get_tool_spend_labels() or {}
+    except Exception:  # pylint: disable=W0703
+        return {}
