@@ -38,6 +38,8 @@ if _API_AVAILABLE:
             description=(
                 "Returns cost and token KPIs plus per-model, per-agent, per-skill, per-evaluation, "
                 "per-user and daily breakdowns of LLM spend for a project, aggregated from usage_event. "
+                "by_tool_spend lists platform-key paid tool spend (e.g. web search) per feature and backend; "
+                "own-key calls are excluded and it is not part of any LLM total. "
                 "Evaluation spend is included in the totals, per-model, per-user and daily "
                 "figures, and excluded from per-agent."
             ),
@@ -239,6 +241,9 @@ if _API_AVAILABLE:
                     "by_evaluation": self._by_evaluation(project_id, conditions),
                     "by_user": self._by_user(conditions),
                     "daily": self._daily(conditions),
+                    "by_tool_spend": self._by_tool_spend(an.base_filters(
+                        project_id, dt_from, dt_to, run_scope=run_scope, event_types=(an.EVENT_TOOL_COST,),
+                    )),
                 }, 200
 
             except Exception:
@@ -643,6 +648,34 @@ if _API_AVAILABLE:
                     "total_tokens": int(r["total_tokens"] or 0),
                 }
                 for r in rows
+            ]
+
+        @staticmethod
+        def _by_tool_spend(conditions):
+            """Platform-key tool spend per feature and backend, apart from the LLM figures above.
+
+            A project's own provider key is excluded: its real rate and plan are unknown to us.
+            """
+            feature = UsageEvent.meta["feature"].as_string()
+            backend = UsageEvent.meta["backend"].as_string()
+            statement = select(
+                feature.label("feature"),
+                backend.label("backend"),
+                func.count().label("calls"),
+                an.count_where(UsageEvent.is_error.is_(True)).label("failed_calls"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+            ).where(*conditions, UsageEvent.budget_exempt.isnot(True)).group_by(feature, backend).order_by(
+                func.sum(UsageEvent.cost_nano_usd).desc(), feature, backend,
+            )
+            return [
+                {
+                    "feature": r["feature"],
+                    "backend": r["backend"],
+                    "calls": int(r["calls"] or 0),
+                    "failed_calls": int(r["failed_calls"] or 0),
+                    "total_cost": an.cost_usd(r["cost_nano"]),
+                }
+                for r in an.fetch_all(statement)
             ]
 
         @staticmethod

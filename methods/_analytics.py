@@ -52,6 +52,8 @@ SYSTEM_USER_ID = 0
 EVENT_LLM = "llm"
 EVENT_TOOL = "tool"
 EVENT_SKILL = "skill"
+# Paid tool spend (web search etc.); reported on its own, never inside LLM totals
+EVENT_TOOL_COST = "tool_cost"
 METERED_EVENT_TYPES = (EVENT_LLM, EVENT_TOOL)
 
 # What the user launched. entity_* is the node that made one call; root_entity_* is the run it

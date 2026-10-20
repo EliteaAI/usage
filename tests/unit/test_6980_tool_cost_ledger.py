@@ -91,10 +91,11 @@ def spend_with(monkeypatch):
 
 class TestFeatureSpend:
     def test_reads_project_and_member_rows(self, spend_with):
-        instance = spend_with(Engine([(0, 50), (7, 20)]))
+        instance = spend_with(Engine([(0, 50, 4), (7, 20, 1)]))
         out = instance.usage_read_feature_spend(3, 7, "web_search", moment=IAT)
         assert out["available"] is True
         assert (out["project_spent_nano"], out["member_spent_nano"]) == (50, 20)
+        assert (out["project_calls"], out["member_calls"]) == (4, 1)
         assert out["period_start"] == "2026-10-01"
 
     def test_no_rows_is_available_zero(self, spend_with):
@@ -104,7 +105,7 @@ class TestFeatureSpend:
     def test_db_error_is_unavailable_and_not_cached(self, spend_with, monkeypatch):
         instance = spend_with(FailingEngine())
         assert instance.usage_read_feature_spend(3, 7, "web_search", moment=IAT) == {"available": False}
-        monkeypatch.setattr(spend.db, "engine", Engine([(0, 5)]), raising=False)
+        monkeypatch.setattr(spend.db, "engine", Engine([(0, 5, 1)]), raising=False)
         assert instance.usage_read_feature_spend(3, 7, "web_search", moment=IAT)["available"] is True
 
     def test_query_pins_the_feature_model_name(self, spend_with):

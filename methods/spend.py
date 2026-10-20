@@ -131,7 +131,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return dict(cached)
         #
         users = [PROJECT_USER_SENTINEL] + ([int(user_id)] if user_id else [])
-        statement = select(UsageCounter.user_id, UsageCounter.cost_nano_usd).where(
+        statement = select(UsageCounter.user_id, UsageCounter.cost_nano_usd, UsageCounter.call_count).where(
             UsageCounter.project_id == int(project_id),
             UsageCounter.user_id.in_(users),
             UsageCounter.period_kind == period_kind,
@@ -140,7 +140,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         try:
             with db.engine.connect() as connection:
-                rows = {int(uid): int(cost or 0) for uid, cost in connection.execute(statement)}
+                rows = {int(uid): (int(cost or 0), int(calls or 0)) for uid, cost, calls in connection.execute(statement)}
         except:  # pylint: disable=W0702
             log.exception("usage: feature spend read failed for project %s feature %s", project_id, feature)
             return {"available": False}
@@ -149,8 +149,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "available": True,
             "period_kind": period_kind,
             "period_start": day.isoformat(),
-            "project_spent_nano": rows.get(PROJECT_USER_SENTINEL, 0),
-            "member_spent_nano": rows.get(int(user_id), 0) if user_id else 0,
+            "project_spent_nano": rows.get(PROJECT_USER_SENTINEL, (0, 0))[0],
+            "member_spent_nano": rows.get(int(user_id), (0, 0))[0] if user_id else 0,
+            "project_calls": rows.get(PROJECT_USER_SENTINEL, (0, 0))[1],
+            "member_calls": rows.get(int(user_id), (0, 0))[1] if user_id else 0,
         }
         _feature_spend_cache[key] = result
         return dict(result)

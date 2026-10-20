@@ -166,6 +166,19 @@ class TestRedaction(unittest.TestCase):
         out = usage._redact(payload)
         self.assertEqual(out["models"][0]["display_name"], "GPT-5")
 
+    def test_tool_spend_amounts_removed_but_percent_and_calls_kept(self):
+        # Web search spend is platform money too, so members see only percent and call count
+        payload = self._payload()
+        payload["tool_spend"] = [{
+            "feature": "web_search", "label": "Web search", "spend": 2.5, "effective_limit": 10.0,
+            "remaining": 7.5, "currency": "USD", "percent_used": 25.0, "calls": 31,
+        }]
+        #
+        row = usage._redact(payload)["tool_spend"][0]
+        for field in ("spend", "effective_limit", "remaining", "currency"):
+            self.assertNotIn(field, row)
+        self.assertEqual((row["percent_used"], row["calls"], row["label"]), (25.0, 31, "Web search"))
+
 
 class TestStripModelPrefixes(unittest.TestCase):
     """LiteLLM reports a resolved name; the registry stores it without prefixes."""

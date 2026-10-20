@@ -141,7 +141,21 @@ def _redact(payload: dict):
     for row in payload.get("daily") or []:
         row.pop("spend", None)
     #
+    for row in payload.get("tool_spend") or []:
+        for field in AMOUNT_FIELDS:
+            row.pop(field, None)
+    #
     return payload
+
+
+def _tool_spend(project_id: int, user_id: int, scope: str):
+    """Per-feature paid-tool spend (e.g. web search); kept apart from the LLM figures."""
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(15).elitea_core_get_tool_spend_usage(
+            project_id=project_id, user_id=user_id if scope == SCOPE_USER else None,
+        ) or []
+    except Exception:  # pylint: disable=W0703
+        return []
 
 
 def _warning_pct(scope: str, is_personal: bool):
@@ -256,7 +270,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "period_end and resets_at, so no date range is accepted.\n\n"
             "Members who may not see platform cost figures receive the same payload with "
             "spend, limits and currency removed and can_see_amounts set to false; "
-            "percentages and token counts are still present."
+            "percentages and token counts are still present.\n\n"
+            "tool_spend lists paid tool features (e.g. web search) with their own spend, "
+            "limit and call count; they never count toward the LLM figures."
         ),
         tags=[OPENAPI_TAG],
         parameters=[
@@ -295,6 +311,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         is_personal = _is_personal_project(project_id, user_id)
         #
         payload = _usage_state(project_id, user_id, scope, is_personal)
+        payload["tool_spend"] = _tool_spend(project_id, user_id, scope)
         #
         visible = _can_see_amounts(project_id, user_id, is_personal)
         payload["can_see_amounts"] = visible
