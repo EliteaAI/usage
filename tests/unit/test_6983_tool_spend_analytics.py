@@ -27,6 +27,7 @@ def engine(monkeypatch):
 
 @pytest.fixture
 def costs(monkeypatch, engine):
+    monkeypatch.setattr(_analytics, "tool_spend_labels", lambda: {"web_search": "Web search"})
     module = load_api_module(monkeypatch, "analytics_costs")
     yield module
     sys.modules.pop("usage.api.v2.analytics_costs", None)
@@ -54,7 +55,7 @@ class TestToolSpendBreakdown:
         #
         out = costs.PromptLibAPI._by_tool_spend(tool_conditions())
         assert out == [{
-            "feature": "web_search", "backend": "tavily", "calls": 3, "failed_calls": 1,
+            "feature": "web_search", "label": "Web search", "backend": "tavily", "calls": 3, "failed_calls": 1,
             "total_cost": 0.024,
         }]
 
@@ -77,6 +78,17 @@ class TestToolSpendBreakdown:
             _analytics.UsageEvent.event_type == _analytics.EVENT_LLM,
         ]
         assert costs.PromptLibAPI._kpis(llm)["total_cost"] == 0.0
+
+    def test_all_error_group_sorts_last(self, engine, costs):
+        # NULL cost on failed calls must not float an all-error group above real spend
+        row(engine, cost_nano_usd=8_000_000)
+        row(engine, seconds=1, cost_nano_usd=None, is_error=True, meta={"feature": "web_search", "backend": "other"})
+        assert [r["backend"] for r in costs.PromptLibAPI._by_tool_spend(tool_conditions())] == ["tavily", "other"]
+
+    def test_unknown_label_falls_back_to_feature_name(self, engine, costs, monkeypatch):
+        monkeypatch.setattr(_analytics, "tool_spend_labels", lambda: {})
+        row(engine, cost_nano_usd=8_000_000)
+        assert costs.PromptLibAPI._by_tool_spend(tool_conditions())[0]["label"] == "web_search"
 
     def test_other_projects_are_excluded(self, engine, costs):
         row(engine, project_id=PROJECT_ID + 1, cost_nano_usd=8_000_000)

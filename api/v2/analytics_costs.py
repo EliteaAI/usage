@@ -665,11 +665,13 @@ if _API_AVAILABLE:
                 an.count_where(UsageEvent.is_error.is_(True)).label("failed_calls"),
                 func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
             ).where(*conditions, UsageEvent.budget_exempt.isnot(True)).group_by(feature, backend).order_by(
-                func.sum(UsageEvent.cost_nano_usd).desc(), feature, backend,
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc(), feature, backend,
             )
+            labels = an.tool_spend_labels()
             return [
                 {
                     "feature": r["feature"],
+                    "label": labels.get(r["feature"]) or r["feature"],
                     "backend": r["backend"],
                     "calls": int(r["calls"] or 0),
                     "failed_calls": int(r["failed_calls"] or 0),

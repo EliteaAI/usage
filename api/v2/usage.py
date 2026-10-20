@@ -1,8 +1,10 @@
 import calendar
 import datetime
 import re
+import sys
 
 from flask import request
+from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 PROMPT_LIB_MODE = "prompt_lib"
@@ -148,14 +150,45 @@ def _redact(payload: dict):
     return payload
 
 
-def _tool_spend(project_id: int, user_id: int, scope: str):
-    """Per-feature paid-tool spend (e.g. web search); kept apart from the LLM figures."""
+def _feature_row(feature: dict, spend: dict, scope: str):
+    """One paid feature's Usage row; a failed spend read is marked, never shown as $0."""
+    limit = feature.get("limit_usd")
+    row = {
+        "feature": feature["feature"],
+        "label": feature.get("label") or feature["feature"],
+        "effective_limit": limit,
+        "limit_source": feature.get("limit_source", "unlimited"),
+        "enabled": feature.get("enabled", True),
+        "currency": "USD",
+        "spend_available": bool(spend.get("available")),
+    }
+    if not row["spend_available"]:
+        return row
+    member = scope == SCOPE_USER
+    spent = int(spend.get("member_spent_nano" if member else "project_spent_nano") or 0) / 1_000_000_000
+    row.update({
+        "spend": spent,
+        "calls": int(spend.get("member_calls" if member else "project_calls") or 0),
+        "remaining": None if limit is None else max(0.0, limit - spent),
+        "percent_used": None if not limit else round(spent / limit * 100, 2),
+    })
+    return row
+
+
+def _tool_spend(module, project_id: int, user_id: int, scope: str):
+    """Paid tools (e.g. web search): limits from elitea_core, spend off usage's own counters."""
+    member_id = user_id if scope == SCOPE_USER else None
     try:
-        return rpc_tools.RpcMixin().rpc.timeout(15).elitea_core_get_tool_spend_usage(
-            project_id=project_id, user_id=user_id if scope == SCOPE_USER else None,
+        features = rpc_tools.RpcMixin().rpc.timeout(10).elitea_core_get_tool_spend_limits(
+            project_id=project_id, user_id=member_id,
         ) or []
     except Exception:  # pylint: disable=W0703
+        log.warning("usage: tool spend limits unavailable for project %s: %s", project_id, sys.exc_info()[1])
         return []
+    return [
+        _feature_row(feature, module.usage_read_feature_spend(project_id, member_id, feature["feature"]), scope)
+        for feature in features
+    ]
 
 
 def _warning_pct(scope: str, is_personal: bool):
@@ -311,7 +344,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         is_personal = _is_personal_project(project_id, user_id)
         #
         payload = _usage_state(project_id, user_id, scope, is_personal)
-        payload["tool_spend"] = _tool_spend(project_id, user_id, scope)
+        payload["tool_spend"] = _tool_spend(self.module, project_id, user_id, scope)
         #
         visible = _can_see_amounts(project_id, user_id, is_personal)
         payload["can_see_amounts"] = visible
