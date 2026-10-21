@@ -153,6 +153,7 @@ if _API_AVAILABLE:
                     # Unfiltered by actor: scheduled runs may bill a project system user
                     "automated": an.automated_activity(
                         an.base_filters(project_id, dt_from, dt_to, human_only=False, run_scope=run_scope),
+                        project_id=project_id,
                     ),
                 }, 200
             except Exception:  # pylint: disable=W0703
