@@ -8,6 +8,8 @@ from pylon.core.tools import log
 from sqlalchemy import func, select
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
+from ...methods.reconcile import period_bounds as _event_period_bounds
+
 PROMPT_LIB_MODE = "prompt_lib"
 
 OPENAPI_TAG = "usage/usage"
@@ -64,45 +66,6 @@ def _period_event_where(project_id: int, start, end, user_id=None):
     return clauses
 
 
-def _usage_by_source(project_id: int, start, end, user_id=None):
-    """Spend per source bucket, derived from root_entity_type.
-
-    Mapping: NULL root → 'chat'; application/pipeline → 'agents'; skill → 'skills'.
-    All other non-null root types fall into 'external'.
-    """
-    from ...models.usage_event import UsageEvent  # pylint: disable=C0415
-    from ...methods._analytics import (  # pylint: disable=C0415
-        AGENT_ROOT_TYPES, ENTITY_TYPE_SKILL, cost_usd, fetch_all,
-    )
-    #
-    clauses = _period_event_where(project_id, start, end, user_id)
-    #
-    stmt = (
-        select(
-            UsageEvent.root_entity_type,
-            func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
-        )
-        .where(*clauses)
-        .group_by(UsageEvent.root_entity_type)
-    )
-    #
-    rows = fetch_all(stmt)
-    #
-    buckets: dict = {}
-    for row in rows:
-        ret = row["root_entity_type"]
-        if ret is None:
-            key = "chat"
-        elif ret in AGENT_ROOT_TYPES:
-            key = "agents"
-        elif ret == ENTITY_TYPE_SKILL:
-            key = "skills"
-        else:
-            key = "external"
-        buckets[key] = buckets.get(key, 0) + int(row["cost_nano"] or 0)
-    #
-    return [{"source": k, "spend": cost_usd(v)} for k, v in buckets.items()]
-
 
 def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5):
     """Top N agents/pipelines by spend for the period."""
@@ -141,6 +104,7 @@ def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5)
         {
             "type": row["type"],
             "id": row["id"],
+            "root_project_id": row["root_project_id"],
             "name": row["name"] or f"#{row['id']}",
             "runs": int(row["runs"] or 0),
             "spend": cost_usd(row["cost_nano"]),
@@ -182,6 +146,7 @@ def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5)
     return [
         {
             "id": row["id"],
+            "root_project_id": row["root_project_id"],
             "name": row["name"] or f"#{row['id']}",
             "uses": int(row["uses"] or 0),
             "spend": cost_usd(row["cost_nano"]),
@@ -193,7 +158,8 @@ def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5)
 def _available_periods(project_id: int, user_id=None):
     """YYYYMM strings for all months that have counter data, newest-first.
 
-    Limited to 24 months so the picker stays usable.
+    Always includes the current month even if no spend has been recorded yet, so a new
+    project always has something to show in the picker. Limited to 24 months.
     """
     from ...methods._counters import (  # pylint: disable=C0415
         ALL_MODELS_SENTINEL, PERIOD_MONTH, PROJECT_USER_SENTINEL,
@@ -214,14 +180,17 @@ def _available_periods(project_id: int, user_id=None):
         .limit(24)
     )
     rows = fetch_all(stmt)
-    return [row["period_start"].strftime("%Y%m") for row in rows if row["period_start"]]
+    periods = [row["period_start"].strftime("%Y%m") for row in rows if row["period_start"]]
+    current = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m")
+    if current not in periods:
+        periods.insert(0, current)
+    return periods
 
 
-def _usage_monthly_history(project_id: int, user_id=None, n_months: int = 4):
-    """Last N completed months of spend, oldest-first, as {period, spend} dicts.
+def _usage_monthly_history(project_id: int, user_id=None, n_months: int = 4, anchor_period: str = None):
+    """Last N completed months of spend before anchor_period, oldest-first.
 
-    Reads UsageCounter directly (the same source the budget gate uses) so the
-    figures are consistent with the spend shown elsewhere on the page.
+    anchor_period defaults to the current month. Uses a single IN-query instead of N round-trips.
     """
     from ...methods._counters import (  # pylint: disable=C0415
         ALL_MODELS_SENTINEL, NANO, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
@@ -229,33 +198,47 @@ def _usage_monthly_history(project_id: int, user_id=None, n_months: int = 4):
     from ...models.usage_counter import UsageCounter  # pylint: disable=C0415
     from ...methods._analytics import fetch_all  # pylint: disable=C0415
     #
-    now = datetime.datetime.now(datetime.timezone.utc)
+    if anchor_period:
+        try:
+            anchor_year, anchor_month = int(anchor_period[:4]), int(anchor_period[4:6])
+        except (TypeError, ValueError, IndexError):
+            anchor_period = None
+    if not anchor_period:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        anchor_year, anchor_month = now.year, now.month
+    #
     months = []
     for delta in range(n_months, 0, -1):
-        year = now.year + (now.month - delta - 1) // 12
-        month = (now.month - delta - 1) % 12 + 1
+        year = anchor_year + (anchor_month - delta - 1) // 12
+        month = (anchor_month - delta - 1) % 12 + 1
         months.append((f"{year:04d}{month:02d}", period_start(
             datetime.date(year, month, 1), PERIOD_MONTH,
         )))
     #
     counter_user = int(user_id) if user_id is not None else PROJECT_USER_SENTINEL
+    period_days = [pday for _, pday in months]
     #
-    result = []
-    for label, pday in months:
-        stmt = select(
-            func.sum(UsageCounter.cost_nano_usd),
-        ).where(
+    stmt = (
+        select(
+            UsageCounter.period_start,
+            func.sum(UsageCounter.cost_nano_usd).label("cost_nano"),
+        )
+        .where(
             UsageCounter.period_kind == PERIOD_MONTH,
-            UsageCounter.period_start == pday,
+            UsageCounter.period_start.in_(period_days),
             UsageCounter.project_id == int(project_id),
             UsageCounter.user_id == counter_user,
             UsageCounter.model_name == ALL_MODELS_SENTINEL,
         )
-        rows = fetch_all(stmt)
-        nano = rows[0][0] if rows and rows[0][0] is not None else 0
-        result.append({"period": label, "spend": round(int(nano) / NANO, 9)})
+        .group_by(UsageCounter.period_start)
+    )
+    rows = fetch_all(stmt)
+    nano_by_day = {row["period_start"]: int(row["cost_nano"] or 0) for row in rows}
     #
-    return result
+    return [
+        {"period": label, "spend": round(nano_by_day.get(pday, 0) / NANO, 9)}
+        for label, pday in months
+    ]
 
 
 def _model_display_names(project_id: int):
@@ -472,6 +455,8 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
                 project_id=project_id, user_id=user_id, period=period,
             ) or {}
         except Exception:  # pylint: disable=W0703
+            log.warning("usage: user detail unavailable for project %s user %s: %s",
+                        project_id, user_id, sys.exc_info()[1])
             detail = {}
     else:
         budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
@@ -486,68 +471,72 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
                 project_id=project_id, period=period,
             ) or {}
         except Exception:  # pylint: disable=W0703
+            log.warning("usage: project detail unavailable for project %s: %s",
+                        project_id, sys.exc_info()[1])
             detail = {}
     #
     spent = float(detail.get("spend", 0) or 0)
     period = detail.get("period") or f"{datetime.datetime.now(datetime.timezone.utc):%Y%m}"
     period_start, period_end = _period_bounds(period)
     #
-    # Per-period event window, shared by the new analytics queries
-    from ...methods.reconcile import period_bounds as _pb  # pylint: disable=C0415
-    ev_start, ev_end = _pb(period)
+    ev_start, ev_end = _event_period_bounds(period)
     uid_for_query = user_id if scope == SCOPE_USER else None
     #
     # New analytics fields — each query degrades gracefully on exception
     try:
-        by_source = _usage_by_source(project_id, ev_start, ev_end, uid_for_query)
-    except Exception:  # pylint: disable=W0703
-        by_source = []
-    #
-    try:
         top_agents = _usage_top_agents(project_id, ev_start, ev_end, uid_for_query)
     except Exception:  # pylint: disable=W0703
+        log.warning("usage: top_agents unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
         top_agents = []
     #
     try:
         top_skills = _usage_top_skills(project_id, ev_start, ev_end, uid_for_query)
     except Exception:  # pylint: disable=W0703
+        log.warning("usage: top_skills unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
         top_skills = []
     #
     try:
-        monthly_history = _usage_monthly_history(project_id, uid_for_query)
+        monthly_history = _usage_monthly_history(
+            project_id, uid_for_query, anchor_period=period,
+        )
     except Exception:  # pylint: disable=W0703
+        log.warning("usage: monthly_history unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
         monthly_history = []
     #
     try:
         available_periods = _available_periods(project_id, uid_for_query)
     except Exception:  # pylint: disable=W0703
+        log.warning("usage: available_periods unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
         available_periods = []
     #
-    # Inline derivations from existing detail fields
+    # Token counts from event detail
     input_tokens = int(detail.get("input_tokens", 0) or 0)
     output_tokens = int(detail.get("output_tokens", 0) or 0)
     cache_read_tokens = int(detail.get("cache_read_tokens", 0) or 0)
     cache_creation_tokens = int(detail.get("cache_creation_tokens", 0) or 0)
     #
-    # Proportional cost allocation: distribute total period spend across token types
-    total_weighted = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
-    if total_weighted > 0:
-        _cost_per_unit = spent / total_weighted
-        input_cost = round(_cost_per_unit * input_tokens, 9)
-        output_cost = round(_cost_per_unit * output_tokens, 9)
-        cached_cost = round(_cost_per_unit * cache_read_tokens, 9)
-    else:
-        input_cost = output_cost = cached_cost = 0.0
+    # Per-component costs: stored per event, so they are exact regardless of token-type prices.
+    # detail may carry these when usage_event_detail is updated to include cost_split_sums();
+    # until then they are absent and fall back to 0.
     token_mix = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cache_read_tokens,
-        "input_tokens_cost": input_cost,
-        "output_tokens_cost": output_cost,
-        "cached_tokens_cost": cached_cost,
+        "input_tokens_cost": detail.get("input_cost", 0) or 0,
+        "output_tokens_cost": detail.get("output_cost", 0) or 0,
+        "cached_tokens_cost": detail.get("cache_read_cost", 0) or 0,
     }
-    # cache_hit_rate: what fraction of input was served from cache (0–100)
-    cache_hit_rate = round(cache_read_tokens / input_tokens * 100, 2) if input_tokens else None
+    # cache_hit_rate: fraction of billable input served from cache (0–100).
+    # billable_input_tokens excludes cache reads, so cache_read / billable_input is the right ratio.
+    billable_input = int(detail.get("billable_input_tokens", input_tokens) or 0)
+    cache_hit_rate = round(cache_read_tokens / billable_input * 100, 2) if billable_input else None
+    #
+    # by_source comes from usage_event_detail (via spend.py) and is already in detail
+    by_source = detail.get("by_source") or []
     #
     return {
         "project_id": project_id,
@@ -575,7 +564,6 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
         ),
         "daily": detail.get("daily") or [],
         "period": period,
-        "period_yyyymm": period,
         "period_start": period_start,
         "period_end": period_end,
         "resets_at": _period_reset(period),
@@ -645,8 +633,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": "scope must be 'project' or 'user'"}, 400
         #
         period = request.args.get("period") or None
-        if period and not re.match(r"^\d{6}$", period):
-            return {"error": "period must be in YYYYMM format"}, 400
+        if period:
+            if not re.match(r"^\d{6}$", period):
+                return {"error": "period must be in YYYYMM format"}, 400
+            month = int(period[4:6])
+            if not 1 <= month <= 12:
+                return {"error": "period month must be 01–12"}, 400
+            current = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m")
+            if period > current:
+                return {"error": "period must not be in the future"}, 400
         #
         is_personal = _is_personal_project(project_id, user_id)
         #
