@@ -31,7 +31,12 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import db  # pylint: disable=E0401
 
-from ._analytics import total_tokens_expr
+from ._analytics import (
+    ENTITY_TYPE_EVALUATION,
+    ENTITY_TYPE_SKILL,
+    cost_split_sums,
+    total_tokens_expr,
+)
 from ._counters import (
     ALL_MODELS_SENTINEL, EVENT_TYPE_LLM, NANO, PERIOD_MONTH, PROJECT_USER_SENTINEL, period_start,
 )
@@ -333,6 +338,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             func.sum(UsageEvent.cache_read_tokens), func.sum(UsageEvent.cache_creation_tokens),
             func.sum(UsageEvent.cost_nano_usd), func.count(),
             func.sum(total_tokens_expr()),
+            *cost_split_sums(),
         ).where(*where)
         #
         # The table ranks rows and draws share bars in payload order, so the sort is the server's
@@ -356,8 +362,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Calls made directly via API (PATs, external tools) have no root_entity_type; they are
         # labelled "external" so the spend chart can show them alongside agent/chat/pipeline spend.
         source_label = case(
-            (UsageEvent.root_entity_type.is_(None), "external"),
-            else_=UsageEvent.root_entity_type,
+            (UsageEvent.trigger_source.in_(("scheduled", "webhook")), "automations"),
+            (UsageEvent.trigger_source == "index", "indexing"),
+            (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
+            (UsageEvent.root_entity_type == "application", "agents"),
+            (UsageEvent.root_entity_type == "pipeline", "pipelines"),
+            (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
+            (UsageEvent.conversation_id.isnot(None), "chat"),
+            else_="external",
         )
         by_source = select(
             source_label,
@@ -369,8 +381,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         try:
             with db.engine.connect() as connection:
-                inputs, outputs, cache_read, cache_creation, cost, calls, tokens = \
-                    connection.execute(totals).first() or (0, 0, 0, 0, 0, 0, 0)
+                (inputs, outputs, cache_read, cache_creation, cost, calls, tokens,
+                 input_cost, output_cost, cache_read_cost, cache_creation_cost) = \
+                    connection.execute(totals).first() or (0,) * 11
                 models = [
                     {
                         "model": model_name or "",
@@ -417,5 +430,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "cache_read_tokens": int(cache_read or 0),
             "cache_creation_tokens": int(cache_creation or 0),
             "api_requests": int(calls or 0),
+            "input_cost": _dollars(input_cost),
+            "output_cost": _dollars(output_cost),
+            "cache_read_cost": _dollars(cache_read_cost),
+            "cache_creation_cost": _dollars(cache_creation_cost),
             "available": True,
         }
