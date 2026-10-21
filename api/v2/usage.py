@@ -8,8 +8,6 @@ from pylon.core.tools import log
 from sqlalchemy import func, select
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
-from ...methods.reconcile import period_bounds as _event_period_bounds
-
 PROMPT_LIB_MODE = "prompt_lib"
 
 OPENAPI_TAG = "usage/usage"
@@ -479,6 +477,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
     period = detail.get("period") or f"{datetime.datetime.now(datetime.timezone.utc):%Y%m}"
     period_start, period_end = _period_bounds(period)
     #
+    from ...methods.reconcile import period_bounds as _event_period_bounds  # pylint: disable=C0415
     ev_start, ev_end = _event_period_bounds(period)
     uid_for_query = user_id if scope == SCOPE_USER else None
     #
