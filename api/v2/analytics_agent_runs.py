@@ -167,7 +167,7 @@ if _API_AVAILABLE:
 
         @staticmethod
         def _fetch_runs_page(project_id, conditions, sort_by, sort_order, limit, offset):
-            started_col = func.min(UsageEvent.ts).label("started_at")
+            started_col = func.min(an.event_started_at_expr()).label("started_at")
             user_email_col = func.max(UsageEvent.user_email).label("user_email")
             version_col = func.max(UsageEvent.root_entity_version_id).label("version_id")
             model_pairs = PromptLibAPI._fetch_model_pairs(conditions) if sort_by == "model" else None
