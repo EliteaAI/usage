@@ -7,6 +7,7 @@ import types
 from sqlalchemy import (
     JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, create_engine, event,
 )
+from sqlalchemy.ext.compiler import compiles
 
 METADATA = MetaData()
 
@@ -51,7 +52,22 @@ FAKE_TABLE = Table(
 FakeUsageEvent = types.SimpleNamespace(**{column.name: column for column in FAKE_TABLE.c})
 
 
+def _compile_event_started_at_sqlite(element, compiler, **kw):
+    ts, duration_ms = (compiler.process(clause, **kw) for clause in element.clauses)
+    # Same text shape as a stored DateTime, so min() and ORDER BY compare it with plain ts
+    return (
+        f"(strftime('%Y-%m-%d %H:%M:%f', {ts}, '-' || (coalesce({duration_ms}, 0) / 1000.0) || ' seconds')"
+        " || '000')"
+    )
+
+
+_COMPILED_FOR_SQLITE = set()
+
+
 def install_engine(monkeypatch, analytics):
+    if analytics.EventStartedAt not in _COMPILED_FOR_SQLITE:
+        compiles(analytics.EventStartedAt, "sqlite")(_compile_event_started_at_sqlite)
+        _COMPILED_FOR_SQLITE.add(analytics.EventStartedAt)
     monkeypatch.setattr(analytics, "UsageEvent", FakeUsageEvent)
     monkeypatch.setattr(analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != analytics.SYSTEM_USER_ID)
     monkeypatch.setattr(analytics, "MANUAL_RUN", FakeUsageEvent.trigger_source.is_(None))
