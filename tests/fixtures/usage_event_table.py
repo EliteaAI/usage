@@ -5,6 +5,7 @@ import sys
 import types
 
 from sqlalchemy import (
+    or_,
     JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, create_engine, event,
 )
 
@@ -54,7 +55,8 @@ FakeUsageEvent = types.SimpleNamespace(**{column.name: column for column in FAKE
 def install_engine(monkeypatch, analytics):
     monkeypatch.setattr(analytics, "UsageEvent", FakeUsageEvent)
     monkeypatch.setattr(analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != analytics.SYSTEM_USER_ID)
-    monkeypatch.setattr(analytics, "MANUAL_RUN", FakeUsageEvent.trigger_source.is_(None))
+    monkeypatch.setattr(analytics, "MANUAL_RUN", or_(  # the same rule as MANUAL_RUN: no source, or a manual one
+        FakeUsageEvent.trigger_source.is_(None), FakeUsageEvent.trigger_source.in_(analytics.MANUAL_SOURCES)))
     monkeypatch.setattr(analytics, "COST_SPLIT_COLUMNS", {
         "input_cost": FakeUsageEvent.input_cost_nano_usd,
         "output_cost": FakeUsageEvent.output_cost_nano_usd,
