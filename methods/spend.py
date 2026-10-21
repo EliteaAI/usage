@@ -24,7 +24,7 @@ cache-token detail comes off usage_event, which is the only place that grain exi
 import datetime
 
 from cachetools import TTLCache
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
@@ -353,6 +353,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             func.count(),
         ).where(*where).group_by(day).order_by(day)
         #
+        # Calls made directly via API (PATs, external tools) have no root_entity_type; they are
+        # labelled "external" so the spend chart can show them alongside agent/chat/pipeline spend.
+        source_label = case(
+            (UsageEvent.root_entity_type.is_(None), "external"),
+            else_=UsageEvent.root_entity_type,
+        )
+        by_source = select(
+            source_label,
+            func.sum(UsageEvent.cost_nano_usd),
+            func.sum(total_tokens_expr()),
+        ).where(*where).group_by(source_label).order_by(
+            func.sum(UsageEvent.cost_nano_usd).desc(),
+        )
+        #
         try:
             with db.engine.connect() as connection:
                 inputs, outputs, cache_read, cache_creation, cost, calls, tokens = \
@@ -377,6 +391,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     for moment, day_cost, day_tokens, day_calls
                     in connection.execute(by_day)
                 ]
+                sources = [
+                    {
+                        "source": source or "external",
+                        "spend": _dollars(source_cost),
+                        "total_tokens": int(source_tokens or 0),
+                    }
+                    for source, source_cost, source_tokens
+                    in connection.execute(by_source)
+                ]
         except:  # pylint: disable=W0702
             log.exception("usage: usage detail read failed for %s", tag)
             return empty_usage_detail(tag)
@@ -386,6 +409,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "period": period,
             "models": models,
             "daily": daily,
+            "by_source": sources,
             "spend": _dollars(cost),
             "total_tokens": int(tokens or 0),
             "input_tokens": int(inputs or 0),
