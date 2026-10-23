@@ -32,7 +32,9 @@ import time
 import uuid
 from typing import NamedTuple, Optional
 
-from sqlalchemy import Date, and_, case, cast, distinct, func, or_, select
+from sqlalchemy import Date, DateTime, and_, case, cast, distinct, func, or_, select
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.functions import FunctionElement
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -416,6 +418,40 @@ def base_filters(
         ))
     #
     return conditions
+
+
+class EventStartedAt(FunctionElement):
+    """ts - duration_ms: ts is stamped when a call completes, so this is when it started."""
+    type = DateTime(timezone=True)
+    inherit_cache = True
+    name = "event_started_at"
+
+
+@compiles(EventStartedAt)
+def _compile_event_started_at(element, compiler, **kw):
+    ts, duration_ms = element.clauses
+    return (
+        f"({compiler.process(ts, **kw)} - "
+        f"coalesce({compiler.process(duration_ms, **kw)}, 0) * interval '1 millisecond')"
+    )
+
+
+MILLISECOND = datetime.timedelta(milliseconds=1)
+
+
+def event_started_at(ts, duration_ms):
+    if ts is None:
+        return None
+    #
+    return ts - (duration_ms or 0) * MILLISECOND
+
+
+def event_started_at_expr(ts=None, duration_ms=None):
+    """A run starts at min() of this, not min(ts), or its first call's duration is lost (#6997)."""
+    return EventStartedAt(
+        UsageEvent.ts if ts is None else ts,
+        UsageEvent.duration_ms if duration_ms is None else duration_ms,
+    )
 
 
 def total_tokens_expr():
