@@ -8,7 +8,7 @@ import sys
 import types
 
 import pytest
-from sqlalchemy import Date, event, func
+from sqlalchemy import Date, event, func, or_
 
 from fixtures.usage_event_table import FakeUsageEvent, drop_engine, insert_row, install_engine, load_api_module
 from usage.methods import _analytics
@@ -28,6 +28,9 @@ API_MODULES = ("analytics_agent_detail", "analytics_agent_runs", "analytics_run_
 @pytest.fixture
 def engine(monkeypatch):
     db_engine = install_engine(monkeypatch, _analytics)
+    monkeypatch.setattr(_analytics, "MANUAL_RUN", or_(
+        FakeUsageEvent.trigger_source.is_(None), FakeUsageEvent.trigger_source.in_(_analytics.MANUAL_SOURCES),
+    ))
     monkeypatch.setattr(_analytics, "model_display_names", lambda project_id: {
         "gpt-a": {"shared": "GPT A"}, "gpt-b": {"shared": "Alpha B"},
     })
@@ -191,6 +194,68 @@ class TestTriggerSources:
         assert [(t["trigger_source"], t["runs"], t["total_tokens"], t["cost"]) for t in triggers] == [
             ("manual", 2, 320, 0.000003), ("scheduled", 1, 530, 0.000007), ("webhook", 1, 110, 0.000001),
         ]
+
+
+class TestTriggerSourcesEl7011:
+    def test_el_7011_r1_4_detail_returns_each_stored_source_and_null_as_manual(self, api, engine, monkeypatch):
+        for i, source in enumerate((None, "chat", "api", "mcp", "schedule_manual")):
+            call(engine, f"run-{i}", seconds=i, trigger_source=source)
+
+        triggers = detail(api, monkeypatch)["by_trigger_source"]
+
+        assert sorted(t["trigger_source"] for t in triggers) == ["api", "chat", "manual", "mcp", "schedule_manual"]
+
+    def test_el_7011_r2_1_null_source_counts_as_manual(self, engine):
+        call(engine, "run-null")
+        call(engine, "run-chat", seconds=1, trigger_source="chat")
+        call(engine, "run-sm", seconds=2, trigger_source="schedule_manual")
+
+        manual = _analytics.fetch_all(_analytics.select_from([_analytics.UsageEvent.run_id], [_analytics.MANUAL_RUN]))
+
+        assert len(manual) == 2
+
+
+class TestAutomatedActivityEl7011:
+    @staticmethod
+    def seed(engine):
+        call(engine, "r-chat", trigger_source="chat")
+        call(engine, "r-api", seconds=1, trigger_source="api")
+        call(engine, "r-mcp", seconds=2, trigger_source="mcp")
+        call(engine, "r-null", seconds=3)
+        call(engine, "r-sm", seconds=4, trigger_source="schedule_manual")
+        call(engine, "r-idx", seconds=5, trigger_source="index")
+        call(engine, "r-web", seconds=6, trigger_source="webhook")
+        call(engine, "r-cron-a", seconds=7, trigger_source="scheduled")
+        call(engine, "r-cron-b", seconds=8, trigger_source="scheduled")
+        call(engine, "r-cron-p", seconds=9, trigger_source="scheduled", root_entity_id=AGENT_ID + 1,
+             root_entity_project_id=PUBLIC_PROJECT_ID)
+
+    def test_el_7011_r1_3_manual_sources_are_chat_api_mcp_and_null(self, engine, core):
+        self.seed(engine)
+
+        out = _analytics.automated_activity([], project_id=PROJECT_ID)
+
+        assert {r["trigger_source"] for r in out} == {"schedule_manual", "index", "webhook", "scheduled"}
+
+    def test_el_7011_r1_3_one_row_per_source_and_entity_kind(self, engine, core):
+        self.seed(engine)
+        core["applications"][(PUBLIC_PROJECT_ID, AGENT_ID + 1)] = "agent"
+
+        out = _analytics.automated_activity([], project_id=PROJECT_ID)
+
+        scheduled = [r for r in out if r["trigger_source"] == "scheduled"]
+        assert sorted((r["entity_kind"], r["runs"]) for r in scheduled) == [("agent", 1), ("pipeline", 2)]
+        assert all(set(r) == {"trigger_source", "entity_kind", "runs", "llm_calls", "tool_runs", "llm_cost"}
+                   for r in out)
+
+    def test_el_7011_r2_2_failed_kind_lookup_keeps_rows_with_empty_kind(self, engine, core):
+        self.seed(engine)
+        core["down"] = True
+
+        out = _analytics.automated_activity([], project_id=PROJECT_ID)
+
+        scheduled = [r for r in out if r["trigger_source"] == "scheduled"]
+        assert [(r["entity_kind"], r["runs"]) for r in scheduled] == [(None, 3)]
 
 
 class TestModels:
