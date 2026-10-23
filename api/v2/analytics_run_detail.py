@@ -145,7 +145,7 @@ if _API_AVAILABLE:
                     root_entity_name = row["entity_name"]
                     break
 
-            started_at = min(row["ts"] for row in rows)
+            started_at = min(an.event_started_at(row["ts"], row["duration_ms"]) for row in rows)
             ended_at = max(row["ts"] for row in rows)
 
             llm_calls = []
@@ -232,7 +232,7 @@ if _API_AVAILABLE:
                 "started_at": started_at.isoformat() if started_at else None,
                 "ended_at": ended_at.isoformat() if ended_at else None,
                 "duration_ms": (
-                    int((ended_at - started_at).total_seconds() * 1000)
+                    (ended_at - started_at) // an.MILLISECOND
                     if started_at and ended_at else 0
                 ),
                 "kpis": {

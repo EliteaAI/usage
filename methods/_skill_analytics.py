@@ -365,7 +365,7 @@ def fetch_source_split(measures):
 
 def fetch_recent_runs(measures):
     c = measures.rows.c
-    started = func.min(c.ts)
+    started = func.min(an.event_started_at_expr(c.ts, c.duration_ms))
     return an.fetch_all(select(
         c.run_id,
         func.max(c.conversation_id).label("conversation_id"),

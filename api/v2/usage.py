@@ -5,7 +5,7 @@ import sys
 
 from flask import request
 from pylon.core.tools import log
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 PROMPT_LIB_MODE = "prompt_lib"
@@ -335,6 +335,8 @@ def _redact(payload: dict):
     #
     for row in payload.get("daily") or []:
         row.pop("spend", None)
+        row.pop("by_model", None)
+        row.pop("by_source", None)
     #
     for row in payload.get("tool_spend") or []:
         for field in AMOUNT_FIELDS:
@@ -427,6 +429,76 @@ def _member_default(rpc, project_id: int):
         return budget.get("member_default_limit")
     except Exception:  # pylint: disable=W0703
         return None
+
+
+def _usage_daily_breakdown(project_id: int, start, end, user_id=None):
+    """Per-day spend and tokens split by model and source bucket.
+
+    Runs two GROUP BY queries (day × model, day × source) and returns a flat list
+    of breakdown rows that _attach_daily_breakdown folds into the daily array.
+    """
+    from ...models.usage_event import UsageEvent  # pylint: disable=C0415
+    from ...methods._analytics import (  # pylint: disable=C0415
+        ENTITY_TYPE_EVALUATION, ENTITY_TYPE_SKILL, cost_usd, fetch_all, total_tokens_expr,
+    )
+    #
+    clauses = _period_event_where(project_id, start, end, user_id)
+    day = func.date_trunc("day", UsageEvent.ts)
+    source = case(
+        (UsageEvent.trigger_source.in_(("scheduled", "webhook")), "automations"),
+        (UsageEvent.trigger_source == "index", "indexing"),
+        (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
+        (UsageEvent.root_entity_type == "application", "agents"),
+        (UsageEvent.root_entity_type == "pipeline", "pipelines"),
+        (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
+        (UsageEvent.conversation_id.isnot(None), "chat"),
+        else_="external",
+    )
+    breakdown = []
+    for dimension, column in (
+        ("model", func.coalesce(UsageEvent.model_name, "")),
+        ("source", source),
+    ):
+        stmt = (
+            select(
+                day.label("day"),
+                column.label("key"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+                func.sum(total_tokens_expr()).label("tokens"),
+            )
+            .where(*clauses)
+            .group_by(day, column)
+        )
+        breakdown.extend(
+            {
+                "date": row["day"].date().isoformat(),
+                "dimension": dimension,
+                "key": row["key"],
+                "spend": cost_usd(row["cost_nano"]),
+                "total_tokens": int(row["tokens"] or 0),
+            }
+            for row in fetch_all(stmt)
+        )
+    return breakdown
+
+
+def _attach_daily_breakdown(daily: list, breakdown: list):
+    """Fold breakdown rows into each daily entry as by_<dimension> spend/token dicts."""
+    for day_row in daily:
+        day_row["by_model"] = {}
+        day_row["by_model_tokens"] = {}
+        day_row["by_source"] = {}
+        day_row["by_source_tokens"] = {}
+    #
+    rows_by_date = {day_row["date"]: day_row for day_row in daily}
+    for row in breakdown:
+        day_row = rows_by_date.get(row["date"])
+        if day_row is None:
+            continue
+        dim = row["dimension"]
+        day_row[f"by_{dim}"][row["key"]] = row["spend"]
+        day_row[f"by_{dim}_tokens"][row["key"]] = row["total_tokens"]
+    return daily
 
 
 def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, period: str = None):
@@ -537,6 +609,15 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
     # by_source comes from usage_event_detail (via spend.py) and is already in detail
     by_source = detail.get("by_source") or []
     #
+    # Per-day model and source breakdown — attach in-place to each daily row
+    daily = detail.get("daily") or []
+    try:
+        breakdown = _usage_daily_breakdown(project_id, ev_start, ev_end, uid_for_query)
+        _attach_daily_breakdown(daily, breakdown)
+    except Exception:  # pylint: disable=W0702
+        log.warning("usage: daily breakdown unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
+    #
     return {
         "project_id": project_id,
         "user_id": user_id if scope == SCOPE_USER else None,
@@ -561,7 +642,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
         "models": _attach_display_names(
             detail.get("models") or [], _model_display_names(project_id),
         ),
-        "daily": detail.get("daily") or [],
+        "daily": daily,
         "period": period,
         "period_start": period_start,
         "period_end": period_end,

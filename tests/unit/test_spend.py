@@ -219,7 +219,7 @@ class TestMemberSpendListing:
 # totals carry their own total_tokens column: it is total_tokens_expr, not input+output, so
 # the Usage page and Analytics report one number for the same rows
 DETAIL_RESULTS = (
-    [(120, 40, 5, 7, 1_500_000_000, 2, 172)],
+    [(120, 40, 5, 7, 1_500_000_000, 2, 172, 900_000_000, 600_000_000, 3_000_000, 7_000_000)],
     [("gpt-4o", 1_500_000_000, 172, 2)],
     [(DAY, 1_500_000_000, 172, 2)],
 )
