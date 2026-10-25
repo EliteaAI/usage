@@ -1405,14 +1405,22 @@ EVAL_BREAKDOWN_TOKEN_COLUMNS = (
 )
 
 
-def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
-    """llm rows of one eval run, grouped by conversation_id. Bounds are required: ts is the
-    partition key, so a run-scoped query without them scans every partition.
+# The entity a row is labelled with: the evaluation for the agent under test, the sub-agent's
+# application for a dispatched child (#7015 P3).
+EVAL_BREAKDOWN_ENTITY_COLUMNS = ("entity_type", "entity_id", "entity_name")
+
+
+def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to, by_entity=False):
+    """llm rows of one eval run, grouped by conversation_id, and by entity too when ``by_entity``.
+    Bounds are required: ts is the partition key, so a run-scoped query without them scans every
+    partition.
     """
+    entity = [getattr(UsageEvent, name) for name in EVAL_BREAKDOWN_ENTITY_COLUMNS] if by_entity else []
     priced = func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced"
     return select_from(
         [
             UsageEvent.conversation_id,
+            *entity,
             func.count().label("llm_calls"),
             *[
                 func.sum(func.coalesce(getattr(UsageEvent, name), 0)).label(name)
@@ -1434,13 +1442,17 @@ def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to):
             UsageEvent.run_id == platform_run_id,
             UsageEvent.event_type == EVENT_LLM,
         ],
-    ).group_by(UsageEvent.conversation_id)
+    ).group_by(UsageEvent.conversation_id, *entity)
 
 
-def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
+def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None, by_entity=False):
     """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, unparsed_calls,
     model_name}] for one
     eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
+
+    ``by_entity`` splits each conversation by the entity its rows are labelled with and adds
+    ``entity_type`` / ``entity_id`` / ``entity_name``: a dispatched sub-agent's calls carry its own
+    application (#7015 P3). The sums per conversation are the same either way.
 
     Raises ValueError for a malformed run id.
     """
@@ -1450,10 +1462,11 @@ def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None):
         raise ValueError("platform_run_id must be a UUID") from exc
     #
     dt_from, dt_to = clamp_date_range(dt_from, dt_to)
-    rows = fetch_all(eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to))
+    rows = fetch_all(eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to, by_entity))
     return [
         {
             "conversation_id": row["conversation_id"],
+            **({name: row[name] for name in EVAL_BREAKDOWN_ENTITY_COLUMNS} if by_entity else {}),
             "llm_calls": int(row["llm_calls"] or 0),
             **{name: int(row[name] or 0) for name in EVAL_BREAKDOWN_TOKEN_COLUMNS},
             "cost_nano_usd": int(row["cost_nano_usd"] or 0),
