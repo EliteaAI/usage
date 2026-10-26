@@ -28,6 +28,9 @@ FAKE_TABLE = Table(
     Column("cost_source", String),
     Column("token_source", String),
     Column("is_error", Boolean, default=False),
+    Column("entity_type", String),
+    Column("entity_id", Integer),
+    Column("entity_name", String),
 )
 
 
@@ -57,14 +60,15 @@ def session(monkeypatch):
 
 def _insert(session, conversation_id, *, run_id=RUN, event_type="llm", project_id=1, minutes=1,
             input_tokens=0, output_tokens=0, cost_nano_usd=0, cost_source="costs-catalog",
-            model_name="gpt-4o", token_source="provider", is_error=False):
+            model_name="gpt-4o", token_source="provider", is_error=False,
+            entity=("evaluation", 219, None)):
     session.execute(FAKE_TABLE.insert().values(
         project_id=project_id, ts=T0 + datetime.timedelta(minutes=minutes), run_id=run_id,
         conversation_id=conversation_id, event_type=event_type, model_name=model_name,
         input_tokens=input_tokens, output_tokens=output_tokens, billable_input_tokens=input_tokens,
         cache_read_tokens=0, cache_creation_tokens=0, reasoning_tokens=0,
         cost_nano_usd=cost_nano_usd, cost_source=cost_source, token_source=token_source,
-        is_error=is_error,
+        is_error=is_error, entity_type=entity[0], entity_id=entity[1], entity_name=entity[2],
     ))
     session.commit()
 
@@ -116,3 +120,55 @@ def test_unparsed_successful_call_is_flagged(session):
 def test_malformed_run_id_is_rejected():
     with pytest.raises(ValueError, match="platform_run_id"):
         _analytics.eval_run_breakdown(1, "not-a-uuid")
+
+
+# --- by_entity: a dispatched sub-agent's calls carry its own application (#7015 P3) ----------
+
+ORDER_READER = ("application", 53, "RD-OrderReader")
+DECISION_READER = ("application", 54, "RD-DecisionReader")
+
+
+def test_by_entity_splits_a_conversation_by_its_labelled_entity(session):
+    _insert(session, "a_0", input_tokens=100, output_tokens=10, cost_nano_usd=500)
+    _insert(session, "a_0", input_tokens=40, output_tokens=4, cost_nano_usd=200, entity=ORDER_READER)
+    _insert(session, "a_0", input_tokens=60, output_tokens=6, cost_nano_usd=300, entity=ORDER_READER)
+    _insert(session, "a_0", input_tokens=30, output_tokens=3, cost_nano_usd=150, entity=DECISION_READER)
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    split = {(r["entity_type"], r["entity_id"], r["entity_name"]): r for r in rows}
+    assert set(split) == {("evaluation", 219, None), ORDER_READER, DECISION_READER}
+    assert (split[ORDER_READER]["llm_calls"], split[ORDER_READER]["input_tokens"],
+            split[ORDER_READER]["cost_nano_usd"]) == (2, 100, 500)
+    assert split[DECISION_READER]["output_tokens"] == 3
+    assert {r["conversation_id"] for r in rows} == {"a_0"}
+
+
+def test_by_entity_sums_match_the_plain_breakdown(session):
+    _insert(session, "a_0", input_tokens=100, cost_nano_usd=500)
+    _insert(session, "a_0", input_tokens=40, cost_nano_usd=200, entity=ORDER_READER)
+    _insert(session, "a_1", input_tokens=7, cost_nano_usd=9, entity=DECISION_READER)
+    _insert(session, "a_1", input_tokens=5, cost_nano_usd=3, entity=(None, None, None))
+    plain = _breakdown()
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    for conversation_id, row in plain.items():
+        mine = [r for r in rows if r["conversation_id"] == conversation_id]
+        for key in ("llm_calls", "input_tokens", "cost_nano_usd"):
+            assert sum(r[key] for r in mine) == row[key]
+
+
+def test_an_unlabelled_row_has_a_none_entity(session):
+    _insert(session, "a_0", input_tokens=5, entity=(None, None, None))
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    assert [(r["entity_type"], r["entity_id"], r["entity_name"], r["input_tokens"]) for r in rows] == \
+        [(None, None, None, 5)]
+
+
+def test_an_application_renamed_mid_run_stays_one_row(session):
+    _insert(session, "a_0", input_tokens=40, entity=("application", 53, "RD-OrderReader"))
+    _insert(session, "a_0", input_tokens=60, minutes=2, entity=("application", 53, "RD-OrderReader2"))
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    assert [(r["entity_id"], r["input_tokens"]) for r in rows] == [(53, 100)]
+
+
+def test_plain_breakdown_carries_no_entity_keys(session):
+    _insert(session, "a_0", input_tokens=1, entity=ORDER_READER)
+    assert "entity_name" not in _breakdown()["a_0"]

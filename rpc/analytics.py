@@ -64,9 +64,13 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
 
     @web.rpc("usage_eval_run_breakdown", "usage_eval_run_breakdown")
     def usage_eval_run_breakdown(  # pylint: disable=R0913,R0917
-            self, project_id, platform_run_id, date_from=None, date_to=None, **kwargs,
+            self, project_id, platform_run_id, date_from=None, date_to=None, by_entity=False, **kwargs,
     ):  # pylint: disable=W0613
         """One eval run's llm usage per conversation_id, for elitea_core to settle its per-case
-        figures from the ledger (#6716). Raises ValueError for a malformed run id.
+        figures from the ledger (#6716). ``by_entity`` (exactly True) also splits it by the labelled
+        entity, so a dispatched sub-agent's spend reads on its own (#7015 P3). Raises ValueError for a malformed
+        run id.
         """
-        return an.eval_run_breakdown(project_id, platform_run_id, date_from, date_to)
+        return an.eval_run_breakdown(
+            project_id, platform_run_id, date_from, date_to, by_entity=by_entity is True,
+        )
