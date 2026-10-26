@@ -146,12 +146,27 @@ def test_by_entity_sums_match_the_plain_breakdown(session):
     _insert(session, "a_0", input_tokens=100, cost_nano_usd=500)
     _insert(session, "a_0", input_tokens=40, cost_nano_usd=200, entity=ORDER_READER)
     _insert(session, "a_1", input_tokens=7, cost_nano_usd=9, entity=DECISION_READER)
+    _insert(session, "a_1", input_tokens=5, cost_nano_usd=3, entity=(None, None, None))
     plain = _breakdown()
     rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
     for conversation_id, row in plain.items():
         mine = [r for r in rows if r["conversation_id"] == conversation_id]
         for key in ("llm_calls", "input_tokens", "cost_nano_usd"):
             assert sum(r[key] for r in mine) == row[key]
+
+
+def test_an_unlabelled_row_has_a_none_entity(session):
+    _insert(session, "a_0", input_tokens=5, entity=(None, None, None))
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    assert [(r["entity_type"], r["entity_id"], r["entity_name"], r["input_tokens"]) for r in rows] == \
+        [(None, None, None, 5)]
+
+
+def test_an_application_renamed_mid_run_stays_one_row(session):
+    _insert(session, "a_0", input_tokens=40, entity=("application", 53, "RD-OrderReader"))
+    _insert(session, "a_0", input_tokens=60, minutes=2, entity=("application", 53, "RD-OrderReader2"))
+    rows = _analytics.eval_run_breakdown(1, RUN, T0, T0 + datetime.timedelta(hours=1), by_entity=True)
+    assert [(r["entity_id"], r["input_tokens"]) for r in rows] == [(53, 100)]
 
 
 def test_plain_breakdown_carries_no_entity_keys(session):

@@ -1412,10 +1412,12 @@ EVAL_BREAKDOWN_ENTITY_COLUMNS = ("entity_type", "entity_id", "entity_name")
 
 def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to, by_entity=False):
     """llm rows of one eval run, grouped by conversation_id, and by entity too when ``by_entity``.
-    Bounds are required: ts is the partition key, so a run-scoped query without them scans every
-    partition.
+    An entity is its (type, id): an application renamed mid-run stays one row, under the greater of
+    its names. Bounds are required: ts is the partition key, so a run-scoped query without them
+    scans every partition.
     """
-    entity = [getattr(UsageEvent, name) for name in EVAL_BREAKDOWN_ENTITY_COLUMNS] if by_entity else []
+    entity_key = [UsageEvent.entity_type, UsageEvent.entity_id] if by_entity else []
+    entity = [*entity_key, func.max(UsageEvent.entity_name).label("entity_name")] if by_entity else []
     priced = func.coalesce(UsageEvent.cost_source, "unpriced") != "unpriced"
     return select_from(
         [
@@ -1442,17 +1444,17 @@ def eval_run_breakdown_statement(project_id, platform_run_id, dt_from, dt_to, by
             UsageEvent.run_id == platform_run_id,
             UsageEvent.event_type == EVENT_LLM,
         ],
-    ).group_by(UsageEvent.conversation_id, *entity)
+    ).group_by(UsageEvent.conversation_id, *entity_key)
 
 
 def eval_run_breakdown(project_id, platform_run_id, dt_from=None, dt_to=None, by_entity=False):
     """[{conversation_id, llm_calls, <tokens>, cost_nano_usd, unpriced_calls, unparsed_calls,
-    model_name}] for one
-    eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
+    model_name}] for one eval run's platform run id. Cost stays in integer nano-USD so the caller sums without drift.
 
     ``by_entity`` splits each conversation by the entity its rows are labelled with and adds
     ``entity_type`` / ``entity_id`` / ``entity_name``: a dispatched sub-agent's calls carry its own
-    application (#7015 P3). The sums per conversation are the same either way.
+    application (#7015 P3). A row with no entity label comes back with all three None. The sums per
+    conversation are the same either way.
 
     Raises ValueError for a malformed run id.
     """

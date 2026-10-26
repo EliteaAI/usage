@@ -67,8 +67,10 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
             self, project_id, platform_run_id, date_from=None, date_to=None, by_entity=False, **kwargs,
     ):  # pylint: disable=W0613
         """One eval run's llm usage per conversation_id, for elitea_core to settle its per-case
-        figures from the ledger (#6716). ``by_entity`` also splits it by the labelled entity, so a
-        dispatched sub-agent's spend reads on its own (#7015 P3). Raises ValueError for a malformed
+        figures from the ledger (#6716). ``by_entity`` (exactly True) also splits it by the labelled
+        entity, so a dispatched sub-agent's spend reads on its own (#7015 P3). Raises ValueError for a malformed
         run id.
         """
-        return an.eval_run_breakdown(project_id, platform_run_id, date_from, date_to, by_entity=by_entity)
+        return an.eval_run_breakdown(
+            project_id, platform_run_id, date_from, date_to, by_entity=by_entity is True,
+        )
