@@ -75,6 +75,15 @@ calls `create_all()` itself, so the flag governs it by construction.
 express, so `usage_ensure_partitions()` creates them from `ready()` and from a daily cron. It no-ops
 with a warning when the parent is absent — i.e. when the metadata has not been applied yet.
 
+## Trigger sources
+
+Each usage event stores the source that started its run. New values: `chat`, `api`, `mcp`, `webhook`,
+`scheduled`, `schedule_manual`. Events stored before this release have a NULL source and show as
+Manual (legacy). A chart that spans the release mixes both meanings.
+
+A run with several stored sources takes its first one. `scheduled`, `webhook` and `schedule_manual`
+count as automations in spend.
+
 ## Tests
 
 ```bash

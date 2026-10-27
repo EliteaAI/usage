@@ -5,7 +5,7 @@ import sys
 
 from flask import request
 from pylon.core.tools import log
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 PROMPT_LIB_MODE = "prompt_lib"
@@ -439,21 +439,12 @@ def _usage_daily_breakdown(project_id: int, start, end, user_id=None):
     """
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
     from ...methods._analytics import (  # pylint: disable=C0415
-        ENTITY_TYPE_EVALUATION, ENTITY_TYPE_SKILL, cost_usd, fetch_all, total_tokens_expr,
+        cost_usd, fetch_all, source_bucket_expr, total_tokens_expr,
     )
     #
     clauses = _period_event_where(project_id, start, end, user_id)
     day = func.date_trunc("day", UsageEvent.ts)
-    source = case(
-        (UsageEvent.trigger_source.in_(("scheduled", "webhook")), "automations"),
-        (UsageEvent.trigger_source == "index", "indexing"),
-        (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
-        (UsageEvent.root_entity_type == "application", "agents"),
-        (UsageEvent.root_entity_type == "pipeline", "pipelines"),
-        (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
-        (UsageEvent.conversation_id.isnot(None), "chat"),
-        else_="external",
-    )
+    source = source_bucket_expr()
     breakdown = []
     for dimension, column in (
         ("model", func.coalesce(UsageEvent.model_name, "")),

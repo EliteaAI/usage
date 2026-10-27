@@ -358,12 +358,23 @@ if _API_AVAILABLE:
 
         @staticmethod
         def _fetch_trigger_breakdown(conditions):
-            per_run = select(
+            # first stored source per run: NULL sorts last, so a legacy NULL row never hides a real source
+            first_source = func.first_value(UsageEvent.trigger_source).over(
+                partition_by=UsageEvent.run_id,
+                order_by=(UsageEvent.trigger_source.is_(None), UsageEvent.ts),
+            )
+            events = select(
                 UsageEvent.run_id,
-                func.max(UsageEvent.trigger_source).label("trigger_source"),
-                func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
-            ).where(*conditions).group_by(UsageEvent.run_id).subquery("per_run")
+                first_source.label("trigger_source"),
+                an.total_tokens_expr().label("total_tokens"),
+                func.coalesce(UsageEvent.cost_nano_usd, 0).label("cost_nano"),
+            ).where(*conditions).subquery("events")
+            per_run = select(
+                events.c.run_id,
+                func.max(events.c.trigger_source).label("trigger_source"),
+                func.sum(events.c.total_tokens).label("total_tokens"),
+                func.sum(events.c.cost_nano).label("cost_nano"),
+            ).group_by(events.c.run_id).subquery("per_run")
             runs_col = func.count(per_run.c.run_id).label("runs")
             rows = an.fetch_all(select(
                 per_run.c.trigger_source,

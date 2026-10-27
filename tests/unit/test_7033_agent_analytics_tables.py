@@ -8,7 +8,7 @@ import sys
 import types
 
 import pytest
-from sqlalchemy import Date, event, func, or_
+from sqlalchemy import Date, event, func, or_, select
 
 from fixtures.usage_event_table import FakeUsageEvent, drop_engine, insert_row, install_engine, load_api_module
 from usage.methods import _analytics
@@ -204,6 +204,29 @@ class TestTriggerSourcesEl7011:
         triggers = detail(api, monkeypatch)["by_trigger_source"]
 
         assert sorted(t["trigger_source"] for t in triggers) == ["api", "chat", "manual", "mcp", "schedule_manual"]
+
+    def test_a_mixed_source_run_is_labelled_by_its_first_stored_source(self, api, engine, monkeypatch):
+        call(engine, "run-mixed", seconds=0, trigger_source=None)
+        call(engine, "run-mixed", seconds=1, trigger_source="api")
+        call(engine, "run-mixed", seconds=2, trigger_source="chat")
+
+        triggers = detail(api, monkeypatch)["by_trigger_source"]
+
+        assert [(t["trigger_source"], t["runs"]) for t in triggers] == [("api", 1)]
+
+    def test_automation_sources_share_one_spend_bucket(self, engine):
+        for i, source in enumerate(("scheduled", "webhook", "schedule_manual", "index", "evaluation", "chat")):
+            call(engine, f"run-{source}", seconds=i, trigger_source=source, cost_nano_usd=10 ** i)
+        call(engine, "run-eval", seconds=9, entity_type="evaluation", cost_nano_usd=10 ** 6)
+
+        rows = _analytics.fetch_all(
+            select(_analytics.source_bucket_expr().label("bucket"), func.sum(FakeUsageEvent.cost_nano_usd).label("cost"))
+            .group_by("bucket")
+        )
+
+        assert {r["bucket"]: r["cost"] for r in rows} == {
+            "automations": 111, "indexing": 1000, "agents": 110000, "evaluations": 1000000,
+        }
 
     def test_el_7011_r2_1_null_source_counts_as_manual(self, engine):
         call(engine, "run-null")

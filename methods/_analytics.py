@@ -82,8 +82,26 @@ HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
 # Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881).
 # Chat, API and MCP runs start from a user entry point, so they stay manual (EL-7011); NULL is legacy manual.
+# schedule_manual (Run now on a schedule) is automation, so it stays out of MANUAL_SOURCES and inside AUTOMATION_SOURCES.
 MANUAL_SOURCES = ("chat", "api", "mcp")
 MANUAL_RUN = or_(UsageEvent.trigger_source.is_(None), UsageEvent.trigger_source.in_(MANUAL_SOURCES))
+
+# Runs that nobody started from an entry point: they get their own spend bucket, not agents/pipelines.
+AUTOMATION_SOURCES = ("scheduled", "webhook", "schedule_manual")
+
+
+def source_bucket_expr():
+    """Spend source bucket of an event: automations, indexing, evaluations, agents, pipelines, skills, chat, external."""
+    return case(
+        (UsageEvent.trigger_source.in_(AUTOMATION_SOURCES), "automations"),
+        (UsageEvent.trigger_source == "index", "indexing"),
+        (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
+        (UsageEvent.root_entity_type == "application", "agents"),
+        (UsageEvent.root_entity_type == "pipeline", "pipelines"),
+        (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
+        (UsageEvent.conversation_id.isnot(None), "chat"),
+        else_="external",
+    )
 
 VERSION_SUFFIX_PATTERN = r" \(([^()]*)\)$"
 
