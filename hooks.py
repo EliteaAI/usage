@@ -73,8 +73,8 @@ ATTRIBUTION_KEYS = (
     "root_entity_type", "root_entity_id", "root_entity_version_id", "root_entity_project_id",
     "trigger_source",
 )
-#: Automated sources only; manual stays NULL, and an unknown value is dropped as manual (#6881)
-TRIGGER_SOURCES = ("scheduled", "webhook", "index")
+#: The six EL-7011 entry-point values plus index; no value stays NULL (= manual), an unknown value is dropped (#6881)
+TRIGGER_SOURCES = ("chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "index")
 ATTRIBUTION_INT_KEYS = (
     "entity_id", "entity_version_id", "root_entity_id", "root_entity_version_id",
     "root_entity_project_id",

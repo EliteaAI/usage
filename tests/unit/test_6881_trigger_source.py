@@ -15,12 +15,18 @@ from usage.models.usage_event import UsageEvent
 
 
 class TestCleanAttribution:
-    @pytest.mark.parametrize("source", ["scheduled", "webhook", "index"])
-    def test_known_automated_sources_are_kept(self, source):
+    @pytest.mark.parametrize(
+        "source", ["chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "index"]
+    )
+    def test_el_7011_r1_1_known_sources_are_kept(self, source):
         assert hooks._clean_attribution({"trigger_source": source}) == {"trigger_source": source}
 
-    @pytest.mark.parametrize("source", ["manual", "cron", "x" * 40, 5, ""])
-    def test_manual_or_unknown_is_dropped_so_the_row_reads_as_manual(self, source):
+    def test_el_7011_r1_1_every_source_fits_the_column(self):
+        limit = hooks.ATTRIBUTION_TEXT_LIMITS["trigger_source"]
+        assert all(len(s) <= limit for s in hooks.TRIGGER_SOURCES)
+
+    @pytest.mark.parametrize("source", ["manual", "cron", "x" * 17, "x" * 40, 5, ""])
+    def test_el_7011_r1_5_manual_or_unknown_is_dropped_so_the_row_reads_as_manual(self, source):
         # Dropped, never the row: an unknown label degrades to NULL (= manual)
         assert "trigger_source" not in hooks._clean_attribution({"trigger_source": source, "entity_id": 1})
         assert hooks._clean_attribution({"trigger_source": source, "entity_id": 1})["entity_id"] == 1
@@ -83,7 +89,7 @@ class TestPeopleMetrics:
         # Applied on top of base_filters (which already drops user 0); here only the manual rule
         assert _scalar(engine, _analytics.manual_users_expr()) == 2
 
-    def test_manual_run_filter_keeps_null_rows_only(self, engine):
+    def test_el_7011_r2_1_manual_run_filter_keeps_null_rows_only(self, engine):
         assert _scalar(engine, func.count(), _analytics.MANUAL_RUN) == 3
 
 

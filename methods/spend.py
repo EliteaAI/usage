@@ -24,7 +24,7 @@ cache-token detail comes off usage_event, which is the only place that grain exi
 import datetime
 
 from cachetools import TTLCache
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
@@ -32,9 +32,8 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401
 from tools import db  # pylint: disable=E0401
 
 from ._analytics import (
-    ENTITY_TYPE_EVALUATION,
-    ENTITY_TYPE_SKILL,
     cost_split_sums,
+    source_bucket_expr,
     total_tokens_expr,
 )
 from ._counters import (
@@ -361,16 +360,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         # Calls made directly via API (PATs, external tools) have no root_entity_type; they are
         # labelled "external" so the spend chart can show them alongside agent/chat/pipeline spend.
-        source_label = case(
-            (UsageEvent.trigger_source.in_(("scheduled", "webhook")), "automations"),
-            (UsageEvent.trigger_source == "index", "indexing"),
-            (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
-            (UsageEvent.root_entity_type == "application", "agents"),
-            (UsageEvent.root_entity_type == "pipeline", "pipelines"),
-            (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
-            (UsageEvent.conversation_id.isnot(None), "chat"),
-            else_="external",
-        )
+        source_label = source_bucket_expr()
         by_source = select(
             source_label,
             func.sum(UsageEvent.cost_nano_usd),

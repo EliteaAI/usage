@@ -80,8 +80,28 @@ SYSTEM_USER_EMAIL_SUFFIX = "@centry.user"
 # Drops the synthetic actor from anything user-facing
 HUMAN_ACTOR = UsageEvent.user_id != SYSTEM_USER_ID
 
-# Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881)
-MANUAL_RUN = UsageEvent.trigger_source.is_(None)
+# Scheduled/webhook/index runs still bill their configuring user but are not that user's activity (#6881).
+# Chat, API and MCP runs start from a user entry point, so they stay manual (EL-7011); NULL is legacy manual.
+# schedule_manual (Run now on a schedule) is automation, so it stays out of MANUAL_SOURCES and inside AUTOMATION_SOURCES.
+MANUAL_SOURCES = ("chat", "api", "mcp")
+MANUAL_RUN = or_(UsageEvent.trigger_source.is_(None), UsageEvent.trigger_source.in_(MANUAL_SOURCES))
+
+# Runs that nobody started from an entry point: they get their own spend bucket, not agents/pipelines.
+AUTOMATION_SOURCES = ("scheduled", "webhook", "schedule_manual")
+
+
+def source_bucket_expr():
+    """Spend source bucket of an event: automations, indexing, evaluations, agents, pipelines, skills, chat, external."""
+    return case(
+        (UsageEvent.trigger_source.in_(AUTOMATION_SOURCES), "automations"),
+        (UsageEvent.trigger_source == "index", "indexing"),
+        (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
+        (UsageEvent.root_entity_type == "application", "agents"),
+        (UsageEvent.root_entity_type == "pipeline", "pipelines"),
+        (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
+        (UsageEvent.conversation_id.isnot(None), "chat"),
+        else_="external",
+    )
 
 VERSION_SUFFIX_PATTERN = r" \(([^()]*)\)$"
 
@@ -652,27 +672,42 @@ def manual_users_expr():
     return func.count(distinct(case((MANUAL_RUN, UsageEvent.user_id), else_=None)))
 
 
-def automated_activity(conditions):
-    """Runs, calls and cost of automated runs, one entry per trigger_source."""
+def automated_activity(conditions, project_id=None):
+    """Runs, calls and cost of automated runs, one entry per trigger_source and entity kind.
+
+    The kind (agent or pipeline) comes from elitea_core. Without project_id the rows are not
+    split by entity and the kind is None; a failed lookup also gives None.
+    """
+    root_project = root_project_expr()
+    entity = [root_project.label("root_project_id"), UsageEvent.root_entity_id] if project_id is not None else []
     rows = fetch_all(select_from(
         [
             UsageEvent.trigger_source,
+            *entity,
             func.count(distinct(UsageEvent.run_id)).label("runs"),
             llm_calls_expr().label("llm_calls"),
             tool_runs_expr().label("tool_runs"),
             func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
         ],
         [*conditions, ~MANUAL_RUN],
-    ).group_by(UsageEvent.trigger_source).order_by(UsageEvent.trigger_source))
+    ).group_by(UsageEvent.trigger_source, *([root_project, UsageEvent.root_entity_id] if entity else [])))
+    applications = application_meta(
+        project_id, refs=[(r["root_project_id"], r["root_entity_id"]) for r in rows],
+    ) if entity else {}
+    merged = {}
+    for r in rows:
+        kind = applications.get((r.get("root_project_id"), r.get("root_entity_id")), {}).get("kind")
+        entry = merged.setdefault((r["trigger_source"], kind), {
+            "trigger_source": r["trigger_source"], "entity_kind": kind,
+            "runs": 0, "llm_calls": 0, "tool_runs": 0, "llm_cost": 0,
+        })
+        entry["runs"] += int(r["runs"] or 0)
+        entry["llm_calls"] += int(r["llm_calls"] or 0)
+        entry["tool_runs"] += int(r["tool_runs"] or 0)
+        entry["llm_cost"] += int(r["cost_nano"] or 0)
     return [
-        {
-            "trigger_source": r["trigger_source"],
-            "runs": int(r["runs"] or 0),
-            "llm_calls": int(r["llm_calls"] or 0),
-            "tool_runs": int(r["tool_runs"] or 0),
-            "llm_cost": cost_usd(r["cost_nano"] or 0),
-        }
-        for r in rows
+        {**e, "llm_cost": cost_usd(e["llm_cost"])}
+        for _, e in sorted(merged.items(), key=lambda item: tuple(v or "" for v in item[0]))
     ]
 
 
