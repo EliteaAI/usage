@@ -228,12 +228,23 @@ if _API_AVAILABLE:
             )
 
             # Resolve participant names
-            refs = [
+            with_id = [r for r in page if r.get("participant_id") is not None]
+            app_refs = [
                 (r["root_project_id"], r["participant_id"])
-                for r in page
-                if r.get("participant_id") is not None
+                for r in with_id if r["participant_type"] != "skill"
             ]
-            applications = an.application_meta(project_id, refs=refs) if refs else {}
+            skill_refs = [
+                (r["root_project_id"], r["participant_id"])
+                for r in with_id if r["participant_type"] == "skill"
+            ]
+            applications = an.application_meta(project_id, refs=app_refs) if app_refs else {}
+            skills = sa.fetch_skill_meta(project_id, skill_refs)[0] if skill_refs else {}
+
+            def resolved_name(row):
+                key = (row["root_project_id"], row["participant_id"])
+                if row["participant_type"] == "skill":
+                    return (skills or {}).get(key, {}).get("name")
+                return applications.get(key, {}).get("name")
 
             # Resolve models per run
             run_ids = [r["run_id"] for r in page]
@@ -249,7 +260,7 @@ if _API_AVAILABLE:
                     "user_email": emails.get(r["user_id"]),
                     "participant_type": _TYPE_MAP.get(r["participant_type"], r["participant_type"] or "model"),
                     "participant_name": (
-                        applications.get((r["root_project_id"], r["participant_id"]), {}).get("name")
+                        resolved_name(r)
                         or (
                             f"{r['participant_type']} #{r['participant_id']}"
                             if r.get("participant_id") else None

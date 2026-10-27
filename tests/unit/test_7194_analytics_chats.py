@@ -22,7 +22,9 @@ import uuid
 
 import pytest
 
-from fixtures.usage_event_table import FakeUsageEvent, drop_engine, insert_row, install_engine, load_api_module
+from fixtures.usage_event_table import (
+    CURRENT_USER_ID, FakeUsageEvent, drop_engine, insert_row, install_engine, load_api_module,
+)
 from usage.methods import _analytics
 from usage.methods import analytics_chats as ac
 
@@ -171,6 +173,8 @@ def core(monkeypatch):
 
         def elitea_core_usage_entity_meta(self, project_id, **kwargs):
             state["calls"].append(kwargs)
+            if state.get("down"):
+                raise RuntimeError("elitea_core is unreachable")
             if "conversation_uuids" in kwargs:
                 convs = kwargs["conversation_uuids"]
                 return {
@@ -188,15 +192,21 @@ def core(monkeypatch):
                     ],
                 }
             if kwargs.get("fetch_non_chat_uuids"):
-                return {"non_chat_uuids": state["non_chat_uuids"]}
+                return {
+                    "non_chat_uuids": state["non_chat_uuids"],
+                    "non_chat_truncated": state.get("non_chat_truncated", False),
+                }
             if kwargs.get("conversation_name_search"):
                 search = kwargs["conversation_name_search"].lower()
+                requester = kwargs.get("requester_id")
                 return {
                     "conversations": [
                         {"uuid": u, **meta}
                         for u, meta in state["conversations"].items()
                         if search in meta["name"].lower()
-                    ]
+                        and (not meta["is_private"] or meta["author_id"] == requester)
+                    ],
+                    "search_truncated": state.get("search_truncated", False),
                 }
             return {}
 
@@ -469,6 +479,235 @@ class TestChatsMeta:
         row = body["rows"][0]
 
         assert row["is_deleted"] is False
+
+
+class TestPrivateChatNames:
+    """A private chat's name is shown only to its author, in the list, the detail and the search."""
+
+    def test_a_private_chat_of_someone_else_is_masked(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["conversations"][CONV_1].update(is_private=True, author_id=CURRENT_USER_ID + 1)
+
+        row = chats_list(api, monkeypatch)["rows"][0]
+
+        assert row["chat_name"] == "Private chat"
+
+    def test_a_private_chat_shows_its_name_to_its_author(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["conversations"][CONV_1].update(is_private=True, author_id=CURRENT_USER_ID)
+
+        row = chats_list(api, monkeypatch)["rows"][0]
+
+        assert row["chat_name"] == "Code review chat"
+
+    def test_a_shared_chat_keeps_its_name_for_everyone(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["conversations"][CONV_1].update(is_private=False, author_id=CURRENT_USER_ID + 1)
+
+        assert chats_list(api, monkeypatch)["rows"][0]["chat_name"] == "Code review chat"
+
+    def test_the_detail_view_masks_it_too(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["conversations"][CONV_1].update(is_private=True, author_id=CURRENT_USER_ID + 1)
+
+        body, status = detail(api, monkeypatch)
+
+        assert status == 200
+        assert body["chat_name"] == "Private chat"
+
+    def test_search_passes_the_requester_so_core_hides_other_private_chats(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["conversations"][CONV_1].update(is_private=True, author_id=CURRENT_USER_ID + 1)
+
+        body = chats_list(api, monkeypatch, search="code review")
+
+        search_calls = [c for c in core["calls"] if c.get("conversation_name_search")]
+        assert search_calls[0]["requester_id"] == CURRENT_USER_ID
+        assert body["rows"] == []
+
+
+class TestCoreUnavailable:
+    """An elitea_core outage is not a deletion, an empty search, or a cached verdict."""
+
+    def test_rows_are_not_reported_deleted(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["down"] = True
+
+        row = chats_list(api, monkeypatch)["rows"][0]
+
+        assert row["is_deleted"] is False
+        assert row["meta_unavailable"] is True
+        assert row["can_open"] is False
+
+    def test_a_row_core_does_not_know_is_still_deleted(self, api, engine, monkeypatch, core):
+        insert(engine)
+        del core["conversations"][CONV_1]
+
+        row = chats_list(api, monkeypatch)["rows"][0]
+
+        assert row["is_deleted"] is True
+        assert row["meta_unavailable"] is False
+
+    def test_a_failed_exclusion_lookup_is_not_cached(self, api, engine, monkeypatch, core):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1)
+        insert(engine, run_id=RUN_2, conversation_id=CONV_2, seconds=1)
+        core["non_chat_uuids"] = [CONV_2]
+
+        core["down"] = True
+        assert chats_list(api, monkeypatch)["total"] == 2
+
+        core["down"] = False
+        assert chats_list(api, monkeypatch)["total"] == 1
+
+    def test_a_successful_exclusion_lookup_is_cached(self, api, engine, monkeypatch, core):
+        insert(engine)
+
+        chats_list(api, monkeypatch)
+        chats_list(api, monkeypatch)
+
+        assert sum(1 for c in core["calls"] if c.get("fetch_non_chat_uuids")) == 1
+
+    def test_the_exclusion_cache_drops_expired_projects_when_full(self, monkeypatch, core):
+        monkeypatch.setattr(ac, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
+        for project_id in range(1000, 1000 + ac._EXCLUDED_UUID_CACHE_MAX):
+            ac._EXCLUDED_UUID_CACHE[project_id] = (0.0, frozenset())
+
+        ac._get_excluded_uuids(PROJECT_ID)
+
+        assert list(ac._EXCLUDED_UUID_CACHE) == [PROJECT_ID]
+
+    def test_a_search_during_an_outage_says_so_instead_of_returning_nothing(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["down"] = True
+
+        body = chats_list(api, monkeypatch, search="review")
+
+        assert body == {"total": 0, "rows": [], "search_unavailable": True}
+
+    def test_a_search_with_no_match_is_a_plain_empty_result(self, api, engine, monkeypatch, core):
+        insert(engine)
+
+        body = chats_list(api, monkeypatch, search="nothing like this")
+
+        assert body == {"total": 0, "rows": []}
+
+    def test_a_capped_search_is_flagged(self, api, engine, monkeypatch, core):
+        insert(engine)
+        core["search_truncated"] = True
+
+        body = chats_list(api, monkeypatch, search="code review")
+
+        assert body["search_truncated"] is True
+        assert len(body["rows"]) == 1
+
+
+class TestSortColumns:
+    def test_avg_cost_per_response_sorts_by_the_average_not_the_total(self, api, engine, monkeypatch):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1, cost_nano_usd=4_000)
+        for i, run in enumerate((RUN_2, RUN_3, "aaaaaaaa-0000-0000-0000-000000000004")):
+            insert(engine, run_id=run, conversation_id=CONV_2, seconds=i + 1, cost_nano_usd=2_000)
+
+        by_avg = chats_list(api, monkeypatch, sort_by="avg_cost_per_response", sort_order="desc")
+        by_total = chats_list(api, monkeypatch, sort_by="llm_cost", sort_order="desc")
+
+        assert [r["conversation_uuid"] for r in by_avg["rows"]] == [CONV_1, CONV_2]
+        assert [r["conversation_uuid"] for r in by_total["rows"]] == [CONV_2, CONV_1]
+
+    def test_chat_name_is_not_a_sortable_field(self, api):
+        assert "chat_name" not in api.analytics_chats._SORT_WHITELIST
+
+    def test_the_activity_route_shares_the_same_sort_fields(self, api):
+        assert "avg_cost_per_response" in api.analytics_chats._SORT_WHITELIST
+
+
+class TestChatDetailOwnerAndParticipants:
+    def test_the_owner_is_returned(self, api, engine, monkeypatch, core):
+        insert(engine)
+
+        body, _ = detail(api, monkeypatch)
+
+        assert body["owner"] == {"id": 11}
+
+    def test_a_deleted_chat_has_no_owner(self, api, engine, monkeypatch, core):
+        insert(engine)
+        del core["conversations"][CONV_1]
+
+        body, _ = detail(api, monkeypatch)
+
+        assert body["owner"] is None
+
+    def test_a_public_agent_is_looked_up_in_the_public_schema(self, api, engine, monkeypatch):
+        asked = []
+
+        def application_meta(project_id, refs=()):
+            asked.extend(refs)
+            return {(1, 55): {"name": "Public Agent"}, (PROJECT_ID, 55): {"name": "Unrelated Local App"}}
+
+        monkeypatch.setattr(_analytics, "application_meta", application_meta)
+        insert(engine, root_entity_type="application", root_entity_id=55, root_entity_project_id=1)
+
+        body, _ = detail(api, monkeypatch)
+
+        assert asked == [(1, 55)]
+        assert body["by_participant"][0]["participant_name"] == "Public Agent"
+
+    def test_a_skill_is_never_looked_up_as_an_application(self, api, engine, monkeypatch):
+        app_refs, skill_refs = [], []
+
+        def application_meta(project_id, refs=()):
+            app_refs.extend(refs)
+            return {(PROJECT_ID, 7): {"name": "Application Seven"}}
+
+        def fetch_skill_meta(project_id, refs=(), conversation_uuids=()):
+            skill_refs.extend(refs)
+            return {(PROJECT_ID, 7): {"name": "Summarizer"}}, {}
+
+        monkeypatch.setattr(_analytics, "application_meta", application_meta)
+        monkeypatch.setattr(api.analytics_chat_detail.sa, "fetch_skill_meta", fetch_skill_meta)
+        insert(engine, root_entity_type="skill", root_entity_id=7)
+
+        body, _ = detail(api, monkeypatch)
+
+        assert app_refs == []
+        assert skill_refs == [(PROJECT_ID, 7)]
+        assert body["by_participant"][0]["participant_name"] == "Summarizer"
+
+    def test_the_same_id_as_agent_and_skill_stays_two_participants(self, api, engine, monkeypatch):
+        monkeypatch.setattr(
+            _analytics, "application_meta", lambda project_id, refs=(): {(PROJECT_ID, 7): {"name": "Agent Seven"}},
+        )
+        monkeypatch.setattr(
+            api.analytics_chat_detail.sa, "fetch_skill_meta",
+            lambda project_id, refs=(), conversation_uuids=(): ({(PROJECT_ID, 7): {"name": "Skill Seven"}}, {}),
+        )
+        insert(engine, run_id=RUN_1, root_entity_type="application", root_entity_id=7)
+        insert(engine, run_id=RUN_2, root_entity_type="skill", root_entity_id=7, seconds=1)
+
+        body, _ = detail(api, monkeypatch)
+
+        names = {p["participant_type"]: p["participant_name"] for p in body["by_participant"]}
+        assert names == {"agent": "Agent Seven", "skill": "Skill Seven"}
+
+
+class TestChatRunsSkills:
+    def test_a_skill_run_is_named_from_the_skill_not_an_application(self, api, engine, monkeypatch):
+        app_refs = []
+
+        def application_meta(project_id, refs=()):
+            app_refs.extend(refs)
+            return {(PROJECT_ID, 7): {"name": "Application Seven"}}
+
+        monkeypatch.setattr(_analytics, "application_meta", application_meta)
+        monkeypatch.setattr(
+            api.analytics_chat_runs.sa, "fetch_skill_meta",
+            lambda project_id, refs=(), conversation_uuids=(): ({(PROJECT_ID, 7): {"name": "Summarizer"}}, {}),
+        )
+        insert(engine, root_entity_type="skill", root_entity_id=7)
+
+        body = runs(api, monkeypatch)
+
+        assert app_refs == []
+        assert body["rows"][0]["participant_name"] == "Summarizer"
 
 
 class TestSummaryKpis:

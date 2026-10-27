@@ -20,6 +20,7 @@ if _API_AVAILABLE:
     from sqlalchemy import Date, cast, desc, distinct, func, nulls_last, select
 
     from ...methods import _analytics as an
+    from ...methods import _skill_analytics as sa
     from ...methods import analytics_chats as ac
     from ...models.usage_event import UsageEvent
 
@@ -139,7 +140,10 @@ if _API_AVAILABLE:
                     return {"error": "Chat not found in the selected range"}, 404
 
                 # Enrich with metadata from elitea_core
-                meta_rows = ac.resolve_chat_meta(project_id, [{"conversation_uuid": conversation_uuid}])
+                meta_rows = ac.resolve_chat_meta(
+                    project_id, [{"conversation_uuid": conversation_uuid}],
+                    requester_id=auth.current_user().get("id"),
+                )
                 meta = meta_rows[0] if meta_rows else {}
 
                 return {
@@ -147,9 +151,10 @@ if _API_AVAILABLE:
                     "chat_name": meta.get("chat_name"),
                     "is_private": meta.get("is_private", True),
                     "is_deleted": meta.get("is_deleted", False),
+                    "meta_unavailable": meta.get("meta_unavailable", False),
                     "can_open": meta.get("can_open", False),
                     "conversation_id": meta.get("conversation_id"),
-                    "owner": meta.get("owner"),
+                    "owner": {"id": meta["owner_id"]} if meta.get("owner_id") is not None else None,
                     "kpis": kpis,
                     "by_participant": self._by_participant(project_id, conditions),
                     "by_model": self._by_model(project_id, conditions),
@@ -229,27 +234,42 @@ if _API_AVAILABLE:
             total_tokens_col = func.sum(an.total_tokens_expr()).label("total_tokens")
             cost_nano_col = func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano")
 
+            root_project = an.root_project_expr().label("root_project_id")
+
             rows = an.fetch_all(
                 select(
                     UsageEvent.root_entity_type.label("participant_type"),
                     UsageEvent.root_entity_id.label("participant_id"),
+                    root_project,
                     func.max(UsageEvent.entity_name).label("stored_name"),
                     responses_col,
                     total_tokens_col,
                     cost_nano_col,
                 )
                 .where(*conditions)
-                .group_by(UsageEvent.root_entity_type, UsageEvent.root_entity_id)
+                .group_by(UsageEvent.root_entity_type, UsageEvent.root_entity_id, root_project)
                 .order_by(desc(responses_col))
             )
 
-            # Resolve entity names from elitea_core
-            refs = [
-                (project_id, r["participant_id"])
-                for r in rows
-                if r["participant_id"] is not None
+            # App and skill ids come from separate sequences and are only unique inside their own
+            # schema, so each participant is looked up by its type and the schema it lives in.
+            has_id = [r for r in rows if r["participant_id"] is not None]
+            app_refs = [
+                (r["root_project_id"], r["participant_id"])
+                for r in has_id if r["participant_type"] != "skill"
             ]
-            applications = an.application_meta(project_id, refs=refs) if refs else {}
+            skill_refs = [
+                (r["root_project_id"], r["participant_id"])
+                for r in has_id if r["participant_type"] == "skill"
+            ]
+            applications = an.application_meta(project_id, refs=app_refs) if app_refs else {}
+            skills = sa.fetch_skill_meta(project_id, skill_refs)[0] if skill_refs else {}
+
+            def resolved_name(row):
+                key = (row["root_project_id"], row["participant_id"])
+                if row["participant_type"] == "skill":
+                    return (skills or {}).get(key, {}).get("name")
+                return applications.get(key, {}).get("name")
 
             _TYPE_MAP = {None: "model", "application": "agent", "pipeline": "pipeline", "skill": "skill"}
 
@@ -258,7 +278,7 @@ if _API_AVAILABLE:
                     "participant_type": _TYPE_MAP.get(r["participant_type"], r["participant_type"] or "model"),
                     "participant_id": r["participant_id"],
                     "participant_name": (
-                        applications.get((project_id, r["participant_id"]), {}).get("name")
+                        resolved_name(r)
                         or r["stored_name"]
                         or (f"{r['participant_type']} #{r['participant_id']}" if r["participant_id"] else "model")
                     ),

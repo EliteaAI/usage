@@ -26,7 +26,7 @@ if _API_AVAILABLE:
         "llm_cost", "total_tokens", "responses", "users",
         "input_cost", "output_cost", "cache_read_cost", "cache_creation_cost",
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
-        "avg_cost_per_response", "avg_duration_ms", "errors", "last_activity", "chat_name",
+        "avg_cost_per_response", "avg_duration_ms", "errors", "last_activity",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -89,7 +89,12 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string"},
-                    "description": "Filter by conversation name (case-insensitive partial match).",
+                    "description": (
+                        "Filter by conversation name (case-insensitive partial match). A private "
+                        "chat matches only for its author. The response carries search_unavailable "
+                        "when elitea_core cannot be reached and search_truncated when more chats "
+                        "matched than were searched."
+                    ),
                 },
                 {
                     "name": "sort_by",
@@ -153,6 +158,7 @@ if _API_AVAILABLE:
 
         def _list_chats(self, project_id: int):
             try:
+                requester_id = auth.current_user().get("id")
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = ac.chat_base_filters(project_id, dt_from, dt_to)
 
@@ -166,19 +172,25 @@ if _API_AVAILABLE:
                 search = (request.args.get("search") or "").strip()
 
                 # Name search: resolve matching UUIDs via RPC since names live in elitea_core
+                search_truncated = False
                 if search:
                     try:
                         from tools import rpc_tools  # pylint: disable=C0415,E0401
                         result = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
                             project_id, conversation_name_search=search, conversation_search_limit=1000,
+                            requester_id=requester_id,
                         ) or {}
-                        matching_uuids = [
-                            c_item["uuid"]
-                            for c_item in result.get("conversations") or []
-                            if c_item.get("uuid")
-                        ]
                     except Exception:  # pylint: disable=W0703
-                        matching_uuids = []
+                        # An outage must not read as "nothing matched"
+                        log.warning("usage: chat name search unavailable for project %s", project_id)
+                        return {"total": 0, "rows": [], "search_unavailable": True}, 200
+
+                    matching_uuids = [
+                        c_item["uuid"]
+                        for c_item in result.get("conversations") or []
+                        if c_item.get("uuid")
+                    ]
+                    search_truncated = bool(result.get("search_truncated"))
 
                     if not matching_uuids:
                         return {"total": 0, "rows": []}, 200
@@ -187,7 +199,9 @@ if _API_AVAILABLE:
 
                 total, rows = self._chats(conditions, sort_by, sort_order, limit, offset)
 
-                enriched = ac.resolve_chat_meta(project_id, rows, conditions=conditions)
+                enriched = ac.resolve_chat_meta(
+                    project_id, rows, conditions=conditions, requester_id=requester_id,
+                )
 
                 # Resolve owner_id → owner_email for the page
                 owner_ids = [r.get("owner_id") for r in enriched if r.get("owner_id")]
@@ -195,7 +209,10 @@ if _API_AVAILABLE:
                 for row in enriched:
                     row["owner_email"] = emails.get(row.get("owner_id"))
 
-                return {"total": total, "rows": enriched}, 200
+                body = {"total": total, "rows": enriched}
+                if search_truncated:
+                    body["search_truncated"] = True
+                return body, 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics chats query failed", exc_info=True)
                 return {"error": "Failed to query analytics chats"}, 500
@@ -265,9 +282,7 @@ if _API_AVAILABLE:
                 "cache_read_tokens": cache_read_tokens_col,
                 "cache_creation_tokens": cache_creation_tokens_col,
                 **cost_split_cols,
-                # chat_name and avg_cost_per_response are computed in Python, default to last_activity
-                "chat_name": last_activity_col,
-                "avg_cost_per_response": cost_nano_col,
+                "avg_cost_per_response": (cost_nano_col * 1.0) / func.nullif(responses_col, 0),
             }
 
             order_fn = desc if sort_order == "desc" else asc

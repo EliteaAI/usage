@@ -2,6 +2,7 @@
 
 import time
 
+from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from sqlalchemy import case, distinct, func, select
 
 from ._analytics import (
@@ -25,13 +26,15 @@ from ..models.usage_event import UsageEvent
 # Resolved at query time via RPC, bounded and cached.
 _EXCLUDED_UUID_CACHE = {}  # {project_id: (monotonic_stamp, frozenset_of_uuids)}
 _EXCLUDED_UUID_TTL = 60  # seconds
+_EXCLUDED_UUID_CACHE_MAX = 64  # projects
 
 
 def _get_excluded_uuids(project_id):
-    """Return the set of conversation UUIDs that are NOT user chats (hidden/non-elitea).
+    """Return the set of conversation UUIDs that are NOT user chats (hidden, or not a chat source).
 
-    Calls elitea_core via RPC with a bounded query (<=5000 rows) and caches for 60 s.
-    On RPC failure, returns an empty set (chats with unknown kind are included, not dropped).
+    Calls elitea_core via RPC with a bounded query (<=5000 rows) and caches a successful answer
+    for 60 s. When the RPC fails the answer is empty and is NOT cached, so the next request asks
+    again instead of showing every non-chat conversation for the whole TTL.
     """
     now = time.monotonic()
     cached = _EXCLUDED_UUID_CACHE.get(project_id)
@@ -43,10 +46,21 @@ def _get_excluded_uuids(project_id):
         result = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
             project_id, fetch_non_chat_uuids=True,
         ) or {}
-        uuids = frozenset(result.get("non_chat_uuids") or [])
     except Exception:  # pylint: disable=W0703
-        uuids = frozenset()
+        log.warning("usage: non-chat conversations unavailable for project %s", project_id)
+        return frozenset()
 
+    uuids = frozenset(result.get("non_chat_uuids") or [])
+    if result.get("non_chat_truncated"):
+        log.warning(
+            "usage: non-chat conversation list truncated for project %s, some may show as chats",
+            project_id,
+        )
+
+    if len(_EXCLUDED_UUID_CACHE) >= _EXCLUDED_UUID_CACHE_MAX:
+        for key, entry in list(_EXCLUDED_UUID_CACHE.items()):
+            if (now - entry[0]) >= _EXCLUDED_UUID_TTL:
+                _EXCLUDED_UUID_CACHE.pop(key, None)
     _EXCLUDED_UUID_CACHE[project_id] = (now, uuids)
     return uuids
 
@@ -112,11 +126,16 @@ def _fetch_models_by_conversation(project_id, conditions, conversation_uuids):
     return result
 
 
-def resolve_chat_meta(project_id, rows, conditions=None):
+PRIVATE_CHAT_NAME = "Private chat"
+
+
+def resolve_chat_meta(project_id, rows, conditions=None, requester_id=None):
     """Enrich a page of rows with name, is_private, is_deleted, can_open, owner, participants, models.
 
     Calls elitea_core_usage_entity_meta for the page's conversation UUIDs only.
-    Missing UUIDs (deleted conversations) come back as is_deleted=True.
+    UUIDs core does not know come back as is_deleted=True. When core cannot be reached nothing is
+    known, so no row is reported deleted: meta_unavailable is set and the name is a placeholder.
+    A private chat's name is shown only to its author (requester_id).
     Pass conditions (from chat_base_filters) to also resolve per-conversation model lists.
     """
     uuids = [r["conversation_uuid"] for r in rows if r.get("conversation_uuid")]
@@ -130,15 +149,25 @@ def resolve_chat_meta(project_id, rows, conditions=None):
         ) or {}
         meta_map = {c["uuid"]: c for c in result.get("conversations") or []}
     except Exception:  # pylint: disable=W0703
-        meta_map = {}
+        log.warning("usage: chat names unavailable for project %s", project_id)
+        meta_map = None
 
     models_by_conv = _fetch_models_by_conversation(project_id, conditions or [], uuids) if conditions else {}
 
     enriched = []
     for row in rows:
         uuid = row.get("conversation_uuid")
-        meta = meta_map.get(uuid, {})
-        is_deleted = not bool(meta)
+        meta_unavailable = meta_map is None
+        meta = {} if meta_unavailable else meta_map.get(uuid, {})
+        is_deleted = not meta_unavailable and not bool(meta)
+        is_private = meta.get("is_private", True)
+        is_author = requester_id is not None and meta.get("author_id") == requester_id
+        if meta_unavailable or is_deleted:
+            chat_name = f"Chat {uuid[:8]}"
+        elif is_private and not is_author:
+            chat_name = PRIVATE_CHAT_NAME
+        else:
+            chat_name = meta.get("name") or (PRIVATE_CHAT_NAME if is_private else f"Chat {uuid[:8]}")
         # Prefer participant types resolved from chat_participants (accurate pipeline/agent split).
         # Fall back to usage-event-derived types for conversations that predate the RPC enrichment.
         conv_participant_types = meta.get("participant_types")
@@ -148,12 +177,11 @@ def resolve_chat_meta(project_id, rows, conditions=None):
             participants = row.get("participant_types") or []
         enriched.append({
             **row,
-            "chat_name": meta.get("name") or (
-                "Private chat" if meta.get("is_private") else f"Chat {uuid[:8]}"
-            ),
-            "is_private": meta.get("is_private", True),
+            "chat_name": chat_name,
+            "is_private": is_private,
             "is_deleted": is_deleted,
-            "can_open": not is_deleted and not meta.get("is_private", True),
+            "meta_unavailable": meta_unavailable,
+            "can_open": not is_deleted and not meta_unavailable and not is_private,
             "conversation_id": meta.get("id"),
             "owner_id": meta.get("author_id"),
             "participants": participants,

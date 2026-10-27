@@ -11,6 +11,8 @@ from sqlalchemy.ext.compiler import compiles
 
 METADATA = MetaData()
 
+CURRENT_USER_ID = 11
+
 FAKE_TABLE = Table(
     "usage_event", METADATA,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -132,6 +134,7 @@ def load_api_module(monkeypatch, name):
     ), raising=False)
     monkeypatch.setattr(tools, "auth", types.SimpleNamespace(
         decorators=types.SimpleNamespace(check_api=lambda *a, **k: (lambda func: func)),
+        current_user=lambda: {"id": CURRENT_USER_ID},
     ), raising=False)
     monkeypatch.setattr(tools.config, "DEFAULT_MODE", "default", raising=False)
     monkeypatch.setattr(tools, "register_openapi", lambda *a, **k: (lambda func: func), raising=False)
