@@ -5,11 +5,13 @@ import sys
 import types
 
 from sqlalchemy import (
-    JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, create_engine, event,
+    JSON, Boolean, Cast, Column, Date, DateTime, Integer, MetaData, String, Table, create_engine, event,
 )
 from sqlalchemy.ext.compiler import compiles
 
 METADATA = MetaData()
+
+CURRENT_USER_ID = 11
 
 FAKE_TABLE = Table(
     "usage_event", METADATA,
@@ -61,13 +63,28 @@ def _compile_event_started_at_sqlite(element, compiler, **kw):
     )
 
 
+def _compile_cast_date_sqlite(element, compiler, **kw):
+    # CAST(ts AS DATE) on SQLite feeds a datetime object into the Date result_processor
+    # (SQLAlchemy's DateTime type-processor fires first), so fromisoformat() gets a non-str
+    # → TypeError.  SQLite's date() returns a plain 'YYYY-MM-DD' string that fromisoformat
+    # handles correctly while still letting SQLAlchemy convert it to datetime.date.
+    if isinstance(element.type, Date):
+        return f"date({compiler.process(element.clause, **kw)})"
+    return compiler.visit_cast(element, **kw)
+
+
 _COMPILED_FOR_SQLITE = set()
+_CAST_DATE_SQLITE_COMPILED = False
 
 
 def install_engine(monkeypatch, analytics):
+    global _CAST_DATE_SQLITE_COMPILED
     if analytics.EventStartedAt not in _COMPILED_FOR_SQLITE:
         compiles(analytics.EventStartedAt, "sqlite")(_compile_event_started_at_sqlite)
         _COMPILED_FOR_SQLITE.add(analytics.EventStartedAt)
+    if not _CAST_DATE_SQLITE_COMPILED:
+        compiles(Cast, "sqlite")(_compile_cast_date_sqlite)
+        _CAST_DATE_SQLITE_COMPILED = True
     monkeypatch.setattr(analytics, "UsageEvent", FakeUsageEvent)
     monkeypatch.setattr(analytics, "HUMAN_ACTOR", FakeUsageEvent.user_id != analytics.SYSTEM_USER_ID)
     monkeypatch.setattr(analytics, "MANUAL_RUN", FakeUsageEvent.trigger_source.is_(None))
@@ -117,6 +134,7 @@ def load_api_module(monkeypatch, name):
     ), raising=False)
     monkeypatch.setattr(tools, "auth", types.SimpleNamespace(
         decorators=types.SimpleNamespace(check_api=lambda *a, **k: (lambda func: func)),
+        current_user=lambda: {"id": CURRENT_USER_ID},
     ), raising=False)
     monkeypatch.setattr(tools.config, "DEFAULT_MODE", "default", raising=False)
     monkeypatch.setattr(tools, "register_openapi", lambda *a, **k: (lambda func: func), raising=False)
