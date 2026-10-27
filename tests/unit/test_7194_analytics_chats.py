@@ -85,6 +85,7 @@ RUN_2 = "aaaaaaaa-0000-0000-0000-000000000002"
 RUN_3 = "aaaaaaaa-0000-0000-0000-000000000003"
 API_MODULES = (
     "analytics_chats",
+    "analytics_chat_activity",
     "analytics_chats_summary",
     "analytics_chat_detail",
     "analytics_chat_runs",
@@ -406,6 +407,38 @@ class TestModelsInChatsList:
         model_names = {m["model_name"] for m in row["models"]}
 
         assert model_names == {"gpt-4", "claude-3"}
+
+
+class TestChatActivityRoute:
+    """analytics_chat_activity serves the same rows as analytics_chats from its own route."""
+
+    def _activity(self, api, monkeypatch, **args):
+        monkeypatch.setattr(api.analytics_chats, "request", types.SimpleNamespace(args={**args}))
+        body, status = api.analytics_chat_activity.PromptLibAPI().get(PROJECT_ID)
+        assert status == 200, body
+        return body
+
+    def test_returns_same_payload_as_chats_list(self, api, engine, monkeypatch):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1, cost_nano_usd=5_000)
+        insert(engine, run_id=RUN_2, conversation_id=CONV_2, cost_nano_usd=1_000)
+
+        args = {"sort_by": "llm_cost", "sort_order": "asc", "limit": "10"}
+
+        assert self._activity(api, monkeypatch, **args) == chats_list(api, monkeypatch, **args)
+
+    def test_sort_order_is_honoured(self, api, engine, monkeypatch):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1, cost_nano_usd=5_000)
+        insert(engine, run_id=RUN_2, conversation_id=CONV_2, cost_nano_usd=1_000)
+
+        ascending = self._activity(api, monkeypatch, sort_by="llm_cost", sort_order="asc")
+        descending = self._activity(api, monkeypatch, sort_by="llm_cost", sort_order="desc")
+
+        assert [r["conversation_uuid"] for r in ascending["rows"]] == [CONV_2, CONV_1]
+        assert [r["conversation_uuid"] for r in descending["rows"]] == [CONV_1, CONV_2]
+
+    def test_is_a_separate_handler_from_chats_list(self, api):
+        assert api.analytics_chat_activity.PromptLibAPI is not api.analytics_chats.PromptLibAPI
+        assert issubclass(api.analytics_chat_activity.PromptLibAPI, api.analytics_chats.PromptLibAPI)
 
 
 class TestChatsMeta:

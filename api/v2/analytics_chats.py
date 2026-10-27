@@ -149,6 +149,9 @@ if _API_AVAILABLE:
             """
             GET /api/v2/usage/analytics_chats/prompt_lib/<project_id>
             """
+            return self._list_chats(project_id)
+
+        def _list_chats(self, project_id: int):
             try:
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = ac.chat_base_filters(project_id, dt_from, dt_to)
