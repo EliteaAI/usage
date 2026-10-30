@@ -61,12 +61,14 @@ def session(monkeypatch):
 def _insert(session, conversation_id, *, run_id=RUN, event_type="llm", project_id=1, minutes=1,
             input_tokens=0, output_tokens=0, cost_nano_usd=0, cost_source="costs-catalog",
             model_name="gpt-4o", token_source="provider", is_error=False,
-            entity=("evaluation", 219, None)):
+            entity=("evaluation", 219, None), billable_input_tokens=None, cache_read_tokens=0,
+            cache_creation_tokens=0):
     session.execute(FAKE_TABLE.insert().values(
         project_id=project_id, ts=T0 + datetime.timedelta(minutes=minutes), run_id=run_id,
         conversation_id=conversation_id, event_type=event_type, model_name=model_name,
-        input_tokens=input_tokens, output_tokens=output_tokens, billable_input_tokens=input_tokens,
-        cache_read_tokens=0, cache_creation_tokens=0, reasoning_tokens=0,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        billable_input_tokens=input_tokens if billable_input_tokens is None else billable_input_tokens,
+        cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens, reasoning_tokens=0,
         cost_nano_usd=cost_nano_usd, cost_source=cost_source, token_source=token_source,
         is_error=is_error, entity_type=entity[0], entity_id=entity[1], entity_name=entity[2],
     ))
@@ -86,6 +88,15 @@ def test_sums_llm_rows_per_conversation(session):
     assert set(rows) == {"a_0", "j_0_0"}
     assert (rows["a_0"]["llm_calls"], rows["a_0"]["input_tokens"], rows["a_0"]["output_tokens"],
             rows["a_0"]["cost_nano_usd"], rows["a_0"]["unpriced_calls"]) == (2, 150, 15, 750, 0)
+
+
+def test_sums_billable_input_and_cache_per_conversation(session):
+    """#7300: elitea_core rebuilds cache-inclusive input from these, whatever the provider's convention."""
+    _insert(session, "a_0", input_tokens=1_000, billable_input_tokens=600, cache_read_tokens=400)  # inclusive
+    _insert(session, "a_0", input_tokens=200, cache_read_tokens=900, cache_creation_tokens=300)  # exclusive
+    row = _breakdown()["a_0"]
+    assert (row["input_tokens"], row["billable_input_tokens"], row["cache_read_tokens"],
+            row["cache_creation_tokens"]) == (1_200, 800, 1_300, 300)
 
 
 def test_other_runs_projects_tools_and_out_of_window_rows_are_left_out(session):
