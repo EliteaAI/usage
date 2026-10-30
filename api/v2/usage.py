@@ -65,8 +65,8 @@ def _period_event_where(project_id: int, start, end, user_id=None):
 
 
 
-def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5):
-    """Top N agents/pipelines by spend for the period."""
+def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5, sort_by: str = "spend"):
+    """Top N agents/pipelines by spend or runs for the period."""
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
     from ...methods._analytics import (  # pylint: disable=C0415
         AGENT_ROOT_TYPES, ENTITY_TYPE_EVALUATION, cost_usd, fetch_all,
@@ -81,6 +81,11 @@ def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5)
         func.coalesce(UsageEvent.entity_type, "") != ENTITY_TYPE_EVALUATION,
     ]
     #
+    order_col = (
+        func.count(func.distinct(UsageEvent.run_id)).desc()
+        if sort_by == "runs"
+        else func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc()
+    )
     stmt = (
         select(
             UsageEvent.root_entity_type.label("type"),
@@ -92,7 +97,7 @@ def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5)
         )
         .where(*agent_conditions)
         .group_by(UsageEvent.root_entity_type, UsageEvent.root_entity_id, root_project_expr())
-        .order_by(func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc())
+        .order_by(order_col)
         .limit(limit)
     )
     #
@@ -111,8 +116,8 @@ def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5)
     ]
 
 
-def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5):
-    """Top N skills by spend for the period."""
+def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5, sort_by: str = "spend"):
+    """Top N skills by spend or runs for the period."""
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
     from ...methods._analytics import (  # pylint: disable=C0415
         ENTITY_TYPE_SKILL, cost_usd, fetch_all, root_project_expr, run_name_expr,
@@ -125,6 +130,11 @@ def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5)
         UsageEvent.root_entity_id.isnot(None),
     ]
     #
+    order_col = (
+        func.count(func.distinct(UsageEvent.run_id)).desc()
+        if sort_by == "runs"
+        else func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc()
+    )
     stmt = (
         select(
             UsageEvent.root_entity_id.label("id"),
@@ -135,7 +145,7 @@ def _usage_top_skills(project_id: int, start, end, user_id=None, limit: int = 5)
         )
         .where(*skill_conditions)
         .group_by(UsageEvent.root_entity_id, root_project_expr())
-        .order_by(func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).desc())
+        .order_by(order_col)
         .limit(limit)
     )
     #
@@ -347,7 +357,13 @@ def _redact(payload: dict):
     for row in payload.get("top_agents") or []:
         row.pop("spend", None)
     #
+    for row in payload.get("top_agents_by_runs") or []:
+        row.pop("spend", None)
+    #
     for row in payload.get("top_skills") or []:
+        row.pop("spend", None)
+    #
+    for row in payload.get("top_skills_by_runs") or []:
         row.pop("spend", None)
     #
     for row in payload.get("monthly_history") or []:
@@ -546,18 +562,32 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
     #
     # New analytics fields — each query degrades gracefully on exception
     try:
-        top_agents = _usage_top_agents(project_id, ev_start, ev_end, uid_for_query)
+        top_agents = _usage_top_agents(project_id, ev_start, ev_end, uid_for_query, sort_by="spend")
     except Exception:  # pylint: disable=W0703
         log.warning("usage: top_agents unavailable for project %s: %s",
                     project_id, sys.exc_info()[1])
         top_agents = []
     #
     try:
-        top_skills = _usage_top_skills(project_id, ev_start, ev_end, uid_for_query)
+        top_agents_by_runs = _usage_top_agents(project_id, ev_start, ev_end, uid_for_query, sort_by="runs")
+    except Exception:  # pylint: disable=W0703
+        log.warning("usage: top_agents_by_runs unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
+        top_agents_by_runs = []
+    #
+    try:
+        top_skills = _usage_top_skills(project_id, ev_start, ev_end, uid_for_query, sort_by="spend")
     except Exception:  # pylint: disable=W0703
         log.warning("usage: top_skills unavailable for project %s: %s",
                     project_id, sys.exc_info()[1])
         top_skills = []
+    #
+    try:
+        top_skills_by_runs = _usage_top_skills(project_id, ev_start, ev_end, uid_for_query, sort_by="runs")
+    except Exception:  # pylint: disable=W0703
+        log.warning("usage: top_skills_by_runs unavailable for project %s: %s",
+                    project_id, sys.exc_info()[1])
+        top_skills_by_runs = []
     #
     try:
         monthly_history = _usage_monthly_history(
@@ -642,7 +672,9 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
         # New v2 fields
         "by_source": by_source,
         "top_agents": top_agents,
+        "top_agents_by_runs": top_agents_by_runs,
         "top_skills": top_skills,
+        "top_skills_by_runs": top_skills_by_runs,
         "token_mix": token_mix,
         "cache_hit_rate": cache_hit_rate,
         "monthly_history": monthly_history,
