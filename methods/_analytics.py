@@ -1435,8 +1435,11 @@ def event_type_health(project_id, dt_from=None, dt_to=None, run_scope=None):
 
 # Per-conversation token sums an eval run settles its case figures from (#6716). Each case and
 # judge call dispatches under its own stream id, which the predict path stores as conversation_id.
+# billable_input_tokens is input with either cache convention normalised away, so the caller can
+# rebuild one convention for every provider: the eval runtime counts cache inside input (#7300).
 EVAL_BREAKDOWN_TOKEN_COLUMNS = (
     "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens",
+    "billable_input_tokens",
 )
 
 
