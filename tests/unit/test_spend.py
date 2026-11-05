@@ -64,6 +64,9 @@ def build(monkeypatch):
     """A bound Module stand-in whose db.engine is whatever the test hands over."""
     def make(engine):
         monkeypatch.setattr(spend.db, "engine", engine, raising=False)
+        # The pipeline lookup is its own query and an elitea_core RPC (#7413), covered in
+        # test_7413_usage_pipeline_attribution; the canned results here are the detail reads only
+        monkeypatch.setattr(spend, "pipeline_root_refs", lambda project_id, where: [])
         #
         return bind(fake_module(), spend.Method), engine
     #

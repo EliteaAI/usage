@@ -69,6 +69,9 @@ ENTITY_TYPE_EVALUATION = "evaluation"
 # Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
 ENTITY_TYPE_SKILL = "skill"
 
+# Twin of elitea_core rpc/usage_entity_meta.KIND_PIPELINE: the agent/pipeline split usage_event lacks
+KIND_PIPELINE = "pipeline"
+
 ROOT_ENTITY_TYPES = (*AGENT_ROOT_TYPES, ENTITY_TYPE_SKILL)
 
 # Only a leaderboard row's own actor matters here — the usage_event project_id already scopes
@@ -90,18 +93,81 @@ MANUAL_RUN = or_(UsageEvent.trigger_source.is_(None), UsageEvent.trigger_source.
 AUTOMATION_SOURCES = ("scheduled", "webhook", "schedule_manual")
 
 
-def source_bucket_expr():
-    """Spend source bucket of an event: automations, indexing, evaluations, agents, pipelines, skills, chat, external."""
+def source_bucket_expr(pipeline_refs=()):
+    """Spend source bucket of an event: automations, indexing, evaluations, pipelines, agents, skills, chat, external.
+
+    usage_event always writes root_entity_type='application', pipelines included, so pipeline runs
+    are only told apart by pipeline_refs: the (root_project_id, app_id) pairs pipeline_root_refs()
+    resolved from elitea_core (#7413). Without them a pipeline run reads as "agents".
+    """
+    # One (schema, ids) clause per root project, usually just this one and the public project
+    ids_by_project = {}
+    for ref_project, app_id in pipeline_refs or ():
+        ids_by_project.setdefault(int(ref_project), set()).add(int(app_id))
+    pipeline_branch = []
+    if ids_by_project:
+        root_project = root_project_expr()
+        pipeline_branch.append((
+            and_(
+                UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES),
+                or_(*(
+                    and_(root_project == ref_project, UsageEvent.root_entity_id.in_(sorted(ids)))
+                    for ref_project, ids in sorted(ids_by_project.items())
+                )),
+            ),
+            "pipelines",
+        ))
     return case(
         (UsageEvent.trigger_source.in_(AUTOMATION_SOURCES), "automations"),
         (UsageEvent.trigger_source == "index", "indexing"),
         (UsageEvent.entity_type == ENTITY_TYPE_EVALUATION, "evaluations"),
-        (UsageEvent.root_entity_type == "application", "agents"),
+        *pipeline_branch,
         (UsageEvent.root_entity_type == "pipeline", "pipelines"),
+        (UsageEvent.root_entity_type == "application", "agents"),
         (UsageEvent.root_entity_type == ENTITY_TYPE_SKILL, "skills"),
         (UsageEvent.conversation_id.isnot(None), "chat"),
         else_="external",
     )
+
+
+def pipeline_root_refs(project_id, conditions):
+    """(root_project_id, app_id) pairs of the pipelines run in scope, for source_bucket_expr (#7413).
+
+    The kind comes from elitea_core (ApplicationVersion.agent_type), keyed by the root's own schema
+    (#6902) so a public pipeline is never confused with this project's same-id agent. A failed
+    lookup, or a deleted pipeline, leaves its runs under "agents" rather than failing the report.
+    """
+    root_project = root_project_expr()
+    try:
+        rows = fetch_all(
+            select(root_project.label("root_project_id"), UsageEvent.root_entity_id)
+            .where(
+                *conditions,
+                UsageEvent.root_entity_type.in_(AGENT_ROOT_TYPES),
+                UsageEvent.root_entity_id.isnot(None),
+            )
+            .group_by(root_project, UsageEvent.root_entity_id)
+        )
+        applications = application_meta(
+            project_id, refs=[(r["root_project_id"], r["root_entity_id"]) for r in rows],
+        )
+    except:  # pylint: disable=W0702
+        log.warning("usage: pipeline attribution unavailable for project %s", project_id)
+        return []
+    #
+    return sorted(
+        (int(ref_project), int(app_id))
+        for (ref_project, app_id), item in applications.items()
+        if item.get("kind") == KIND_PIPELINE
+    )
+
+
+def application_kind(applications, root_project_id, app_id, default):
+    """Root entity type as the reader should see it: "pipeline" when elitea_core says so (#7413)."""
+    kind = (applications.get((root_project_id, app_id)) or {}).get("kind")
+    #
+    return KIND_PIPELINE if kind == KIND_PIPELINE else default
+
 
 VERSION_SUFFIX_PATTERN = r" \(([^()]*)\)$"
 
