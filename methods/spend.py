@@ -33,6 +33,7 @@ from tools import db  # pylint: disable=E0401
 
 from ._analytics import (
     cost_split_sums,
+    pipeline_root_refs,
     source_bucket_expr,
     total_tokens_expr,
 )
@@ -311,6 +312,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return self.usage_event_detail(
             f"project-{project_id}-{period}", period, _event_where(project_id, start, end),
+            project_id=project_id,
         )
 
     @web.method()
@@ -321,11 +323,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return self.usage_event_detail(
             f"user-{user_id}-{period}", period,
             _event_where(project_id, start, end, user_id=user_id),
+            project_id=project_id,
         )
 
     @web.method()
-    def usage_event_detail(self, tag, period, where):
+    def usage_event_detail(self, tag, period, where, project_id=None):
         """Totals, per-model and per-day rows off usage_event for one slice.
+
+        project_id lets the by-source split tell pipeline runs from agent runs (#7413); without
+        it every application run is counted under "agents".
 
         The per-day date_trunc grouping is not index-backed on purpose — no functional index
         is added for it; the row filter is what the index serves.
@@ -360,7 +366,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         # Calls made directly via API (PATs, external tools) have no root_entity_type; they are
         # labelled "external" so the spend chart can show them alongside agent/chat/pipeline spend.
-        source_label = source_bucket_expr()
+        pipeline_refs = pipeline_root_refs(project_id, where) if project_id is not None else []
+        source_label = source_bucket_expr(pipeline_refs)
         by_source = select(
             source_label,
             func.sum(UsageEvent.cost_nano_usd),

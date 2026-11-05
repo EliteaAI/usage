@@ -66,11 +66,15 @@ def _period_event_where(project_id: int, start, end, user_id=None):
 
 
 def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5, sort_by: str = "spend"):
-    """Top N agents/pipelines by spend or runs for the period."""
+    """Top N agents/pipelines by spend or runs for the period.
+
+    type is "pipeline" when elitea_core says the application is one: usage_event always stores
+    root_entity_type='application', pipelines included (#7413).
+    """
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
     from ...methods._analytics import (  # pylint: disable=C0415
-        AGENT_ROOT_TYPES, ENTITY_TYPE_EVALUATION, cost_usd, fetch_all,
-        root_project_expr, run_name_expr,
+        AGENT_ROOT_TYPES, ENTITY_TYPE_EVALUATION, application_kind, application_meta, cost_usd,
+        fetch_all, root_project_expr, run_name_expr,
     )
     #
     clauses = _period_event_where(project_id, start, end, user_id)
@@ -102,10 +106,13 @@ def _usage_top_agents(project_id: int, start, end, user_id=None, limit: int = 5,
     )
     #
     rows = fetch_all(stmt)
+    applications = application_meta(
+        project_id, refs=[(row["root_project_id"], row["id"]) for row in rows],
+    )
     #
     return [
         {
-            "type": row["type"],
+            "type": application_kind(applications, row["root_project_id"], row["id"], row["type"]),
             "id": row["id"],
             "root_project_id": row["root_project_id"],
             "name": row["name"] or f"#{row['id']}",
@@ -455,12 +462,12 @@ def _usage_daily_breakdown(project_id: int, start, end, user_id=None):
     """
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
     from ...methods._analytics import (  # pylint: disable=C0415
-        cost_usd, fetch_all, source_bucket_expr, total_tokens_expr,
+        cost_usd, fetch_all, pipeline_root_refs, source_bucket_expr, total_tokens_expr,
     )
     #
     clauses = _period_event_where(project_id, start, end, user_id)
     day = func.date_trunc("day", UsageEvent.ts)
-    source = source_bucket_expr()
+    source = source_bucket_expr(pipeline_root_refs(project_id, clauses))
     breakdown = []
     for dimension, column in (
         ("model", func.coalesce(UsageEvent.model_name, "")),
