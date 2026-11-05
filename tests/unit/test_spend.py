@@ -222,7 +222,7 @@ class TestMemberSpendListing:
 # totals carry their own total_tokens column: it is total_tokens_expr, not input+output, so
 # the Usage page and Analytics report one number for the same rows
 DETAIL_RESULTS = (
-    [(120, 40, 5, 7, 1_500_000_000, 2, 172, 900_000_000, 600_000_000, 3_000_000, 7_000_000)],
+    [(120, 40, 5, 7, 1_500_000_000, 2, 172, 900_000_000, 600_000_000, 3_000_000, 7_000_000, 108)],
     [("gpt-4o", 1_500_000_000, 172, 2)],
     [(DAY, 1_500_000_000, 172, 2)],
 )
@@ -250,6 +250,8 @@ class TestUsageDetail:
         assert result["total_tokens"] == 172
         assert result["cache_read_tokens"] == 5
         assert result["cache_creation_tokens"] == 7
+        # The cache hit rate divides by this, not by the raw input (#7412)
+        assert result["billable_input_tokens"] == 108
         assert result["api_requests"] == 2
         assert result["models"] == [
             {"model": "gpt-4o", "spend": 1.5, "total_tokens": 172, "api_requests": 2},
@@ -277,6 +279,7 @@ class TestUsageDetail:
         assert result["models"] == []
         assert result["daily"] == []
         assert result["spend"] == 0.0
+        assert result["billable_input_tokens"] == 0
         assert result["available"] is True
 
     def test_a_failed_read_is_unavailable(self, build):
