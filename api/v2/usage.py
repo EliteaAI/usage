@@ -47,6 +47,21 @@ def _strip_model_prefixes(model: str):
     return re.sub(r"^\d+_", "", without_provider)
 
 
+def _cache_hit_rate(billable_input_tokens, cache_read_tokens, cache_creation_tokens):
+    """Share of prompt tokens served from the cache, 0-100, or None with no prompt tokens (#7412).
+
+    The denominator is every prompt token once: full-price input, cache reads and cache writes
+    (written because they were not cached yet). billable_input_tokens has the cache removed in
+    both provider conventions, so the rate can never pass 100%.
+    """
+    billable = int(billable_input_tokens or 0)
+    reads = int(cache_read_tokens or 0)
+    writes = int(cache_creation_tokens or 0)
+    prompt_tokens = billable + reads + writes
+    #
+    return round(reads / prompt_tokens * 100, 2) if prompt_tokens else None
+
+
 def _period_event_where(project_id: int, start, end, user_id=None):
     """WHERE clauses scoping usage_event to the budget window for Usage-page analytics."""
     from ...models.usage_event import UsageEvent  # pylint: disable=C0415
@@ -629,10 +644,9 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool, p
         "output_tokens_cost": detail.get("output_cost", 0) or 0,
         "cached_tokens_cost": detail.get("cache_read_cost", 0) or 0,
     }
-    # cache_hit_rate: fraction of billable input served from cache (0–100).
-    # billable_input_tokens excludes cache reads, so cache_read / billable_input is the right ratio.
-    billable_input = int(detail.get("billable_input_tokens", input_tokens) or 0)
-    cache_hit_rate = round(cache_read_tokens / billable_input * 100, 2) if billable_input else None
+    cache_hit_rate = _cache_hit_rate(
+        detail.get("billable_input_tokens"), cache_read_tokens, cache_creation_tokens,
+    )
     #
     # by_source comes from usage_event_detail (via spend.py) and is already in detail
     by_source = detail.get("by_source") or []

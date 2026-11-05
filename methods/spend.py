@@ -344,6 +344,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             func.sum(UsageEvent.cost_nano_usd), func.count(),
             func.sum(total_tokens_expr()),
             *cost_split_sums(),
+            # Input with the cache removed in both provider conventions, for the cache hit rate (#7412)
+            func.sum(UsageEvent.billable_input_tokens),
         ).where(*where)
         #
         # The table ranks rows and draws share bars in payload order, so the sort is the server's
@@ -379,8 +381,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         try:
             with db.engine.connect() as connection:
                 (inputs, outputs, cache_read, cache_creation, cost, calls, tokens,
-                 input_cost, output_cost, cache_read_cost, cache_creation_cost) = \
-                    connection.execute(totals).first() or (0,) * 11
+                 input_cost, output_cost, cache_read_cost, cache_creation_cost, billable_inputs) = \
+                    connection.execute(totals).first() or (0,) * 12
                 models = [
                     {
                         "model": model_name or "",
@@ -423,6 +425,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "spend": _dollars(cost),
             "total_tokens": int(tokens or 0),
             "input_tokens": int(inputs or 0),
+            "billable_input_tokens": int(billable_inputs or 0),
             "output_tokens": int(outputs or 0),
             "cache_read_tokens": int(cache_read or 0),
             "cache_creation_tokens": int(cache_creation or 0),
