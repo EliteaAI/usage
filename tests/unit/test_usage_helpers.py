@@ -297,3 +297,24 @@ class TestToolSpendRow(unittest.TestCase):
         row = usage._feature_row(feature, {"available": True, "project_spent_nano": 5}, usage.SCOPE_PROJECT)
         self.assertIsNone(row["percent_used"])
 
+
+class TestCacheHitRate(unittest.TestCase):
+    """Cache reads over every prompt token, so it stays within 0-100% (#7412)."""
+
+    def test_the_issue_case_counts_cache_writes_as_prompt_tokens(self):
+        # 449 full-price input, 15,606 cache reads, 5,202 cache writes: was 3475.72%
+        self.assertEqual(usage._cache_hit_rate(449, 15606, 5202), 73.42)
+
+    def test_never_above_100(self):
+        for billable, reads, writes in ((0, 1, 0), (1, 10**9, 0), (0, 5, 5), (3, 7, 0)):
+            self.assertLessEqual(usage._cache_hit_rate(billable, reads, writes), 100)
+
+    def test_only_cache_reads_is_100(self):
+        self.assertEqual(usage._cache_hit_rate(0, 50, 0), 100.0)
+
+    def test_no_cache_reads_is_0(self):
+        self.assertEqual(usage._cache_hit_rate(120, 0, 30), 0.0)
+
+    def test_no_prompt_tokens_is_none_so_the_card_hides_it(self):
+        self.assertIsNone(usage._cache_hit_rate(0, 0, 0))
+        self.assertIsNone(usage._cache_hit_rate(None, None, None))
