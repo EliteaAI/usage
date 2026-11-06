@@ -10,7 +10,7 @@ Key properties verified:
   - _TYPE_MAP: raw root_entity_type values (None, "application", "pipeline", "skill") map
     to the human-readable labels ("model", "agent", "pipeline", "skill") everywhere they appear
   - models field in the chats list is populated with {model_name, display_name} objects
-  - chat_base_filters excludes non-chat rows (conversation_id IS NULL)
+  - chat_base_filters excludes non-chat rows (conversation_id IS NULL or a synthetic stream id)
   - 404 returned when no data found for a specific conversation in analytics_chat_detail
   - Pagination and sort work in analytics_chat_runs
 """
@@ -304,6 +304,32 @@ class TestChatBaseFilters:
         uuids = [r["conversation_uuid"] for r in body["rows"]]
         assert CONV_1 in uuids
         assert CONV_2 not in uuids
+
+    @pytest.mark.parametrize("stream_id", [
+        f"eval_agent_{RUN_2}_0",
+        f"eval_judge_{RUN_2}_3",
+        "llm_judge_0f6c2d1e",
+        "publish_validate_42",
+    ])
+    def test_synthetic_stream_ids_are_excluded(self, api, engine, monkeypatch, stream_id):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1)
+        insert(engine, run_id=RUN_2, conversation_id=stream_id, seconds=1)
+
+        body = chats_list(api, monkeypatch)
+
+        assert [r["conversation_uuid"] for r in body["rows"]] == [CONV_1]
+        assert body["total"] == 1
+
+    def test_eval_streams_stay_out_of_summary_kpis(self, api, engine, monkeypatch):
+        insert(engine, run_id=RUN_1, conversation_id=CONV_1)
+        insert(engine, run_id=RUN_2, conversation_id=f"eval_agent_{RUN_2}_0", seconds=1)
+        insert(engine, run_id=RUN_3, conversation_id=f"eval_judge_{RUN_2}_0", seconds=2,
+               entity_type="evaluation")
+
+        body = summary(api, monkeypatch)
+
+        assert body["kpis"]["active_chats"] == 1
+        assert body["kpis"]["responses"] == 1
 
 
 def _make_raw_row(conversation_uuid, participant_types, run_id=RUN_1, ts=None):
