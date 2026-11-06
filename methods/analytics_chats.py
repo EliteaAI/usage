@@ -28,6 +28,9 @@ _EXCLUDED_UUID_CACHE = {}  # {project_id: (monotonic_stamp, frozenset_of_uuids)}
 _EXCLUDED_UUID_TTL = 60  # seconds
 _EXCLUDED_UUID_CACHE_MAX = 64  # projects
 
+# Real chats are uuid-keyed; eval/judge calls stamp synthetic stream ids (#7459)
+_CONVERSATION_UUID_PATTERN = "________-____-____-____-____________"
+
 
 def _get_excluded_uuids(project_id):
     """Return the set of conversation UUIDs that are NOT user chats (hidden, or not a chat source).
@@ -66,9 +69,10 @@ def _get_excluded_uuids(project_id):
 
 
 def chat_base_filters(project_id, dt_from, dt_to):
-    """base_filters + conversation_id IS NOT NULL + exclude non-chat conversations."""
+    """base_filters + uuid-shaped conversation_id + exclude non-chat conversations."""
     conditions = base_filters(project_id, dt_from, dt_to)
     conditions.append(UsageEvent.conversation_id.isnot(None))
+    conditions.append(UsageEvent.conversation_id.like(_CONVERSATION_UUID_PATTERN))
 
     excluded = _get_excluded_uuids(project_id)
     if excluded:
