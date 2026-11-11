@@ -155,15 +155,16 @@ class TestLeaderboard:
         rows = leaderboard(api)
 
         assert [(u["user_id"], u["ai_events"], u["user_email"], u["user_deleted"]) for u in rows] == [
-            (9, 2, None, True), (10, 1, "here@example.com", False),
+            (9, 2, "gone@example.com", True), (10, 1, "here@example.com", False),
         ]
 
-    def test_a_deleted_accounts_stored_email_is_not_shown(self, engine, api, monkeypatch):
+    def test_a_deleted_account_with_no_stored_email_is_flagged_with_no_label(self, engine, api, monkeypatch):
+        # Rows written before user_email was stored: nothing names the user, the UI falls back to the id
         monkeypatch.setattr(_analytics, "label_users", REAL_LABEL_USERS)
         monkeypatch.setattr(_analytics, "resolve_directory", lambda ids: ({}, {9}))
-        call(engine, 9, user_email="gone@example.com")
+        call(engine, 9)
 
-        assert "gone@example.com" not in str(leaderboard(api))
+        assert [(u["user_email"], u["user_deleted"]) for u in leaderboard(api)] == [(None, True)]
 
     def test_an_unresolved_user_is_not_flagged_deleted_when_the_directory_could_not_answer(
             self, engine, api, monkeypatch):
@@ -193,12 +194,12 @@ class TestLabelUsers:
         labels = _analytics.label_users([1, 2, 3], {1: "old@example.com", 2: "stored@example.com"})
         assert labels == {1: "live@example.com", 2: "stored@example.com", 3: None}
 
-    def test_a_confirmed_deleted_user_has_no_email_whatever_the_row_stored(self, monkeypatch):
+    def test_a_confirmed_deleted_user_keeps_the_email_its_rows_stored_and_is_flagged(self, monkeypatch):
         monkeypatch.setattr(_analytics, "resolve_directory", lambda ids: ({}, {7}))
         labels = _analytics.label_users([7], {7: "gone@example.com"})
-        assert labels == {7: None}
+        assert labels == {7: "gone@example.com"}
         assert labels.deleted == {7}
-        assert _analytics.user_fields(labels, 7) == {"user_email": None, "user_deleted": True}
+        assert _analytics.user_fields(labels, 7) == {"user_email": "gone@example.com", "user_deleted": True}
 
     def test_user_fields_for_a_live_user_a_missing_id_and_a_plain_dict(self):
         labels = _analytics.UserLabels({1: "a@example.com"})
@@ -217,12 +218,14 @@ class TestResolveDirectory:
     """Real resolve_directory over a stubbed directory: deleted only when the lookup answered."""
 
     @staticmethod
-    def directory(monkeypatch, *, users=(), list_raises=False, get_user_ids=()):
+    def directory(monkeypatch, *, users=(), list_raises=False, get_user_ids=(), list_returns="match"):
         auth = types.SimpleNamespace()
 
         def list_users(user_ids):
             if list_raises:
                 raise RuntimeError("directory down")
+            if list_returns != "match":
+                return list_returns
             return [u for u in users if u["id"] in user_ids]
 
         auth.list_users = list_users
@@ -232,6 +235,21 @@ class TestResolveDirectory:
         monkeypatch.setitem(sys.modules, "tools", tools)
 
     def test_an_id_missing_from_an_answered_lookup_is_deleted(self, monkeypatch):
+        self.directory(monkeypatch, users=[{"id": 1, "email": "a@example.com"}])
+        assert _analytics.resolve_directory([1, 2]) == ({1: "a@example.com"}, {2})
+
+    @pytest.mark.parametrize("answer", [None, []])
+    def test_an_empty_answer_never_marks_anyone_deleted(self, monkeypatch, answer):
+        # A proxy or timeout path that returns instead of raising, or a directory not yet synced
+        self.directory(monkeypatch, users=[], list_returns=answer)
+        assert _analytics.resolve_directory([1, 2, 3]) == ({}, set())
+
+    def test_an_empty_answer_falls_back_to_the_per_id_lookup(self, monkeypatch):
+        users = [{"id": 1, "email": "a@example.com"}, {"id": 2, "email": "b@example.com"}]
+        self.directory(monkeypatch, users=users, list_returns=[], get_user_ids=(1, 2))
+        assert _analytics.resolve_directory([1, 2]) == ({1: "a@example.com", 2: "b@example.com"}, set())
+
+    def test_a_partial_answer_is_complete_so_the_missing_one_is_deleted(self, monkeypatch):
         self.directory(monkeypatch, users=[{"id": 1, "email": "a@example.com"}])
         assert _analytics.resolve_directory([1, 2]) == ({1: "a@example.com"}, {2})
 

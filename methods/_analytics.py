@@ -1021,13 +1021,18 @@ def _get_users(user_ids):
 
 
 def _lookup_users(user_ids):
-    """(users, complete). complete is True only when the batched lookup answered.
+    """(users, complete). complete is True only when the batched lookup returned users.
 
     One call for the whole id set: list_users resolves them in a single SQL IN, so a project's
     member count does not turn into one round trip per member. It returns *every* user when the
     id list is falsy, hence the guard. The per-id loop stays only as a fallback for a directory
-    that does not expose the batched RPC. It cannot tell a deleted user from a failed call (both
-    raise), so its answer is never complete and nobody is concluded to be deleted from it (#6879).
+    that does not expose the batched RPC.
+
+    An empty or missing answer for a non-empty id list is not complete: a proxy or timeout path
+    that returns instead of raising, or a directory that has not synced, would otherwise read as
+    "none of these accounts exist" and mark every active user deleted. The per-id loop cannot tell
+    a deleted user from a failed call either (both raise), so its answer is never complete, and
+    nobody is concluded to be deleted from it (#6879).
     """
     from tools import auth  # pylint: disable=C0415,E0401
     #
@@ -1037,7 +1042,12 @@ def _lookup_users(user_ids):
         return [], True
     #
     try:
-        return [user for user in (auth.list_users(user_ids=wanted) or []) if user], True
+        batch = [user for user in (auth.list_users(user_ids=wanted) or []) if user]
+        #
+        if batch:
+            return batch, True
+        #
+        log.warning("usage: batched user lookup returned no users for %s ids, resolving one at a time", len(wanted))
     except:  # pylint: disable=W0702
         log.warning("usage: batched user lookup unavailable, resolving one at a time")
     #
@@ -1258,9 +1268,8 @@ def role_filter_condition(project_id, roles):
 class UserLabels(dict):
     """user_id -> email, plus the ids whose account no longer exists (#6879).
 
-    A plain dict to every caller. A deleted account has no email here, not even the one its rows
-    stored: its history stays in every total, but the person's address is no longer shown, and
-    the response says "deleted" through user_fields() instead.
+    A plain dict to every caller. A deleted account keeps the email its rows stored, so its
+    history stays identifiable (#6796); the response marks it "deleted" through user_fields().
     """
 
     def __init__(self, labels=None, deleted=()):
@@ -1271,7 +1280,8 @@ class UserLabels(dict):
 def label_users(rows_user_ids, stored_emails=None):
     """Display email per user id: the directory email, else the email the row stored.
 
-    An account the directory confirms is gone gets no email and is listed in .deleted.
+    An account the directory confirms is gone is listed in .deleted. It has no directory email,
+    so it keeps the stored one, which is what keeps old rows identifiable after removal (#6796).
     """
     resolved, deleted = resolve_directory(rows_user_ids)
     stored = stored_emails or {}
@@ -1283,7 +1293,7 @@ def label_users(rows_user_ids, stored_emails=None):
             continue
         #
         key = int(user_id)
-        labels[key] = None if key in deleted else (resolved.get(key) or stored.get(key))
+        labels[key] = resolved.get(key) or stored.get(key)
     #
     return UserLabels(labels, deleted)
 
