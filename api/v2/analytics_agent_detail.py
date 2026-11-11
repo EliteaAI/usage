@@ -193,6 +193,9 @@ if _API_AVAILABLE:
                 if entity_id is None:
                     return {"error": "entity_id is required"}, 400
 
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
@@ -219,6 +222,7 @@ if _API_AVAILABLE:
                 )
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "entity_name": entity_name,
                     "entity_id": entity_id,
                     "kind": self._resolve_entity_kind(project_id, conditions, entity_id),
@@ -450,7 +454,7 @@ if _API_AVAILABLE:
             users = [
                 {
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "events": int(r["events"] or 0),
                     "avg_duration_ms": an.rounded(r["avg_duration_ms"], 1),
                     "errors": int(r["errors"] or 0),

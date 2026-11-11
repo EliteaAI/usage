@@ -141,16 +141,19 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_skills/prompt_lib/<project_id>
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 sort_by = request.args.get("sort_by", sa.DEFAULT_SORT)
-                return sa.build_skill_leaderboard(
+                return an.with_range(sa.build_skill_leaderboard(
                     project_id, dt_from, dt_to,
                     search=request.args.get("search", "").strip(),
                     sort_by=sort_by if sort_by in sa.SORT_COLUMNS else sa.DEFAULT_SORT,
                     sort_order="asc" if request.args.get("sort_order") == "asc" else "desc",
                     limit=an.clamp_int(request.args.get("limit"), 20, minimum=1, maximum=100),
                     offset=an.clamp_int(request.args.get("offset"), 0, minimum=0),
-                ), 200
+                ), request.args, dt_from, dt_to), 200
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics skills query failed", exc_info=True)
                 return {"error": "Failed to query analytics skills"}, 500

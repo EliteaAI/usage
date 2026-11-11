@@ -159,6 +159,9 @@ if _API_AVAILABLE:
                 return {"error": "user_id must be an integer"}, 400
 
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
@@ -171,9 +174,12 @@ if _API_AVAILABLE:
                 if not kpi or not kpi["total_events"]:
                     return {"error": "No data found for this user"}, 404
 
+                labels = an.label_users([user_id], {user_id: kpi["user_email"]})
+                #
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "user_id": user_id,
-                    "user_email": an.label_users([user_id], {user_id: kpi["user_email"]}).get(user_id),
+                    **an.user_fields(labels, user_id),
                     "kpis": kpi["kpis"],
                     "models": self._models(project_id, conditions),
                     "tools": self._tools(conditions),

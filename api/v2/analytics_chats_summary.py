@@ -134,6 +134,9 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_chats_summary/prompt_lib/<project_id>
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 include_daily = request.args.get("include_daily", "false").lower() == "true"
 
@@ -217,6 +220,7 @@ if _API_AVAILABLE:
                     daily = self._daily_series(conditions, dt_from, dt_to)
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to),
                     "kpis": kpis,
                     "by_participant_type": by_participant_type,
                     "daily": daily,

@@ -223,17 +223,20 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_costs/prompt_lib/<project_id>
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
                 dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
                 # No is_error filter: a provider that reported tokens alongside a 4xx has still
                 # charged for them, so error rows stay in every sum below (#6574).
-                conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope) + [
-                    UsageEvent.event_type == an.EVENT_LLM,
-                ]
+                # The same model-call population as the Overview and the Usage page (#6879)
+                conditions = an.model_call_filters(project_id, dt_from, dt_to, run_scope=run_scope)
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "kpis": self._kpis(conditions),
                     "by_model": self._by_model(project_id, conditions),
                     "by_agent": self._by_agent(project_id, conditions, run_scope),
@@ -633,10 +636,10 @@ if _API_AVAILABLE:
             return [
                 {
                     "user_id": None if r.get("is_other") else r["user_id"],
-                    "user_email": (
-                        "Other users"
+                    **(
+                        {"user_email": "Other users", "user_deleted": False}
                         if r.get("is_other")
-                        else emails.get(r["user_id"])
+                        else an.user_fields(emails, r["user_id"])
                     ),
                     "total_cost": an.cost_usd(r["cost_nano"]),
                     **an.cost_split_usd(r),

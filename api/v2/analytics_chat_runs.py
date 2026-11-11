@@ -169,6 +169,9 @@ if _API_AVAILABLE:
             sort_order = request.args.get("sort_order", "desc")
 
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = ac.chat_base_filters(project_id, dt_from, dt_to)
                 conditions.append(UsageEvent.conversation_id == conversation_uuid)
@@ -181,7 +184,7 @@ if _API_AVAILABLE:
                 log.error("Analytics chat runs query failed", exc_info=True)
                 return {"error": "Failed to query analytics chat runs"}, 500
 
-            return {"total": total, "rows": rows}, 200
+            return {"range": an.date_range_meta(request.args, dt_from, dt_to), "total": total, "rows": rows}, 200
 
         @staticmethod
         def _fetch_runs_page(project_id, conditions, sort_by, sort_order, limit, offset):
@@ -257,7 +260,7 @@ if _API_AVAILABLE:
                     "run_id": r["run_id"],
                     "started_at": sa.format_iso(r["started_at"]),
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "participant_type": _TYPE_MAP.get(r["participant_type"], r["participant_type"] or "model"),
                     "participant_name": (
                         resolved_name(r)

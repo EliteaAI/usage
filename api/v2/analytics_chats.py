@@ -159,6 +159,9 @@ if _API_AVAILABLE:
         def _list_chats(self, project_id: int):
             try:
                 requester_id = auth.current_user().get("id")
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = ac.chat_base_filters(project_id, dt_from, dt_to)
 
@@ -209,7 +212,7 @@ if _API_AVAILABLE:
                 for row in enriched:
                     row["owner_email"] = emails.get(row.get("owner_id"))
 
-                body = {"total": total, "rows": enriched}
+                body = {"range": an.date_range_meta(request.args, dt_from, dt_to), "total": total, "rows": enriched}
                 if search_truncated:
                     body["search_truncated"] = True
                 return body, 200

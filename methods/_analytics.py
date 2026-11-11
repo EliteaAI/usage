@@ -233,6 +233,62 @@ def parse_date_range(args, run_scope=None):
     return clamp_date_range(dt_from, dt_to)
 
 
+RANGE_TIMEZONE = "UTC"
+
+
+def date_range_error(args):
+    """(error_body, 400) for a date bound that is present but unusable, else None (#6879).
+
+    parse_date_range quietly turns an unparseable bound into "absent" and then defaults it, so a
+    typo or a half-edited picker value came back as the last seven days with no sign of it.
+    Endpoints that call this reject the request instead. An absent bound is still defaulted.
+    """
+    bounds = {}
+    #
+    for key in ("date_from", "date_to"):
+        raw = args.get(key)
+        #
+        if not raw:
+            continue
+        #
+        bounds[key] = _parse_utc(raw)
+        #
+        if bounds[key] is None:
+            return {"error": f"Invalid {key}: expected an ISO 8601 date or datetime"}, 400
+    #
+    if len(bounds) == 2 and bounds["date_from"] > bounds["date_to"]:
+        return {"error": "Invalid range: date_from must not be later than date_to"}, 400
+    #
+    return None
+
+
+def date_range_meta(args, dt_from, dt_to, run_scope=None):
+    """The window a query really used, so a client can compare it with what the UI asked for (#6879)."""
+    given = {key: bool(args.get(key)) for key in ("date_from", "date_to")}
+    run_window = run_scope is not None and not any(given.values())
+    requested_from, requested_to = _parse_utc(args.get("date_from")), _parse_utc(args.get("date_to"))
+    #
+    return {
+        "date_from": dt_from.isoformat() if dt_from else None,
+        "date_to": dt_to.isoformat() if dt_to else None,
+        "timezone": RANGE_TIMEZONE,
+        # Bounds the backend filled in; empty when the caller sent both or the run is the window
+        "defaulted": [] if run_window else [key for key, present in given.items() if not present],
+        "clamped": bool(
+            requested_from and requested_to and (requested_to - requested_from).days > MAX_DATE_RANGE_DAYS
+        ),
+    }
+
+
+def with_range(body, args, dt_from, dt_to, run_scope=None):
+    """body with the window the query used under "range", so every analytics tab can be checked
+    against what the UI asked for (#6879). Anything that is not a dict is returned untouched."""
+    if isinstance(body, dict):
+        body["range"] = date_range_meta(args, dt_from, dt_to, run_scope=run_scope)
+    #
+    return body
+
+
 class RunScope(NamedTuple):
     """One run to scope analytics to: an agent/pipeline run, an eval run, or both."""
     # Run History conversation uuid (usage_event.conversation_id), or a raw usage_event.run_id
@@ -502,6 +558,23 @@ def base_filters(
         ))
     #
     return conditions
+
+
+def model_call_filters(project_id, dt_from, dt_to, run_scope=None):
+    """The one definition of a model call for Analytics totals: calls, tokens and cost (#6879).
+
+    Every llm event of the project in the window, whoever made it. Chat, completion, embedding,
+    image and speech calls are all llm events, so none is left out by model family. Calls made
+    under the system account (indexing, background work) are real spend and are counted here;
+    only people metrics (active users, the leaderboard) leave them out, through base_filters.
+
+    The Usage page counts the same events except project-own models (budget_exempt), which it
+    leaves out on purpose because they are never billed against the budget. Analytics keeps them
+    and reports them apart as "own", so Usage calls == Analytics shared calls.
+    """
+    return base_filters(
+        project_id, dt_from, dt_to, human_only=False, run_scope=run_scope, event_types=(EVENT_LLM,),
+    )
 
 
 class EventStartedAt(FunctionElement):
@@ -916,43 +989,55 @@ def is_system_email(email):
     )
 
 
-def resolve_emails(user_ids):
-    """user_id -> email, for the ids a payload is about to render.
+def resolve_directory(user_ids):
+    """(user_id -> email, deleted ids) for the ids a payload is about to render.
 
     usage_event.user_email is populated going forward but is null on rows written before that,
     so the id is the identity and the email is looked up rather than trusted from the row.
+
+    deleted holds the ids the directory answered for without finding them: the account is gone
+    but its events remain (#6796, #6879). It stays empty when the lookup could not answer, so an
+    outage never labels anyone as deleted.
     """
-    wanted = [uid for uid in {int(u) for u in user_ids if u is not None} if uid != SYSTEM_USER_ID]
+    wanted = sorted({int(u) for u in user_ids if u is not None and int(u) != SYSTEM_USER_ID})
     #
     if not wanted:
-        return {}
+        return {}, set()
     #
-    resolved = {}
+    users, complete = _lookup_users(wanted)
+    resolved = {int(user["id"]): user.get("email") for user in users if user.get("id") is not None}
     #
-    for user in _get_users(wanted):
-        if user.get("id") is not None:
-            resolved[int(user["id"])] = user.get("email")
-    #
-    return resolved
+    return resolved, ({user_id for user_id in wanted if user_id not in resolved} if complete else set())
+
+
+def resolve_emails(user_ids):
+    """user_id -> email for the ids the directory still knows."""
+    return resolve_directory(user_ids)[0]
 
 
 def _get_users(user_ids):
-    """The directory entries that resolve; a missing user is skipped, not an error.
+    """The directory entries that resolve; a missing user is skipped, not an error."""
+    return _lookup_users(user_ids)[0]
+
+
+def _lookup_users(user_ids):
+    """(users, complete). complete is True only when the batched lookup answered.
 
     One call for the whole id set: list_users resolves them in a single SQL IN, so a project's
     member count does not turn into one round trip per member. It returns *every* user when the
     id list is falsy, hence the guard. The per-id loop stays only as a fallback for a directory
-    that does not expose the batched RPC.
+    that does not expose the batched RPC. It cannot tell a deleted user from a failed call (both
+    raise), so its answer is never complete and nobody is concluded to be deleted from it (#6879).
     """
     from tools import auth  # pylint: disable=C0415,E0401
     #
     wanted = [user_id for user_id in user_ids if user_id is not None]
     #
     if not wanted:
-        return []
+        return [], True
     #
     try:
-        return [user for user in (auth.list_users(user_ids=wanted) or []) if user]
+        return [user for user in (auth.list_users(user_ids=wanted) or []) if user], True
     except:  # pylint: disable=W0702
         log.warning("usage: batched user lookup unavailable, resolving one at a time")
     #
@@ -967,7 +1052,7 @@ def _get_users(user_ids):
         if user:
             users.append(user)
     #
-    return users
+    return users, False
 
 
 def search_user_ids(project_id, search):
@@ -1170,9 +1255,25 @@ def role_filter_condition(project_id, roles):
     )
 
 
+class UserLabels(dict):
+    """user_id -> email, plus the ids whose account no longer exists (#6879).
+
+    A plain dict to every caller. A deleted account has no email here, not even the one its rows
+    stored: its history stays in every total, but the person's address is no longer shown, and
+    the response says "deleted" through user_fields() instead.
+    """
+
+    def __init__(self, labels=None, deleted=()):
+        super().__init__(labels or {})
+        self.deleted = frozenset(deleted)
+
+
 def label_users(rows_user_ids, stored_emails=None):
-    """Display email per user id, preferring the directory over whatever the row stored."""
-    resolved = resolve_emails(rows_user_ids)
+    """Display email per user id: the directory email, else the email the row stored.
+
+    An account the directory confirms is gone gets no email and is listed in .deleted.
+    """
+    resolved, deleted = resolve_directory(rows_user_ids)
     stored = stored_emails or {}
     #
     labels = {}
@@ -1182,9 +1283,22 @@ def label_users(rows_user_ids, stored_emails=None):
             continue
         #
         key = int(user_id)
-        labels[key] = resolved.get(key) or stored.get(key)
+        labels[key] = None if key in deleted else (resolved.get(key) or stored.get(key))
     #
-    return labels
+    return UserLabels(labels, deleted)
+
+
+def user_fields(labels, user_id):
+    """The user_email / user_deleted pair of a response row, from label_users()."""
+    key = None if user_id is None else int(user_id)
+    #
+    # Model totals include the system account's calls, so it needs a name where people do not
+    email = "System" if key == SYSTEM_USER_ID else labels.get(key)
+    #
+    return {
+        "user_email": email,
+        "user_deleted": key is not None and key in getattr(labels, "deleted", ()),
+    }
 
 
 def _is_super_admin(user_id):

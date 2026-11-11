@@ -137,19 +137,35 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics/prompt_lib/<project_id>
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
                 dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
+                # People metrics (users, runs, the leaderboard) count human actors only. Model
+                # metrics (calls, tokens, cost, models) count every llm event, embedding and
+                # system-account calls included, exactly as the Costs tab does (#6879).
                 conditions = an.base_filters(project_id, dt_from, dt_to, run_scope=run_scope)
+                model_conditions = an.model_call_filters(project_id, dt_from, dt_to, run_scope=run_scope)
                 #
-                kpis = self._kpis(project_id, conditions, run_scope)
+                kpis = self._kpis(project_id, conditions, run_scope, model_conditions)
+                top_ai_users = self._top_ai_users(project_id, conditions, run_scope)
+                date_range = an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope)
+                #
+                log.debug(
+                    "usage: overview project %s range %s..%s defaulted %s ranked users %s",
+                    project_id, date_range["date_from"], date_range["date_to"],
+                    date_range["defaulted"], [u["user_id"] for u in top_ai_users],
+                )
                 #
                 return {
+                    "range": date_range,
                     "kpis": kpis,
-                    "top_ai_users": self._top_ai_users(project_id, conditions, run_scope),
-                    "daily_activity": self._daily_activity(conditions, run_scope),
-                    "models": self._models(project_id, conditions),
+                    "top_ai_users": top_ai_users,
+                    "daily_activity": self._daily_activity(conditions, run_scope, model_conditions),
+                    "models": self._models(project_id, model_conditions),
                     # Unfiltered by actor: scheduled runs may bill a project system user
                     "automated": an.automated_activity(
                         an.base_filters(project_id, dt_from, dt_to, human_only=False, run_scope=run_scope),
@@ -161,20 +177,29 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics"}, 500
 
         @staticmethod
-        def _kpis(project_id, conditions, run_scope=None):
-            """One scan for every headline number."""
+        def _kpis(project_id, conditions, run_scope=None, model_conditions=None):
+            """Headline numbers: one scan for the people metrics, one for the model metrics.
+
+            model_conditions defaults to conditions, so a caller that has one population keeps it.
+            """
+            if model_conditions is None:
+                model_conditions = conditions
+            #
             row = an.fetch_one(select(
                 an.manual_users_expr().label("unique_users"),
-                an.llm_calls_expr().label("llm_calls"),
                 an.tool_runs_expr().label("tool_runs"),
                 an.agent_runs_expr(run_scope).label("agent_runs"),
                 an.skill_runs_expr().label("skill_runs"),
-                func.sum(an.total_tokens_expr()).label("total_tokens"),
-                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
                 # nullif so a blank name is not its own distinct value
                 func.count(distinct(func.nullif(UsageEvent.tool_name, ""))).label("unique_tools"),
-                func.count(distinct(func.nullif(UsageEvent.model_name, ""))).label("unique_models"),
             ).where(*conditions))
+            #
+            model_row = an.fetch_one(select(
+                an.llm_calls_expr().label("llm_calls"),
+                func.sum(an.total_tokens_expr()).label("total_tokens"),
+                func.sum(func.coalesce(UsageEvent.cost_nano_usd, 0)).label("cost_nano"),
+                func.count(distinct(func.nullif(UsageEvent.model_name, ""))).label("unique_models"),
+            ).where(*model_conditions))
             #
             unique_users = (row["unique_users"] if row else 0) or 0
             total_project_users = an.project_member_count(project_id, unique_users)
@@ -197,14 +222,14 @@ if _API_AVAILABLE:
                 "total_project_users": total_project_users,
                 "ai_active_users": ai_active_users,
                 "adoption_rate": adoption_rate,
-                "llm_calls": int(row["llm_calls"] or 0) if row else 0,
+                "llm_calls": int(model_row["llm_calls"] or 0) if model_row else 0,
                 "tool_runs": int(row["tool_runs"] or 0) if row else 0,
                 "agent_runs": int(row["agent_runs"] or 0) if row else 0,
                 "skill_runs": int(row["skill_runs"] or 0) if row else 0,
-                "total_tokens": int(row["total_tokens"] or 0) if row else 0,
-                "total_llm_cost": an.cost_usd(row["cost_nano"] if row else 0),
+                "total_tokens": int(model_row["total_tokens"] or 0) if model_row else 0,
+                "total_llm_cost": an.cost_usd(model_row["cost_nano"] if model_row else 0),
                 "unique_tools": int(row["unique_tools"] or 0) if row else 0,
-                "unique_models": int(row["unique_models"] or 0) if row else 0,
+                "unique_models": int(model_row["unique_models"] or 0) if model_row else 0,
             }
 
         @staticmethod
@@ -231,7 +256,8 @@ if _API_AVAILABLE:
                 an.skill_runs_expr().label("skill_runs"),
             ).where(*conditions).group_by(
                 UsageEvent.user_id,
-            ).order_by(func.count().desc()).limit(_LEADERBOARD_LIMIT))
+                # user_id breaks ties, so equal scores rank the same way on every request (#6879)
+            ).order_by(func.count().desc(), UsageEvent.user_id).limit(_LEADERBOARD_LIMIT))
             #
             emails = an.label_users(
                 [r["user_id"] for r in rows],
@@ -241,7 +267,7 @@ if _API_AVAILABLE:
             return [
                 {
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "ai_events": r["ai_events"],
                     "llm_calls": int(r["llm_calls"] or 0),
                     "tool_runs": int(r["tool_runs"] or 0),
@@ -252,8 +278,12 @@ if _API_AVAILABLE:
             ]
 
         @staticmethod
-        def _daily_activity(conditions, run_scope=None):
-            """Daily AI activity. Error and total-event series stay on the tracing payload."""
+        def _daily_activity(conditions, run_scope=None, model_conditions=None):
+            """Daily AI activity. Error and total-event series stay on the tracing payload.
+
+            llm_calls comes from the model population, the rest from the people population, so
+            each day's calls add up to the same total the headline card shows.
+            """
             day = an.day_expr().label("day")
             #
             rows = an.fetch_all(select(
@@ -265,17 +295,35 @@ if _API_AVAILABLE:
                 an.manual_users_expr().label("active_users"),
             ).where(*conditions).group_by(day).order_by(day))
             #
-            return [
-                {
+            if model_conditions is None:
+                calls_by_day = {r["day"]: int(r["llm_calls"] or 0) for r in rows}
+            else:
+                calls_by_day = {
+                    r["day"]: int(r["llm_calls"] or 0)
+                    for r in an.fetch_all(select(day, an.llm_calls_expr().label("llm_calls")).where(
+                        *model_conditions,
+                    ).group_by(day))
+                }
+            #
+            by_day = {
+                r["day"]: {
                     "date": r["day"].isoformat() if r["day"] else None,
-                    "llm_calls": int(r["llm_calls"] or 0),
+                    "llm_calls": calls_by_day.get(r["day"], 0),
                     "tool_runs": int(r["tool_runs"] or 0),
                     "agent_runs": int(r["agent_runs"] or 0),
                     "skill_runs": int(r["skill_runs"] or 0),
                     "active_users": r["active_users"] or 0,
                 }
                 for r in rows
-            ]
+            }
+            # A day with model calls only (system account, indexing) has no people row
+            for key, calls in calls_by_day.items():
+                by_day.setdefault(key, {
+                    "date": key.isoformat() if key else None, "llm_calls": calls,
+                    "tool_runs": 0, "agent_runs": 0, "skill_runs": 0, "active_users": 0,
+                })
+            #
+            return [by_day[key] for key in sorted(by_day, key=lambda k: (k is None, k))]
 
         @staticmethod
         def _models(project_id, conditions):

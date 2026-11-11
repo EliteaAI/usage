@@ -171,6 +171,9 @@ if _API_AVAILABLE:
                 sort_order (str): "asc" or "desc", default "desc"
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
@@ -288,11 +291,12 @@ if _API_AVAILABLE:
                 )
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "total": total,
                     "rows": [
                         {
                             "user_id": r["user_id"],
-                            "user_email": emails.get(r["user_id"]),
+                            **an.user_fields(emails, r["user_id"]),
                             "total_events": r["total_events"],
                             "active_days": r["active_days"],
                             "llm_events": int(r["llm_events"] or 0),
