@@ -19,6 +19,7 @@ ALL_RPCS = {
     "usage_get_project_usage_detail": {"project_id": 7},
     "usage_get_user_usage_detail": {"project_id": 7, "user_id": 42},
     "usage_get_projects_spend": {"project_ids": [1, 2]},
+    "usage_get_projects_period_spend": {"project_ids": [1, 2], "period": "202609"},
     "usage_get_users_spend": {"project_id": 7, "user_ids": [4, 5]},
     "usage_list_member_spend": {"project_id": 7, "period": None},
 }
@@ -31,6 +32,7 @@ METHOD_OF = {
     "usage_get_project_usage_detail": "usage_read_project_usage_detail",
     "usage_get_user_usage_detail": "usage_read_user_usage_detail",
     "usage_get_projects_spend": "usage_read_projects_spend",
+    "usage_get_projects_period_spend": "usage_read_projects_period_spend",
     "usage_get_users_spend": "usage_read_users_spend",
     "usage_list_member_spend": "usage_read_member_spend_listing",
 }

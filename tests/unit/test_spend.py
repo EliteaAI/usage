@@ -194,6 +194,55 @@ class TestMapReads:
         assert [len(chunk) for chunk in chunks] == [spend.ID_CHUNK, 5]
 
 
+class TestProjectsPeriodSpend:
+    """#7510: the admin report must tell a failed or untracked month from a month of $0.00."""
+
+    EARLIEST = datetime.date(2026, 7, 1)
+
+    def test_a_tracked_month_returns_the_map_and_is_available(self, build):
+        # first execute is the earliest-period probe, the second the spend chunk
+        instance, _ = build(Engine([(self.EARLIEST,)], [(1, 2_000_000_000)]))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1, 2], period=PERIOD)
+        #
+        assert result["available"] is True
+        assert result["spend"] == {1: 2.0, 2: 0.0}
+        assert result["earliest_period"] == "202607"
+
+    def test_a_month_before_tracking_began_is_unavailable_not_zero(self, build):
+        instance, _ = build(Engine([(self.EARLIEST,)]))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1], period="202605")
+        #
+        assert result["available"] is False
+        assert result["spend"] == {}
+        assert result["earliest_period"] == "202607"
+
+    def test_the_current_month_is_available_even_with_nothing_tracked(self, build):
+        instance, _ = build(Engine([(None,)], []))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1])
+        #
+        assert result["available"] is True
+        assert result["spend"] == {1: 0.0}
+        assert result["earliest_period"] is None
+
+    def test_a_past_month_with_nothing_tracked_is_unavailable(self, build):
+        instance, _ = build(Engine([(None,)]))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1], period="202501")
+        #
+        assert result["available"] is False
+
+    def test_a_failed_read_is_unavailable_not_a_zero_map(self, build):
+        instance, _ = build(FailingEngine())
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1, 2], period=PERIOD)
+        #
+        assert result["available"] is False
+        assert result["spend"] == {}
+
+
 class TestMemberSpendListing:
     def test_the_sentinel_row_becomes_the_project_total(self, build):
         # (user_id, cost_nano, call_count); user_id 0 is the project aggregate
