@@ -153,6 +153,9 @@ if _API_AVAILABLE:
             GET /api/v2/usage/analytics_agents/prompt_lib/<project_id>
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
@@ -176,6 +179,7 @@ if _API_AVAILABLE:
                 )
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "total": total,
                     "rows": rows,
                     # socketio "chat_predict" activity has no usage_event equivalent; kept

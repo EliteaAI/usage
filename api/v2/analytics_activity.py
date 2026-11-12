@@ -132,16 +132,19 @@ if _API_AVAILABLE:
                     comma-separated. Omitted/empty means all roles.
             """
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
                 dt_from, dt_to = an.parse_date_range(request.args, run_scope=run_scope)
 
-                return an.ai_active_users_trend(
+                return an.with_range(an.ai_active_users_trend(
                     project_id, dt_from, dt_to,
                     an.parse_granularity(request.args), self._role_params(),
                     run_scope=run_scope,
-                ), 200
+                ), request.args, dt_from, dt_to, run_scope=run_scope), 200
 
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics activity query failed", exc_info=True)

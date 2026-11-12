@@ -131,6 +131,9 @@ if _API_AVAILABLE:
                 except ValueError:
                     return {"error": "conversation_uuid must be a valid UUID"}, 400
 
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = ac.chat_base_filters(project_id, dt_from, dt_to)
                 conditions.append(UsageEvent.conversation_id == conversation_uuid)
@@ -147,6 +150,7 @@ if _API_AVAILABLE:
                 meta = meta_rows[0] if meta_rows else {}
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to),
                     "conversation_uuid": conversation_uuid,
                     "chat_name": meta.get("chat_name"),
                     "is_private": meta.get("is_private", True),
@@ -361,7 +365,7 @@ if _API_AVAILABLE:
             return [
                 {
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "responses": int(r["responses"] or 0),
                     "total_tokens": int(r["total_tokens"] or 0),
                     "llm_cost": an.cost_usd(r["cost_nano"]),

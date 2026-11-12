@@ -153,6 +153,9 @@ if _API_AVAILABLE:
                 sort_by = _DEFAULT_SORT
             sort_order = request.args.get("sort_order", "desc")
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 conditions = an.base_filters(project_id, dt_from, dt_to) + [
                     an.is_agent_row(),
@@ -163,7 +166,7 @@ if _API_AVAILABLE:
             except Exception:  # pylint: disable=W0703
                 log.error("Analytics agent runs query failed", exc_info=True)
                 return {"error": "Failed to query analytics agent runs"}, 500
-            return {"total": total, "rows": rows}, 200
+            return {"range": an.date_range_meta(request.args, dt_from, dt_to), "total": total, "rows": rows}, 200
 
         @staticmethod
         def _fetch_runs_page(project_id, conditions, sort_by, sort_order, limit, offset):
@@ -227,7 +230,7 @@ if _API_AVAILABLE:
                     "run_id": r["run_id"],
                     "started_at": sa.format_iso(r["started_at"]),
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "version_id": r["version_id"],
                     "version_name": version_names.get(vn.build_version_key(project_id, r)),
                     "models": models.get(r["run_id"], []),

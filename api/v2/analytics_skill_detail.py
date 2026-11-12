@@ -94,6 +94,9 @@ if _API_AVAILABLE:
                 return {"error": "skill_id is required"}, 400
             skill_project_id = an.clamp_int(request.args.get("skill_project_id"), project_id)
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
                 detail = sa.build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to)
             except Exception:  # pylint: disable=W0703
@@ -101,7 +104,7 @@ if _API_AVAILABLE:
                 return {"error": "Failed to query analytics skill detail"}, 500
             if detail is None:
                 return {"error": "Skill not used in the selected range"}, 404
-            return detail, 200
+            return an.with_range(detail, request.args, dt_from, dt_to), 200
 
 
     class API(api_tools.APIBase):

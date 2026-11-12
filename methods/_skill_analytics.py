@@ -438,7 +438,7 @@ def format_recent_runs(rows, conversations, emails, version_names, model_names):
             "conversation_id": conversations.get(r["conversation_id"]),
             "started_at": format_iso(r["started_at"]),
             "user_id": r["user_id"],
-            "user_email": emails.get(r["user_id"]),
+            **an.user_fields(emails, r["user_id"]),
             "version_id": r["version_id"],
             "version_name": label_version(r["version_id"], version_names),
             "model_name": label_model(r["model_name"], model_names, r.get("model_scope")),
@@ -497,7 +497,7 @@ def build_skill_detail(project_id, skill_id, skill_project_id, dt_from, dt_to):
         ],
         "by_model": format_model_breakdown(models, model_names),
         "by_user": [
-            {"user_id": r["user_id"], "user_email": emails.get(r["user_id"]), **summarize_totals(r)} for r in users
+            {"user_id": r["user_id"], **an.user_fields(emails, r["user_id"]), **summarize_totals(r)} for r in users
         ],
         "by_trigger_source": [
             {"trigger_source": r["trigger_source"] or TRIGGER_MANUAL, **summarize_totals(r)} for r in triggers

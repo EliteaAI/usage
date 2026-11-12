@@ -134,6 +134,9 @@ if _API_AVAILABLE:
                 return {"error": "tool_name is required"}, 400
 
             try:
+                invalid_range = an.date_range_error(request.args)
+                if invalid_range:
+                    return invalid_range
                 run_scope, error = an.request_run_scope(project_id, request.args)
                 if error:
                     return error
@@ -156,6 +159,7 @@ if _API_AVAILABLE:
                 errors = kpi["errors"] or 0
 
                 return {
+                    "range": an.date_range_meta(request.args, dt_from, dt_to, run_scope=run_scope),
                     "tool_name": tool_name,
                     "kpis": {
                         "total_calls": total_calls,
@@ -198,7 +202,7 @@ if _API_AVAILABLE:
             return [
                 {
                     "user_id": r["user_id"],
-                    "user_email": emails.get(r["user_id"]),
+                    **an.user_fields(emails, r["user_id"]),
                     "calls": r["calls"],
                     "avg_duration_ms": an.rounded(r["avg_duration_ms"], 1),
                     "errors": r["errors"] or 0,
