@@ -244,6 +244,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Month spend per project id. Every requested id is present, with 0.0 when unmetered.
 
         A map has no `available` flag, so a failed read answers all-zero, never a partial map.
+        A caller that must tell that apart from a month of $0.00 uses usage_read_projects_period_spend.
         """
         _period, _start, _end, period_day = _resolve(period)
         spend, _ok = _read_projects_month_spend(project_ids, period_day, model_name)
