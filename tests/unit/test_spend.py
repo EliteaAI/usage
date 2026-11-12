@@ -194,6 +194,62 @@ class TestMapReads:
         assert [len(chunk) for chunk in chunks] == [spend.ID_CHUNK, 5]
 
 
+class TestProjectsPeriodSpend:
+    """#7510: the admin report must tell a failed read from a month of $0.00."""
+
+    def test_a_successful_read_returns_the_map_and_is_available(self, build):
+        instance, _ = build(Engine([(1, 2_000_000_000)]))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1, 2], period=PERIOD)
+        #
+        assert result == {"available": True, "period": PERIOD, "spend": {1: 2.0, 2: 0.0}}
+
+    def test_a_month_with_no_rows_is_zero_and_still_available(self, build):
+        instance, _ = build(Engine([]))
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1], period=PERIOD)
+        #
+        assert result["available"] is True
+        assert result["spend"] == {1: 0.0}
+
+    def test_a_failed_read_is_unavailable_not_a_zero_map(self, build):
+        instance, _ = build(FailingEngine())
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=[1, 2], period=PERIOD)
+        #
+        assert result["available"] is False
+        assert result["spend"] == {}
+
+    def test_a_chunk_failing_midway_is_unavailable(self, build):
+        class HalfBroken(Engine):
+            def __init__(self):
+                super().__init__([(1, 2_000_000_000)])
+                self.seen = 0
+                outer = self
+
+                def execute(statement, params=None):
+                    outer.seen += 1
+                    if outer.seen > 1:
+                        raise RuntimeError("connection reset")
+                    return Result([(1, 2_000_000_000)])
+
+                self.connection.execute = execute
+        #
+        instance, _ = build(HalfBroken())
+        #
+        result = instance.usage_read_projects_period_spend(project_ids=list(range(spend.ID_CHUNK + 2)), period=PERIOD)
+        #
+        assert result["available"] is False
+
+    def test_the_plain_map_and_the_period_read_agree(self, build):
+        instance, _ = build(Engine([(1, 2_000_000_000)], [(1, 2_000_000_000)]))
+        #
+        plain = instance.usage_read_projects_spend(project_ids=[1, 2], period=PERIOD)
+        checked = instance.usage_read_projects_period_spend(project_ids=[1, 2], period=PERIOD)
+        #
+        assert plain == checked["spend"]
+
+
 class TestMemberSpendListing:
     def test_the_sentinel_row_becomes_the_project_total(self, build):
         # (user_id, cost_nano, call_count); user_id 0 is the project aggregate

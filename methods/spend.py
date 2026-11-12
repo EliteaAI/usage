@@ -68,6 +68,41 @@ def _chunks(ids):
     return [values[at:at + ID_CHUNK] for at in range(0, len(values), ID_CHUNK)]
 
 
+def _read_projects_month_spend(project_ids, period_day, model_name):
+    """Month spend per project id, and whether the whole read succeeded.
+
+    Every requested id is present, 0.0 when unmetered. On a failure the map is all-zero,
+    never partial, because a caller cannot tell a real 0.0 from a dropped chunk; the flag
+    is what lets a caller that must tell them apart do so.
+    """
+    spend = {}
+    #
+    try:
+        chunks = _chunks(project_ids)
+        spend = {value: 0.0 for chunk in chunks for value in chunk}
+        #
+        with db.engine.connect() as connection:
+            for chunk in chunks:
+                statement = select(
+                    UsageCounter.project_id, func.sum(UsageCounter.cost_nano_usd),
+                ).where(
+                    UsageCounter.period_kind == PERIOD_MONTH,
+                    UsageCounter.period_start == period_day,
+                    UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
+                    UsageCounter.user_id == PROJECT_USER_SENTINEL,
+                    UsageCounter.project_id.in_(chunk),
+                ).group_by(UsageCounter.project_id)
+                #
+                for project_id, cost in connection.execute(statement):
+                    spend[int(project_id)] = _dollars(cost)
+    except:  # pylint: disable=W0702
+        log.exception("usage: batched project spend read failed")
+        #
+        return dict.fromkeys(spend, 0.0), False
+    #
+    return spend, True
+
+
 def _counter_measures(period_day, *where, model_name=ALL_MODELS_SENTINEL):
     """Summed counter measures for whatever slice the caller pins down."""
     return select(
@@ -209,35 +244,24 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Month spend per project id. Every requested id is present, with 0.0 when unmetered.
 
         A map has no `available` flag, so a failed read answers all-zero, never a partial map.
+        A caller that must tell that apart from a month of $0.00 uses usage_read_projects_period_spend.
         """
         _period, _start, _end, period_day = _resolve(period)
-        spend = {}
-        #
-        try:
-            chunks = _chunks(project_ids)
-            spend = {value: 0.0 for chunk in chunks for value in chunk}
-            #
-            with db.engine.connect() as connection:
-                for chunk in chunks:
-                    statement = select(
-                        UsageCounter.project_id, func.sum(UsageCounter.cost_nano_usd),
-                    ).where(
-                        UsageCounter.period_kind == PERIOD_MONTH,
-                        UsageCounter.period_start == period_day,
-                        UsageCounter.model_name == (model_name or ALL_MODELS_SENTINEL),
-                        UsageCounter.user_id == PROJECT_USER_SENTINEL,
-                        UsageCounter.project_id.in_(chunk),
-                    ).group_by(UsageCounter.project_id)
-                    #
-                    for project_id, cost in connection.execute(statement):
-                        spend[int(project_id)] = _dollars(cost)
-        except:  # pylint: disable=W0702
-            log.exception("usage: batched project spend read failed")
-            # All-zero rather than the partial map: a caller cannot tell a real 0.0 from a
-            # dropped chunk, so a half-read must not look like a complete answer
-            return dict.fromkeys(spend, 0.0)
+        spend, _ok = _read_projects_month_spend(project_ids, period_day, model_name)
         #
         return spend
+
+    @web.method()
+    def usage_read_projects_period_spend(self, project_ids, period=None, **_kwargs):
+        """Month spend per project, plus whether the read succeeded (#7510).
+
+        The plain map above answers all-zero on a failed read, which an admin report would show
+        as "$0.00 spent". `available` is False in that case, so the report can say so instead.
+        """
+        period, _start, _end, period_day = _resolve(period)
+        spend, available = _read_projects_month_spend(project_ids, period_day, ALL_MODELS_SENTINEL)
+        #
+        return {"available": available, "period": period, "spend": spend if available else {}}
 
     @web.method()
     def usage_read_users_spend(self, project_id, user_ids, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs):

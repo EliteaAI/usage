@@ -81,6 +81,11 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         """Current-month spend for many projects, keyed by project id."""
         return self.usage_read_projects_spend(project_ids=project_ids, **kwargs)
 
+    @web.rpc("usage_get_projects_period_spend", "usage_get_projects_period_spend")
+    def usage_get_projects_period_spend_rpc(self, project_ids, **kwargs):
+        """Spend of many projects in one month, with an `available` flag instead of silent zeros."""
+        return self.usage_read_projects_period_spend(project_ids=project_ids, **kwargs)
+
     @web.rpc("usage_get_user_spend", "usage_get_user_spend")
     def usage_get_user_spend_rpc(self, project_id, user_id, **kwargs):
         """Current-month spend for one member of a project."""
