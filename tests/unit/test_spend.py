@@ -241,6 +241,34 @@ class TestProjectsPeriodSpend:
         #
         assert result["available"] is False
 
+    def test_a_feature_read_is_scoped_to_that_counter(self, build):
+        class Recording(Engine):
+            def __init__(self, *results):
+                super().__init__(*results)
+                self.compiled = []
+                outer = self
+                real = self.connection.execute
+
+                def execute(statement, params=None):
+                    outer.compiled.append(statement.compile().params)
+                    return real(statement, params)
+
+                self.connection.execute = execute
+        #
+        engine = Recording([(1, 2_000_000_000)])
+        instance, _ = build(engine)
+        #
+        feature = instance.usage_read_projects_period_spend(
+            project_ids=[1], period=PERIOD, model_name="web_search",
+        )
+        total = instance.usage_read_projects_period_spend(project_ids=[1], period=PERIOD)
+        #
+        assert feature["spend"] == {1: 2.0}
+        assert "web_search" in engine.compiled[0].values()
+        # No model_name keeps the project total, which is the all-models counter
+        assert "" in engine.compiled[1].values()
+        assert "web_search" not in engine.compiled[1].values()
+
     def test_the_plain_map_and_the_period_read_agree(self, build):
         instance, _ = build(Engine([(1, 2_000_000_000)], [(1, 2_000_000_000)]))
         #

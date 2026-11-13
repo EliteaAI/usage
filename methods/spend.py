@@ -252,14 +252,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return spend
 
     @web.method()
-    def usage_read_projects_period_spend(self, project_ids, period=None, **_kwargs):
-        """Month spend per project, plus whether the read succeeded (#7510).
+    def usage_read_projects_period_spend(
+            self, project_ids, period=None, model_name=ALL_MODELS_SENTINEL, **_kwargs
+    ):
+        """Month spend per project, plus whether the read succeeded (#7510, #7547).
 
         The plain map above answers all-zero on a failed read, which an admin report would show
         as "$0.00 spent". `available` is False in that case, so the report can say so instead.
+
+        model_name narrows the spend to one counter, such as a Tool Spend feature; without it the
+        project's total is read.
         """
         period, _start, _end, period_day = _resolve(period)
-        spend, available = _read_projects_month_spend(project_ids, period_day, ALL_MODELS_SENTINEL)
+        spend, available = _read_projects_month_spend(project_ids, period_day, model_name)
         #
         return {"available": available, "period": period, "spend": spend if available else {}}
 
