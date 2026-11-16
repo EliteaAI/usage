@@ -1,7 +1,8 @@
-"""#7553 — Complexity Units: formula v1, weight lookup, labels, rollup, calibration.
+"""#7553 — Complexity Units: formula v1, weight lookup, labels, thresholds, job helpers.
 
 These pin the #7552 decisions: context capped at 30 CU, one CU per non-error LLM call,
 tool calls weighted by the shipped v1 map, thresholds L<10 / M<30 / H<100 / X.
+They also pin the review fixes: no time lookback, owning project in every key, SQL percentiles.
 """
 import datetime
 import json
@@ -62,75 +63,55 @@ class TestScoreRun:
         assert cx.score_run(0, 0, [("read_file", None, 3)], WEIGHTS)["cu_total"] == 3.0
 
 
-class TestLabelsAndHistogram:
+class TestLabels:
     @pytest.mark.parametrize("cu,label", [(0, "L"), (9.99, "L"), (10, "M"), (30, "H"), (100, "X")])
     def test_default_labels(self, cu, label):
         assert cx.label_for(cu, cx.DEFAULT_THRESHOLDS) == label
 
-    @pytest.mark.parametrize("cu,bucket", [(0, 0), (0.9, 0), (1, 1), (3.9, 2), (4, 3), (10**9, 12)])
-    def test_log2_buckets(self, cu, bucket):
-        assert cx.histogram_bucket(cu) == bucket
-
-
-class TestDailyRollup:
-    def test_sums_max_and_histogram(self):
-        runs = [
-            {"peak_input_tokens": 1000, "llm_calls": 1, "tool_calls": 0,
-             "cu_context": 1, "cu_llm": 1, "cu_tools": 0, "cu_total": 2},
-            {"peak_input_tokens": 5000, "llm_calls": 3, "tool_calls": 2,
-             "cu_context": 5, "cu_llm": 3, "cu_tools": 6, "cu_total": 14},
-        ]
-        row = cx.daily_rollup(runs)
-        assert row["runs"] == 2 and row["cu_total_sum"] == 16 and row["cu_max"] == 14
-        assert row["peak_input_tokens_sum"] == 6000 and row["tool_calls"] == 2
-        assert sum(row["cu_histogram"]) == 2 and len(row["cu_histogram"]) == cx.HISTOGRAM_BUCKETS
-
 
 class TestThresholds:
     CONFIG = {"calibration": {"min_runs": 200, "min_entities": 10}}
+    QUANTILES = [12.0, 35.0, 110.0]
 
     def test_defaults_until_enough_runs(self):
-        assert cx.resolve_thresholds([5.0] * 199, 50, self.CONFIG) == (cx.DEFAULT_THRESHOLDS, "default")
+        assert cx.resolve_thresholds(self.QUANTILES, 199, 50, self.CONFIG) == (
+            cx.DEFAULT_THRESHOLDS, "default",
+        )
 
     def test_defaults_until_enough_entities(self):
-        assert cx.resolve_thresholds([5.0] * 500, 9, self.CONFIG)[1] == "default"
+        assert cx.resolve_thresholds(self.QUANTILES, 500, 9, self.CONFIG)[1] == "default"
 
-    def test_calibrates_on_p75_p90_p99(self):
-        sample = [float(v) for v in range(1, 1001)]
-        thresholds, source = cx.resolve_thresholds(sample, 20, self.CONFIG)
-        assert source == "calibrated"
-        assert thresholds == {"medium": 750.2, "high": 900.1, "extreme": 990.0}
+    def test_calibrated_quantiles_are_used_once_the_sample_is_big_enough(self):
+        assert cx.resolve_thresholds(self.QUANTILES, 500, 20, self.CONFIG) == (
+            {"medium": 12.0, "high": 35.0, "extreme": 110.0}, "calibrated",
+        )
 
     def test_a_degenerate_sample_keeps_the_defaults(self):
         # All runs equal -> p75 == p90; non-increasing cut-offs would make a label unreachable
-        assert cx.resolve_thresholds([4.0] * 300, 20, self.CONFIG)[1] == "default"
+        assert cx.resolve_thresholds([4.0, 4.0, 9.0], 300, 20, self.CONFIG)[1] == "default"
+
+    def test_no_sample_at_all(self):
+        assert cx.resolve_thresholds(None, 0, 0, self.CONFIG)[1] == "default"
 
     def test_configured_defaults_are_used(self):
         config = {**self.CONFIG, "default_thresholds": {"medium": 5, "high": 20, "extreme": 50}}
-        assert cx.resolve_thresholds([], 0, config)[0] == {"medium": 5.0, "high": 20.0, "extreme": 50.0}
+        assert cx.resolve_thresholds(None, 0, 0, config)[0] == {
+            "medium": 5.0, "high": 20.0, "extreme": 50.0,
+        }
 
     def test_pins_override_single_values(self):
         config = {**self.CONFIG, "pinned_thresholds": {"medium": None, "high": 40, "extreme": None}}
-        assert cx.resolve_thresholds([], 0, config) == (
+        assert cx.resolve_thresholds(None, 0, 0, config) == (
             {"medium": 10.0, "high": 40.0, "extreme": 100.0}, "pinned",
         )
 
     def test_an_inconsistent_pin_is_ignored(self):
         config = {**self.CONFIG, "pinned_thresholds": {"high": 5}}
-        assert cx.resolve_thresholds([], 0, config) == (cx.DEFAULT_THRESHOLDS, "default")
+        assert cx.resolve_thresholds(None, 0, 0, config) == (cx.DEFAULT_THRESHOLDS, "default")
 
     def test_invalid_defaults_fall_back_to_the_built_in_ones(self):
         config = {"default_thresholds": {"medium": 50, "high": 20, "extreme": 10}}
-        assert cx.resolve_thresholds([], 0, config)[0] == cx.DEFAULT_THRESHOLDS
-
-
-class TestPercentiles:
-    def test_ninety_nine_breakpoints(self):
-        result = cx.percentiles(range(1, 101))
-        assert len(result) == 99 and result[49] == 50.5
-
-    def test_empty_sample(self):
-        assert cx.percentiles([]) is None
+        assert cx.resolve_thresholds(None, 0, 0, config)[0] == cx.DEFAULT_THRESHOLDS
 
 
 def _run(project_id=3, run_id="r1", llm=2, tools=1, peak=4000, ts=None):
@@ -140,7 +121,7 @@ def _run(project_id=3, run_id="r1", llm=2, tools=1, peak=4000, ts=None):
         "last_event_at": ts + datetime.timedelta(minutes=20),
         "conversation_id": "c1", "trigger_source": None,
         "root_entity_type": "application", "root_entity_id": 7,
-        "root_entity_version_id": 70, "root_entity_project_id": None,
+        "root_entity_version_id": 70, "root_entity_project_id": 3,
         "peak_input_tokens": peak, "llm_calls": llm, "tool_calls": tools,
     }
 
@@ -165,19 +146,37 @@ class TestDailyKeys:
     def test_day_is_the_utc_day_of_the_first_event(self):
         local = datetime.timezone(datetime.timedelta(hours=3))
         row = _run(ts=datetime.datetime(2026, 11, 11, 1, 0, tzinfo=local))
-        assert jobs.daily_keys([row, row]) == [(3, "application", 7, datetime.date(2026, 11, 10))]
+        assert jobs.daily_keys([row, row]) == [(3, 3, "application", 7, datetime.date(2026, 11, 10))]
+
+    def test_a_public_agent_and_a_local_one_with_the_same_id_stay_apart(self):
+        # Agent 7 owned by project 9 (public) and agent 7 of project 3 itself, both run from 3
+        local, public = _run(), {**_run(run_id="r2"), "root_entity_project_id": 9}
+        assert len(jobs.daily_keys([local, public])) == 2
+
+
+class TestWindows:
+    def test_covers_the_range_in_day_steps(self):
+        start = datetime.datetime(2026, 11, 1, 12, tzinfo=UTC)
+        end = datetime.datetime(2026, 11, 3, 18, tzinfo=UTC)
+        result = jobs.windows(start, end)
+        assert result[0] == (start, start + jobs.WINDOW)
+        assert result[-1][1] == end and len(result) == 3
+
+    def test_empty_when_nothing_to_do(self):
+        now = datetime.datetime(2026, 11, 1, tzinfo=UTC)
+        assert jobs.windows(now, now) == []
 
 
 class TestCalibrationSummary:
-    def test_entity_percentiles_need_three_runs(self):
-        sample = [
-            {"entity_project_id": 3, "root_entity_type": "application", "root_entity_id": 1, "cu_total": v}
-            for v in (1, 2, 3)
-        ] + [{"entity_project_id": 3, "root_entity_type": "application", "root_entity_id": 2, "cu_total": 50}]
-        summary = jobs.calibration_summary(sample, {})
-        assert summary["sample_runs"] == 4 and summary["sample_entities"] == 2
-        assert summary["entity_percentiles"] == [2.0] * 99
-        assert summary["thresholds_source"] == "default"
+    def test_reads_the_one_row_sql_result(self):
+        row = {
+            "sample_runs": 250, "sample_entities": 12, "calibration": [11.0, 33.0, 120.0],
+            "run_percentiles": [1.23456] * 99, "entity_percentiles": None,
+        }
+        summary = jobs.calibration_summary(row, {})
+        assert summary["thresholds_source"] == "calibrated"
+        assert summary["run_percentiles"] == [1.235] * 99
+        assert summary["entity_percentiles"] is None
 
 
 class TestRetention:
@@ -201,3 +200,23 @@ class TestParseDays:
     ])
     def test_param(self, param, days):
         assert jobs._parse_days(param, 30) == days
+
+
+class TestPostgresOnlyStatements:
+    """The heavy work lives in SQL on purpose (single-CPU gevent pylon); pin that it stays there."""
+
+    def test_percentiles_are_computed_by_postgres(self):
+        assert jobs.CALIBRATION_SQL.count("percentile_cont") == 4
+
+    def test_the_run_aggregate_has_no_time_lookback(self):
+        # A lookback shifted min(ts) for runs straddling it and duplicated their row
+        assert ":lookback" not in jobs.RUNS_SQL and ":lookback" not in jobs.TOOLS_SQL
+
+    def test_window_candidates_are_bounded_on_both_sides(self):
+        assert "e.ts > :start AND e.ts <= :end" in jobs.WINDOW_RUNS_SQL
+
+    def test_daily_key_includes_the_owning_project(self):
+        assert "ON CONFLICT (project_id, root_entity_project_id" in jobs.DAILY_UPSERT_SQL
+
+    def test_insert_chunks_stay_far_below_the_bind_limit(self):
+        assert jobs.CHUNK_SIZE * 30 < 32767

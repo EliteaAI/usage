@@ -15,14 +15,17 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-""" Complexity jobs: hourly run scoring, nightly calibration + retention, backfill (#7553) """
+""" Complexity jobs: hourly scoring, nightly calibration + retention, backfill (#7553)
+
+Greenlets on a single-CPU pylon: aggregation stays in SQL, Python scores small chunks and yields. """
 
 import datetime
 import json
 import threading
+import time
 from collections import defaultdict
 
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -44,13 +47,18 @@ RUN_PARENT = "entity_complexity_run"
 STATE_ID = 1
 
 DEFAULT_QUIET_MINUTES = 30
-DEFAULT_BATCH_SIZE = 1000
-DEFAULT_MAX_BATCHES = 20
-BACKFILL_MAX_BATCHES = 10000
+# ~26 binds per row: 250 rows stays far below the 32k driver limit
+CHUNK_SIZE = 250
+WINDOW = datetime.timedelta(days=1)
+# Hourly pass stops after this much wall time; the next pass resumes from the watermark
+HOURLY_BUDGET_SECONDS = 300
+FIRST_PASS_LOOKBACK = datetime.timedelta(days=1)
+STATEMENT_TIMEOUT_MS = 120000
+DDL_LOCK_TIMEOUT_MS = 5000
+YIELD_SECONDS = 0.05
 DEFAULT_RUN_RETENTION_DAYS = 90
 DEFAULT_DAILY_RETENTION_MONTHS = 13
-# Older usage rows of a run are ignored; bounds the scan to recent usage_event partitions
-RUN_LOOKBACK_DAYS = 35
+MAX_BACKFILL_DAYS = 90
 CALIBRATION_WINDOW_DAYS = 30
 CALIBRATION_RUNS_PER_ENTITY = 50
 ENTITY_LABEL_MIN_RUNS = 3
@@ -58,77 +66,127 @@ DAILY_DELETE_BATCH = 5000
 
 # Embedding calls carry a run_id from RAG tools but are not reasoning steps
 _LLM_FILTER = (
-    "event_type = 'llm' AND NOT is_error "
-    "AND COALESCE(endpoint, '') !~ '/(embeddings|embed)/?$'"
+    "e.event_type = 'llm' AND NOT e.is_error "
+    "AND COALESCE(e.endpoint, '') !~ '/(embeddings|embed)/?$'"
+)
+_SCORABLE = (
+    "e.run_id IS NOT NULL AND e.root_entity_id IS NOT NULL "
+    "AND e.event_type IN ('llm', 'tool')"
 )
 
-CANDIDATES_SQL = f"""
-SELECT project_id, run_id, max(ts) AS last_event_at
-FROM {c.POSTGRES_SCHEMA}.usage_event
-WHERE ts > :since AND run_id IS NOT NULL AND root_entity_id IS NOT NULL
-  AND event_type IN ('llm', 'tool')
-GROUP BY project_id, run_id
-HAVING max(ts) <= :cutoff
-   AND (max(ts), project_id, run_id) > (:after_ts, :after_project_id, :after_run_id)
-ORDER BY max(ts), project_id, run_id
-LIMIT :limit
+# Per-project probe on ix_usage_event_project_ts: bounded by the window, never a month scan
+WINDOW_RUNS_SQL = f"""
+SELECT DISTINCT w.project_id, w.run_id
+FROM {c.POSTGRES_SCHEMA}.project p
+CROSS JOIN LATERAL (
+    SELECT e.project_id, e.run_id FROM {c.POSTGRES_SCHEMA}.usage_event e
+    WHERE e.project_id = p.id AND e.ts > :start AND e.ts <= :end AND {_SCORABLE}
+) w
 """
 
+# Whole run, no lookback: a run's first-event ts (part of its key) must never shift.
+# LATERAL forces one ix_usage_event_project_run probe per run instead of a table-wide hash join.
 RUNS_SQL = f"""
-SELECT e.project_id, e.run_id, min(e.ts) AS ts, max(e.ts) AS last_event_at,
+SELECT k.project_id, k.run_id, min(e.ts) AS ts, max(e.ts) AS last_event_at,
        max(e.conversation_id) AS conversation_id, max(e.trigger_source) AS trigger_source,
        max(e.root_entity_type) AS root_entity_type, max(e.root_entity_id) AS root_entity_id,
        max(e.root_entity_version_id) AS root_entity_version_id,
-       max(e.root_entity_project_id) AS root_entity_project_id,
+       COALESCE(max(e.root_entity_project_id), k.project_id) AS root_entity_project_id,
        COALESCE(max(e.input_tokens) FILTER (WHERE {_LLM_FILTER}), 0) AS peak_input_tokens,
        count(*) FILTER (WHERE {_LLM_FILTER}) AS llm_calls,
        count(*) FILTER (WHERE e.event_type = 'tool') AS tool_calls
-FROM {c.POSTGRES_SCHEMA}.usage_event e
-JOIN unnest(CAST(:project_ids AS bigint[]), CAST(:run_ids AS text[])) AS k(project_id, run_id)
-  ON e.project_id = k.project_id AND e.run_id = k.run_id
-WHERE e.ts > :lookback AND e.root_entity_id IS NOT NULL AND e.event_type IN ('llm', 'tool')
-GROUP BY e.project_id, e.run_id
+FROM unnest(CAST(:project_ids AS bigint[]), CAST(:run_ids AS text[])) AS k(project_id, run_id)
+CROSS JOIN LATERAL (
+    SELECT * FROM {c.POSTGRES_SCHEMA}.usage_event e
+    WHERE e.project_id = k.project_id AND e.run_id = k.run_id AND {_SCORABLE}
+) e
+GROUP BY k.project_id, k.run_id
 """
 
 TOOLS_SQL = f"""
-SELECT e.project_id, e.run_id, e.tool_name, e.meta ->> 'toolkit_type' AS toolkit_type,
+SELECT k.project_id, k.run_id, e.tool_name, e.meta ->> 'toolkit_type' AS toolkit_type,
        count(*) AS calls
-FROM {c.POSTGRES_SCHEMA}.usage_event e
-JOIN unnest(CAST(:project_ids AS bigint[]), CAST(:run_ids AS text[])) AS k(project_id, run_id)
-  ON e.project_id = k.project_id AND e.run_id = k.run_id
-WHERE e.ts > :lookback AND e.root_entity_id IS NOT NULL AND e.event_type = 'tool'
-GROUP BY e.project_id, e.run_id, e.tool_name, e.meta ->> 'toolkit_type'
+FROM unnest(CAST(:project_ids AS bigint[]), CAST(:run_ids AS text[])) AS k(project_id, run_id)
+CROSS JOIN LATERAL (
+    SELECT e.tool_name, e.meta FROM {c.POSTGRES_SCHEMA}.usage_event e
+    WHERE e.project_id = k.project_id AND e.run_id = k.run_id
+      AND {_SCORABLE} AND e.event_type = 'tool'
+) e
+GROUP BY k.project_id, k.run_id, e.tool_name, e.meta ->> 'toolkit_type'
 """
 
-DAILY_RUNS_SQL = f"""
-SELECT r.project_id, r.root_entity_type, r.root_entity_id,
-       (r.ts AT TIME ZONE 'UTC')::date AS day,
-       r.peak_input_tokens, r.llm_calls, r.tool_calls,
-       r.cu_context, r.cu_llm, r.cu_tools, r.cu_total
-FROM {c.POSTGRES_SCHEMA}.{RUN_PARENT} r
-JOIN unnest(
-    CAST(:project_ids AS bigint[]), CAST(:types AS text[]),
-    CAST(:entity_ids AS bigint[]), CAST(:days AS date[])
-) AS k(project_id, root_entity_type, root_entity_id, day)
-  ON r.project_id = k.project_id AND r.root_entity_type = k.root_entity_type
- AND r.root_entity_id = k.root_entity_id
- AND r.ts >= (k.day::timestamp AT TIME ZONE 'UTC')
- AND r.ts < ((k.day + 1)::timestamp AT TIME ZONE 'UTC')
+DAILY_UPSERT_SQL = f"""
+INSERT INTO {c.POSTGRES_SCHEMA}.entity_complexity_daily AS d (
+    project_id, root_entity_project_id, root_entity_type, root_entity_id, day,
+    runs, peak_input_tokens_sum, llm_calls, tool_calls,
+    cu_context_sum, cu_llm_sum, cu_tools_sum, cu_total_sum, cu_max, cu_histogram, updated_at
+)
+SELECT k.project_id, k.root_entity_project_id, k.root_entity_type, k.root_entity_id, k.day,
+       agg.runs, agg.peak, agg.llm, agg.tools, agg.cu_context, agg.cu_llm, agg.cu_tools,
+       agg.cu_total, agg.cu_max, agg.histogram, now()
+FROM unnest(
+    CAST(:project_ids AS bigint[]), CAST(:entity_project_ids AS bigint[]),
+    CAST(:types AS text[]), CAST(:entity_ids AS bigint[]), CAST(:days AS date[])
+) AS k(project_id, root_entity_project_id, root_entity_type, root_entity_id, day)
+CROSS JOIN LATERAL (
+    SELECT count(*) AS runs, sum(r.peak_input_tokens) AS peak,
+           sum(r.llm_calls) AS llm, sum(r.tool_calls) AS tools,
+           round(sum(r.cu_context)::numeric, 3) AS cu_context,
+           round(sum(r.cu_llm)::numeric, 3) AS cu_llm,
+           round(sum(r.cu_tools)::numeric, 3) AS cu_tools,
+           round(sum(r.cu_total)::numeric, 3) AS cu_total, max(r.cu_total) AS cu_max,
+           ARRAY(
+               SELECT count(r2.bucket) FROM generate_series(0, {cx.HISTOGRAM_BUCKETS - 1}) AS b(i)
+               LEFT JOIN unnest(array_agg(
+                   LEAST(CASE WHEN r.cu_total < 1 THEN 0
+                         ELSE floor(log(2, r.cu_total::numeric))::int + 1 END,
+                         {cx.HISTOGRAM_BUCKETS - 1})
+               )) AS r2(bucket) ON r2.bucket = b.i
+               GROUP BY b.i ORDER BY b.i
+           ) AS histogram
+    FROM {c.POSTGRES_SCHEMA}.{RUN_PARENT} r
+    WHERE r.project_id = k.project_id AND r.root_entity_project_id = k.root_entity_project_id
+      AND r.root_entity_type = k.root_entity_type AND r.root_entity_id = k.root_entity_id
+      AND r.ts >= (k.day::timestamp AT TIME ZONE 'UTC')
+      AND r.ts < ((k.day + 1)::timestamp AT TIME ZONE 'UTC')
+) agg
+WHERE agg.runs > 0
+ON CONFLICT (project_id, root_entity_project_id, root_entity_type, root_entity_id, day)
+DO UPDATE SET runs = EXCLUDED.runs, peak_input_tokens_sum = EXCLUDED.peak_input_tokens_sum,
+    llm_calls = EXCLUDED.llm_calls, tool_calls = EXCLUDED.tool_calls,
+    cu_context_sum = EXCLUDED.cu_context_sum, cu_llm_sum = EXCLUDED.cu_llm_sum,
+    cu_tools_sum = EXCLUDED.cu_tools_sum, cu_total_sum = EXCLUDED.cu_total_sum,
+    cu_max = EXCLUDED.cu_max, cu_histogram = EXCLUDED.cu_histogram, updated_at = now()
 """
 
+# Everything statistical happens here: Python only receives a few small arrays
 CALIBRATION_SQL = f"""
-SELECT entity_project_id, root_entity_type, root_entity_id, cu_total FROM (
-    SELECT COALESCE(root_entity_project_id, project_id) AS entity_project_id,
-           root_entity_type, root_entity_id, cu_total,
-           row_number() OVER (
-               PARTITION BY COALESCE(root_entity_project_id, project_id),
-                            root_entity_type, root_entity_id
-               ORDER BY ts DESC
-           ) AS rn
-    FROM {c.POSTGRES_SCHEMA}.{RUN_PARENT}
-    WHERE ts >= :since
-) sample
-WHERE rn <= :per_entity
+WITH sample AS (
+    SELECT root_entity_project_id, root_entity_type, root_entity_id, cu_total FROM (
+        SELECT root_entity_project_id, root_entity_type, root_entity_id, cu_total,
+               row_number() OVER (
+                   PARTITION BY root_entity_project_id, root_entity_type, root_entity_id
+                   ORDER BY ts DESC
+               ) AS rn
+        FROM {c.POSTGRES_SCHEMA}.{RUN_PARENT}
+        WHERE ts >= :since
+    ) ranked WHERE rn <= :per_entity
+), medians AS (
+    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY cu_total) AS cu
+    FROM sample GROUP BY root_entity_project_id, root_entity_type, root_entity_id
+    HAVING count(*) >= :entity_min_runs
+)
+SELECT
+    (SELECT count(*) FROM sample) AS sample_runs,
+    (SELECT count(*) FROM (
+        SELECT DISTINCT root_entity_project_id, root_entity_type, root_entity_id FROM sample
+    ) entities) AS sample_entities,
+    (SELECT percentile_cont(CAST(:quantiles AS float8[])) WITHIN GROUP (ORDER BY cu_total)
+     FROM sample) AS calibration,
+    (SELECT percentile_cont(CAST(:breakpoints AS float8[])) WITHIN GROUP (ORDER BY cu_total)
+     FROM sample) AS run_percentiles,
+    (SELECT percentile_cont(CAST(:breakpoints AS float8[])) WITHIN GROUP (ORDER BY cu)
+     FROM medians) AS entity_percentiles
 """
 
 RUN_PARTITIONS_SQL = f"""
@@ -147,13 +205,16 @@ WHERE ctid IN (
 )
 """
 
+BREAKPOINTS = [p / 100.0 for p in range(1, 100)]
+
 
 def _utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def _months_between(start, end):
-    return month_range((start.year, start.month), (end.year, end.month))
+def _yield():
+    # Under gevent this hands the single CPU back to request greenlets between chunks
+    time.sleep(YIELD_SECONDS)
 
 
 def _subtract_months(day, months):
@@ -161,6 +222,10 @@ def _subtract_months(day, months):
     while month <= 0:
         year, month = year - 1, month + 12
     return datetime.date(year, month, 1)
+
+
+def _round_list(values):
+    return [round(float(v), 3) for v in values] if values else None
 
 
 def ensure_run_partitions(connection, months):
@@ -171,15 +236,20 @@ def ensure_run_partitions(connection, months):
             c.POSTGRES_SCHEMA, RUN_PARENT,
         )
         return False
-    # Probe first: CREATE ... IF NOT EXISTS PARTITION OF still locks the parent
-    for year, month in months:
-        name = partition_name(year, month, RUN_PARENT)
-        if not relation_exists(connection, c.POSTGRES_SCHEMA, name, relkinds=("r",)):
-            for statement in partition_statements(
-                    c.POSTGRES_SCHEMA, (year, month), (year, month), RUN_PARENT,
-            ):
-                connection.execute(text(statement))
-    connection.commit()
+    missing = [
+        (year, month) for year, month in months
+        if not relation_exists(
+            connection, c.POSTGRES_SCHEMA, partition_name(year, month, RUN_PARENT), relkinds=("r",),
+        )
+    ]
+    # CREATE ... PARTITION OF locks the parent: give up fast rather than queue readers behind it
+    for year, month in missing:
+        connection.execute(text(f"SET LOCAL lock_timeout = {DDL_LOCK_TIMEOUT_MS}"))
+        for statement in partition_statements(
+                c.POSTGRES_SCHEMA, (year, month), (year, month), RUN_PARENT,
+        ):
+            connection.execute(text(statement))
+        connection.commit()
     return True
 
 
@@ -207,10 +277,9 @@ def build_run_rows(run_rows, tool_rows, weights, scored_at):
         )
     result = []
     for row in run_rows:
-        key = (row["project_id"], row["run_id"])
         if not row["llm_calls"] and not row["tool_calls"]:
             continue
-        counts = tools.get(key, [])
+        counts = tools.get((row["project_id"], row["run_id"]), [])
         score = cx.score_run(row["peak_input_tokens"], row["llm_calls"], counts, weights)
         tool_counts = defaultdict(int)
         for tool_name, toolkit_type, calls in counts:
@@ -235,44 +304,52 @@ def build_run_rows(run_rows, tool_rows, weights, scored_at):
 
 
 def daily_keys(run_rows):
-    """Distinct (project, entity type, entity id, UTC day) touched by a set of run rows."""
+    """Distinct (project, entity project, entity type, entity id, UTC day) of a set of runs."""
     keys = set()
     for row in run_rows:
         day = row["ts"].astimezone(datetime.timezone.utc).date()
-        keys.add((row["project_id"], row["root_entity_type"], row["root_entity_id"], day))
+        keys.add((
+            row["project_id"], row["root_entity_project_id"],
+            row["root_entity_type"], row["root_entity_id"], day,
+        ))
     return sorted(keys)
 
 
-def calibration_summary(sample_rows, config):
-    """Thresholds plus run and entity percentiles from the nightly sample."""
-    run_values = [float(row["cu_total"]) for row in sample_rows]
-    by_entity = defaultdict(list)
-    for row in sample_rows:
-        by_entity[
-            (row["entity_project_id"], row["root_entity_type"], row["root_entity_id"])
-        ].append(float(row["cu_total"]))
-    medians = [
-        cx.quantile(sorted(values), 0.5)
-        for values in by_entity.values() if len(values) >= ENTITY_LABEL_MIN_RUNS
-    ]
-    thresholds, source = cx.resolve_thresholds(run_values, len(by_entity), config)
+def windows(start, end, step=WINDOW):
+    """Half-open (lo, hi] windows of at most step covering (start, end]."""
+    result = []
+    lo = start
+    while lo < end:
+        hi = min(lo + step, end)
+        result.append((lo, hi))
+        lo = hi
+    return result
+
+
+def calibration_summary(row, config):
+    """Thresholds plus percentiles from the one-row SQL calibration result."""
+    sample_runs = int(row["sample_runs"] or 0)
+    sample_entities = int(row["sample_entities"] or 0)
+    thresholds, source = cx.resolve_thresholds(
+        row["calibration"], sample_runs, sample_entities, config,
+    )
     return {
         "thresholds": thresholds,
         "thresholds_source": source,
-        "run_percentiles": cx.percentiles(run_values),
-        "entity_percentiles": cx.percentiles(medians),
-        "sample_runs": len(run_values),
-        "sample_entities": len(by_entity),
+        "run_percentiles": _round_list(row["run_percentiles"]),
+        "entity_percentiles": _round_list(row["entity_percentiles"]),
+        "sample_runs": sample_runs,
+        "sample_entities": sample_entities,
     }
 
 
 def _parse_days(param, default):
-    """Admin task param: bare `N` or `days=N`."""
+    """Admin task param: bare `N` or `days=N`, clamped to 1..90."""
     value = str(param or "").strip()
     if value.startswith("days="):
         value = value[len("days="):]
     try:
-        return max(1, min(int(value), 90)) if value else default
+        return max(1, min(int(value), MAX_BACKFILL_DAYS)) if value else default
     except ValueError:
         return default
 
@@ -298,22 +375,40 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def usage_complexity_locked(self, job):
-        """Run job() under the cross-replica advisory lock; None when another job holds it."""
-        with db.engine.connect() as lock_connection:
-            if not lock_connection.execute(
-                    select(func.pg_try_advisory_lock(COMPLEXITY_ADVISORY_LOCK_KEY)),
-            ).scalar():
+        """job(connection) on one connection holding the advisory lock; None when it is taken."""
+        connection = db.engine.connect()
+        locked = False
+        try:
+            locked = bool(connection.execute(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": COMPLEXITY_ADVISORY_LOCK_KEY},
+            ).scalar())
+            # The session lock survives commit; committing keeps the connection off idle-in-txn
+            connection.commit()
+            if not locked:
                 log.info("usage: complexity job skipped, another one is running")
                 return None
-            try:
-                return job()
-            finally:
-                try:
-                    lock_connection.execute(
-                        select(func.pg_advisory_unlock(COMPLEXITY_ADVISORY_LOCK_KEY)),
-                    )
-                except:  # pylint: disable=W0702
-                    log.exception("usage: failed to release the complexity lock")
+            connection.execute(text(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}"))
+            connection.commit()
+            return job(connection)
+        finally:
+            self.usage_complexity_release(connection, locked)
+
+    @web.method()
+    def usage_complexity_release(self, connection, locked):
+        """Unlock and return the connection; one we cannot clean is discarded, never pooled."""
+        try:
+            connection.rollback()
+            if locked:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": COMPLEXITY_ADVISORY_LOCK_KEY},
+                )
+            connection.execute(text("RESET statement_timeout"))
+            connection.commit()
+        except:  # pylint: disable=W0702
+            log.exception("usage: complexity lock release failed; discarding the connection")
+            connection.invalidate()
+        finally:
+            connection.close()
 
     @web.method()
     def usage_complexity_state(self, connection):
@@ -322,201 +417,207 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         connection.execute(
             insert(table).values(id=STATE_ID).on_conflict_do_nothing(index_elements=["id"]),
         )
-        row = connection.execute(select(table).where(table.c.id == STATE_ID)).mappings().first()
+        row = connection.execute(table.select().where(table.c.id == STATE_ID)).mappings().first()
+        connection.commit()
         return dict(row)
 
     @web.method()
-    def usage_complexity_score_batch(self, connection, since, cutoff, limit, after=None):  # pylint: disable=R0913,R0917
-        """Score up to limit quiet runs; returns (candidates seen, rows scored, keyset cursor)."""
-        candidates = connection.execute(
-            text(CANDIDATES_SQL), {
-                "since": since, "cutoff": cutoff, "limit": limit,
-                "after_ts": after[0] if after else since,
-                "after_project_id": after[1] if after else -1,
-                "after_run_id": after[2] if after else "",
-            },
-        ).mappings().all()
-        if not candidates:
-            return 0, 0, None
-        #
-        params = {
-            "project_ids": [row["project_id"] for row in candidates],
-            "run_ids": [row["run_id"] for row in candidates],
-            "lookback": cutoff - datetime.timedelta(days=RUN_LOOKBACK_DAYS),
-        }
-        run_rows = connection.execute(text(RUNS_SQL), params).mappings().all()
-        tool_rows = connection.execute(text(TOOLS_SQL), params).mappings().all()
-        rows = build_run_rows(run_rows, tool_rows, cx.load_tool_weights(), _utcnow())
-        #
-        if rows:
-            months = sorted({(row["ts"].year, row["ts"].month) for row in rows})
-            if not ensure_run_partitions(connection, months):
-                return 0, 0, None
-            table = EntityComplexityRun.__table__
-            statement = insert(table).values(rows)
-            updatable = [k for k in rows[0] if k not in ("project_id", "run_id", "ts")]
-            connection.execute(statement.on_conflict_do_update(
-                index_elements=["project_id", "run_id", "ts"],
-                set_={k: statement.excluded[k] for k in updatable},
-            ))
-            self.usage_complexity_rebuild_daily(connection, daily_keys(rows))
+    def usage_complexity_set_state(self, connection, **values):
+        """Update the single state row and commit."""
+        table = EntityComplexityState.__table__
+        connection.execute(table.update().where(table.c.id == STATE_ID).values(**values))
         connection.commit()
-        #
-        last = candidates[-1]
-        return len(candidates), len(rows), (last["last_event_at"], last["project_id"], last["run_id"])
+
+    @web.method()
+    def usage_complexity_score_window(self, connection, start, end):
+        """Score every run with activity in (start, end]; returns runs scored."""
+        keys = connection.execute(
+            text(WINDOW_RUNS_SQL), {"start": start, "end": end},
+        ).all()
+        connection.commit()
+        scored = 0
+        weights = cx.load_tool_weights()
+        for offset in range(0, len(keys), CHUNK_SIZE):
+            chunk = keys[offset:offset + CHUNK_SIZE]
+            params = {
+                "project_ids": [key[0] for key in chunk], "run_ids": [key[1] for key in chunk],
+            }
+            run_rows = connection.execute(text(RUNS_SQL), params).mappings().all()
+            tool_rows = connection.execute(text(TOOLS_SQL), params).mappings().all()
+            # Still active past this window: the window that holds its last event scores it
+            run_rows = [row for row in run_rows if row["last_event_at"] <= end]
+            rows = build_run_rows(run_rows, tool_rows, weights, _utcnow())
+            if rows:
+                months = sorted({(row["ts"].year, row["ts"].month) for row in rows})
+                if not ensure_run_partitions(connection, months):
+                    connection.rollback()
+                    return None
+                table = EntityComplexityRun.__table__
+                statement = insert(table).values(rows)
+                updatable = [k for k in rows[0] if k not in ("project_id", "run_id", "ts")]
+                connection.execute(statement.on_conflict_do_update(
+                    index_elements=["project_id", "run_id", "ts"],
+                    set_={k: statement.excluded[k] for k in updatable},
+                ))
+                self.usage_complexity_rebuild_daily(connection, daily_keys(rows))
+            connection.commit()
+            scored += len(rows)
+            _yield()
+        return scored
 
     @web.method()
     def usage_complexity_rebuild_daily(self, connection, keys):
-        """Recompute daily rows for the given keys from run rows; idempotent."""
+        """Recompute the daily rows for the given keys from run rows, in SQL."""
         if not keys:
-            return 0
-        runs = connection.execute(text(DAILY_RUNS_SQL), {
-            "project_ids": [k[0] for k in keys], "types": [k[1] for k in keys],
-            "entity_ids": [k[2] for k in keys], "days": [k[3] for k in keys],
-        }).mappings().all()
-        grouped = defaultdict(list)
-        for row in runs:
-            grouped[(row["project_id"], row["root_entity_type"], row["root_entity_id"], row["day"])] \
-                .append(row)
-        values = []
-        for key, items in grouped.items():
-            values.append({
-                "project_id": key[0], "root_entity_type": key[1],
-                "root_entity_id": key[2], "day": key[3], **cx.daily_rollup(items),
-                "updated_at": _utcnow(),
-            })
-        if values:
-            table = EntityComplexityDaily.__table__
-            statement = insert(table).values(values)
-            pk = ["project_id", "root_entity_type", "root_entity_id", "day"]
-            connection.execute(statement.on_conflict_do_update(
-                index_elements=pk,
-                set_={k: statement.excluded[k] for k in values[0] if k not in pk},
-            ))
-        return len(values)
+            return
+        connection.execute(text(DAILY_UPSERT_SQL), {
+            "project_ids": [k[0] for k in keys], "entity_project_ids": [k[1] for k in keys],
+            "types": [k[2] for k in keys], "entity_ids": [k[3] for k in keys],
+            "days": [k[4] for k in keys],
+        })
 
     @web.method()
-    def usage_complexity_score(self, since=None, max_batches=None):
-        """Score every run that went quiet since the watermark (or since `since`)."""
+    def usage_complexity_score_range(self, connection, start, end, budget_seconds=None):
+        """Score (start, end] a window at a time; returns (scored, watermark reached)."""
+        started = time.monotonic()
+        scored, reached = 0, start
+        for lo, hi in windows(start, end):
+            # Switched off mid-pass: stop at a window boundary, the watermark stays consistent
+            if not self.usage_complexity_is_enabled():
+                break
+            count = self.usage_complexity_score_window(connection, lo, hi)
+            if count is None:
+                break
+            scored, reached = scored + count, hi
+            if budget_seconds is not None and time.monotonic() - started > budget_seconds:
+                break
+        return scored, reached
+
+    @web.method()
+    def usage_complexity_score(self):
+        """Hourly: score runs that went quiet since the watermark, within a time budget."""
         if not self.usage_complexity_is_enabled():
             return {"skipped": "disabled"}
-        config = self.usage_complexity_config()
-        quiet = int(config.get("quiet_minutes", DEFAULT_QUIET_MINUTES))
-        batch_size = int(config.get("batch_size", DEFAULT_BATCH_SIZE))
-        max_batches = int(max_batches or config.get("max_batches_per_run", DEFAULT_MAX_BATCHES))
-        cutoff = _utcnow() - datetime.timedelta(minutes=quiet)
+        quiet = int(self.usage_complexity_config().get("quiet_minutes", DEFAULT_QUIET_MINUTES))
         #
-        def job():
-            scored = 0
-            with db.engine.connect() as connection:
-                state = self.usage_complexity_state(connection)
-                connection.commit()
-                start = since or state["scored_through"] \
-                    or cutoff - datetime.timedelta(days=1)
-                watermark, cursor = start, None
-                for _ in range(max_batches):
-                    seen, count, cursor = self.usage_complexity_score_batch(
-                        connection, start, cutoff, batch_size, cursor,
-                    )
-                    scored += count
-                    if cursor is None or seen < batch_size:
-                        watermark = cutoff
-                        break
-                    # Capped mid-way: resume from the last fully scored quiet time next hour
-                    watermark = cursor[0] - datetime.timedelta(microseconds=1)
-                # A backfill never moves the watermark back
-                if state["scored_through"] is not None and watermark < state["scored_through"]:
-                    watermark = state["scored_through"]
-                table = EntityComplexityState.__table__
-                connection.execute(table.update().where(table.c.id == STATE_ID).values(
-                    scored_through=watermark, last_scored_at=_utcnow(),
-                ))
-                connection.commit()
-            log.info("usage: complexity scored %s run(s) since %s", scored, start)
-            return {"scored": scored, "scored_through": watermark.isoformat()}
+        def job(connection):
+            cutoff = _utcnow() - datetime.timedelta(minutes=quiet)
+            state = self.usage_complexity_state(connection)
+            start = state["scored_through"] or cutoff - FIRST_PASS_LOOKBACK
+            scored, reached = self.usage_complexity_score_range(
+                connection, start, cutoff, budget_seconds=HOURLY_BUDGET_SECONDS,
+            )
+            if reached > start:
+                self.usage_complexity_set_state(
+                    connection, scored_through=reached, last_scored_at=_utcnow(),
+                )
+            log.info("usage: complexity scored %s run(s) through %s", scored, reached)
+            return {"scored": scored, "scored_through": reached.isoformat()}
         #
         return self.usage_complexity_locked(job)
 
     @web.method()
     def usage_complexity_calibrate(self):
-        """Nightly: thresholds, percentiles and computed_at from the last 30 days of runs."""
+        """Thresholds, percentiles and computed_at from the last 30 days of runs."""
         if not self.usage_complexity_is_enabled():
             return {"skipped": "disabled"}
-        config = self.usage_complexity_config()
-        #
-        def job():
-            with db.engine.connect() as connection:
-                self.usage_complexity_state(connection)
-                sample = connection.execute(text(CALIBRATION_SQL), {
-                    "since": _utcnow() - datetime.timedelta(days=CALIBRATION_WINDOW_DAYS),
-                    "per_entity": CALIBRATION_RUNS_PER_ENTITY,
-                }).mappings().all()
-                summary = calibration_summary(sample, config)
-                table = EntityComplexityState.__table__
-                connection.execute(table.update().where(table.c.id == STATE_ID).values(
-                    computed_at=_utcnow(), **summary,
-                ))
-                connection.commit()
-            log.info(
-                "usage: complexity thresholds %s (%s) from %s run(s)",
-                json.dumps(summary["thresholds"]), summary["thresholds_source"],
-                summary["sample_runs"],
-            )
-            return summary
-        #
-        return self.usage_complexity_locked(job)
+        return self.usage_complexity_locked(self.usage_complexity_calibrate_locked)
 
     @web.method()
-    def usage_complexity_retention(self, today=None):
+    def usage_complexity_calibrate_locked(self, connection):
+        """Calibration body; the caller holds the lock."""
+        self.usage_complexity_state(connection)
+        row = connection.execute(text(CALIBRATION_SQL), {
+            "since": _utcnow() - datetime.timedelta(days=CALIBRATION_WINDOW_DAYS),
+            "per_entity": CALIBRATION_RUNS_PER_ENTITY,
+            "entity_min_runs": ENTITY_LABEL_MIN_RUNS,
+            "quantiles": list(cx.CALIBRATION_QUANTILES),
+            "breakpoints": BREAKPOINTS,
+        }).mappings().first()
+        connection.commit()
+        summary = calibration_summary(row, self.usage_complexity_config())
+        self.usage_complexity_set_state(connection, computed_at=_utcnow(), **summary)
+        log.info(
+            "usage: complexity thresholds %s (%s) from %s run(s)",
+            json.dumps(summary["thresholds"]), summary["thresholds_source"], summary["sample_runs"],
+        )
+        return summary
+
+    @web.method()
+    def usage_complexity_retention(self, connection, today=None):
         """Drop run partitions past retention and batch-delete old daily rows."""
         config = self.usage_complexity_config()
         today = today or _utcnow().date()
         run_days = int(config.get("run_retention_days", DEFAULT_RUN_RETENTION_DAYS))
         daily_months = int(config.get("daily_retention_months", DEFAULT_DAILY_RETENTION_MONTHS))
         dropped, deleted = [], 0
-        with db.engine.connect() as connection:
-            names = [row[0] for row in connection.execute(text(RUN_PARTITIONS_SQL))]
-            for name in expired_run_partitions(names, today, run_days):
+        names = [row[0] for row in connection.execute(text(RUN_PARTITIONS_SQL))]
+        connection.commit()
+        for name in expired_run_partitions(names, today, run_days):
+            # DROP takes ACCESS EXCLUSIVE on the parent: time out instead of blocking readers
+            try:
+                connection.execute(text(f"SET LOCAL lock_timeout = {DDL_LOCK_TIMEOUT_MS}"))
                 connection.execute(text(f"DROP TABLE IF EXISTS {c.POSTGRES_SCHEMA}.{name}"))
                 connection.commit()
                 dropped.append(name)
-            before = _subtract_months(today, daily_months)
-            while True:
-                result = connection.execute(
-                    text(DAILY_RETENTION_SQL), {"before": before, "limit": DAILY_DELETE_BATCH},
-                )
-                connection.commit()
-                deleted += result.rowcount or 0
-                if (result.rowcount or 0) < DAILY_DELETE_BATCH:
-                    break
+            except:  # pylint: disable=W0702
+                connection.rollback()
+                log.warning("usage: could not drop %s now, retrying next night", name)
+        before = _subtract_months(today, daily_months)
+        while True:
+            result = connection.execute(
+                text(DAILY_RETENTION_SQL), {"before": before, "limit": DAILY_DELETE_BATCH},
+            )
+            connection.commit()
+            deleted += result.rowcount or 0
+            if (result.rowcount or 0) < DAILY_DELETE_BATCH:
+                break
+            _yield()
         if dropped or deleted:
-            log.info("usage: complexity retention dropped %s, deleted %s daily row(s)", dropped, deleted)
+            log.info(
+                "usage: complexity retention dropped %s, deleted %s daily row(s)", dropped, deleted,
+            )
         return {"dropped_partitions": dropped, "deleted_daily_rows": deleted}
 
     @web.method()
     def usage_complexity_nightly(self):
-        """One nightly pass: catch-up scoring, calibration, retention."""
+        """Nightly: calibration and retention. Scoring stays with the hourly job."""
         if not self.usage_complexity_is_enabled():
             return {"skipped": "disabled"}
-        result = {"score": self.usage_complexity_score()}
-        result["calibrate"] = self.usage_complexity_calibrate()
-        result["retention"] = self.usage_complexity_locked(self.usage_complexity_retention)
-        return result
+        #
+        def job(connection):
+            return {
+                "calibrate": self.usage_complexity_calibrate_locked(connection),
+                "retention": self.usage_complexity_retention(connection),
+            }
+        #
+        return self.usage_complexity_locked(job)
 
     @web.method()
     def usage_complexity_backfill(self, days=30):
-        """Score the last `days` days of runs, then recalibrate."""
+        """Re-score runs active in the last `days` days, a day at a time, then recalibrate."""
         if not self.usage_complexity_is_enabled():
             return {"skipped": "disabled"}
-        since = _utcnow() - datetime.timedelta(days=days)
-        with db.engine.connect() as connection:
-            if not ensure_run_partitions(connection, _months_between(since, _utcnow())):
-                return {"skipped": "missing table"}
-        return {
-            # An admin-run backfill should finish, not stop at the hourly batch cap
-            "score": self.usage_complexity_score(since=since, max_batches=BACKFILL_MAX_BATCHES),
-            "calibrate": self.usage_complexity_calibrate(),
-        }
+        days = max(1, min(int(days), MAX_BACKFILL_DAYS))
+        quiet = int(self.usage_complexity_config().get("quiet_minutes", DEFAULT_QUIET_MINUTES))
+        #
+        def job(connection):
+            cutoff = _utcnow() - datetime.timedelta(minutes=quiet)
+            state = self.usage_complexity_state(connection)
+            scored, reached = self.usage_complexity_score_range(
+                connection, cutoff - datetime.timedelta(days=days), cutoff,
+            )
+            # Only ever forward: a backfill must not make the hourly job redo or skip anything
+            if state["scored_through"] is None or reached > state["scored_through"]:
+                self.usage_complexity_set_state(
+                    connection, scored_through=reached, last_scored_at=_utcnow(),
+                )
+            return {
+                "scored": scored, "scored_through": reached.isoformat(),
+                "calibrate": self.usage_complexity_calibrate_locked(connection),
+            }
+        #
+        return self.usage_complexity_locked(job)
 
     @web.method()
     def usage_complexity_spawn(self, name, target):

@@ -44,7 +44,8 @@ class EntityComplexityRun(db.Base):  # pylint: disable=R0903
     root_entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
     root_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     root_entity_version_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    root_entity_project_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Project owning the agent (differs from project_id for a public agent); never NULL here
+    root_entity_project_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     # Raw inputs, kept so a new formula or weights version can rescore without usage_event
     peak_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
@@ -68,7 +69,7 @@ class EntityComplexityRun(db.Base):  # pylint: disable=R0903
         Index("uq_entity_complexity_run", "project_id", "run_id", "ts", unique=True),
         Index(
             "ix_entity_complexity_run_entity_ts",
-            "project_id", "root_entity_type", "root_entity_id", "ts",
+            "project_id", "root_entity_project_id", "root_entity_type", "root_entity_id", "ts",
         ),
         Index("ix_entity_complexity_run_project_ts", "project_id", "ts"),
         {"schema": c.POSTGRES_SCHEMA, "postgresql_partition_by": "RANGE (ts)"},
@@ -81,6 +82,8 @@ class EntityComplexityDaily(db.Base):  # pylint: disable=R0903
     __tablename__ = "entity_complexity_daily"
 
     project_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # Part of the key: an agent id is only unique within the project that owns it
+    root_entity_project_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     root_entity_type: Mapped[str] = mapped_column(String(32), primary_key=True)
     root_entity_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     day: Mapped[date] = mapped_column(Date, primary_key=True)

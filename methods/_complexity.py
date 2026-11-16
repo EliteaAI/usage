@@ -18,7 +18,6 @@
 """ Complexity Units: pure scoring, labelling and calibration helpers (#7552/#7553) """
 
 import json
-import math
 import pathlib
 
 FORMULA_VERSION = 1
@@ -29,7 +28,7 @@ THRESHOLD_KEYS = ("medium", "high", "extreme")
 # The #7552 defaults sit near p75/p90/p99 of real runs; calibration keeps that meaning
 CALIBRATION_QUANTILES = (0.75, 0.90, 0.99)
 
-# Bucket 0 is CU < 1, bucket k is [2^(k-1), 2^k); the last bucket is open-ended
+# Daily histogram: bucket 0 is CU < 1, bucket k is [2^(k-1), 2^k), the last one open-ended
 HISTOGRAM_BUCKETS = 13
 
 WEIGHTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "tool_weights_v1.json"
@@ -86,13 +85,6 @@ def score_run(peak_input_tokens, llm_calls, tool_counts, weights):
     }
 
 
-def histogram_bucket(cu):
-    """Index into the log2 histogram for one run's CU."""
-    if cu is None or cu < 1:
-        return 0
-    return min(int(math.floor(math.log2(cu))) + 1, HISTOGRAM_BUCKETS - 1)
-
-
 def label_for(cu, thresholds):
     """L/M/H/X for a CU value under the given thresholds."""
     if cu >= thresholds["extreme"]:
@@ -102,47 +94,6 @@ def label_for(cu, thresholds):
     if cu >= thresholds["medium"]:
         return "M"
     return "L"
-
-
-def daily_rollup(runs):
-    """Aggregate run dicts (cu_* and raw inputs) into one daily row's values."""
-    histogram = [0] * HISTOGRAM_BUCKETS
-    row = {
-        "runs": 0, "peak_input_tokens_sum": 0, "llm_calls": 0, "tool_calls": 0,
-        "cu_context_sum": 0.0, "cu_llm_sum": 0.0, "cu_tools_sum": 0.0, "cu_total_sum": 0.0,
-        "cu_max": 0.0,
-    }
-    for run in runs:
-        row["runs"] += 1
-        row["peak_input_tokens_sum"] += int(run["peak_input_tokens"] or 0)
-        row["llm_calls"] += int(run["llm_calls"] or 0)
-        row["tool_calls"] += int(run["tool_calls"] or 0)
-        for key in ("cu_context", "cu_llm", "cu_tools", "cu_total"):
-            row[f"{key}_sum"] += float(run[key] or 0)
-        row["cu_max"] = max(row["cu_max"], float(run["cu_total"] or 0))
-        histogram[histogram_bucket(float(run["cu_total"] or 0))] += 1
-    for key in ("cu_context_sum", "cu_llm_sum", "cu_tools_sum", "cu_total_sum"):
-        row[key] = round(row[key], 3)
-    row["cu_histogram"] = histogram
-    return row
-
-
-def quantile(sorted_values, q):
-    """Linear-interpolated quantile, same as Postgres percentile_cont."""
-    if not sorted_values:
-        return None
-    position = (len(sorted_values) - 1) * q
-    low = int(math.floor(position))
-    high = min(low + 1, len(sorted_values) - 1)
-    return sorted_values[low] + (sorted_values[high] - sorted_values[low]) * (position - low)
-
-
-def percentiles(values):
-    """p1..p99 breakpoints, or None for an empty sample."""
-    ordered = sorted(float(v) for v in values)
-    if not ordered:
-        return None
-    return [round(quantile(ordered, p / 100.0), 3) for p in range(1, 100)]
 
 
 def _valid(thresholds):
@@ -163,20 +114,14 @@ def normalize_thresholds(value, fallback=None):
     return thresholds if _valid(thresholds) else fallback
 
 
-def resolve_thresholds(sample, entity_count, config):
-    """(thresholds, source): calibrated once the sample is big enough, pins applied last."""
-    defaults = normalize_thresholds(config.get("default_thresholds"))
+def resolve_thresholds(calibrated, sample_runs, sample_entities, config):
+    """(thresholds, source): calibrated quantiles once the sample is big enough, pins last."""
+    thresholds, source = normalize_thresholds(config.get("default_thresholds")), "default"
     calibration = config.get("calibration") or {}
-    min_runs = int(calibration.get("min_runs", 200))
-    min_entities = int(calibration.get("min_entities", 10))
-    #
-    thresholds, source = defaults, "default"
-    if len(sample) >= min_runs and entity_count >= min_entities:
-        ordered = sorted(float(v) for v in sample)
-        candidate = {
-            key: round(quantile(ordered, float(q)), 1)
-            for key, q in zip(THRESHOLD_KEYS, CALIBRATION_QUANTILES)
-        }
+    enough = sample_runs >= int(calibration.get("min_runs", 200)) \
+        and sample_entities >= int(calibration.get("min_entities", 10))
+    if enough and calibrated:
+        candidate = {key: round(float(v), 1) for key, v in zip(THRESHOLD_KEYS, calibrated)}
         if _valid(candidate):
             thresholds, source = candidate, "calibrated"
     #
