@@ -44,8 +44,8 @@ class Module(module.ModuleModel):
         log.info("Initializing usage plugin")
         self.descriptor.init_all()
         #
-        # Registers both tables in the shared metadata; provisioning is shared's job
-        from .models import usage_counter, usage_event  # pylint: disable=C0415,W0611
+        # Registers the tables in the shared metadata; provisioning is shared's job
+        from .models import entity_complexity, usage_counter, usage_event  # pylint: disable=C0415,W0611
         #
         registry.register_defaults()
         #
@@ -143,6 +143,12 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "usage_ensure_trigger_source_column_task", trigger_source_task, group="R-2.0.8",
             )
+            complexity_task = self._wrap_admin_task(
+                Method, "usage_complexity_backfill_task", self,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "usage_complexity_backfill_task", complexity_task, group="R-2.0.9",
+            )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to register admin tasks: %s", exc)
 
@@ -166,6 +172,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.unregister_admin_task(
                 "usage_ensure_trigger_source_column_task",
                 self.usage_ensure_trigger_source_column_task,
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "usage_complexity_backfill_task", self.usage_complexity_backfill_task,
             )
         except Exception as exc:  # pylint: disable=W0703
             log.exception("usage: failed to unregister admin tasks: %s", exc)
@@ -192,6 +201,21 @@ class Module(module.ModuleModel):
                 "rpc_kwargs": {"apply": True},
                 "name": "usage_reconcile_counters",
                 "cron": "17 * * * *",
+                "active": True,
+            })
+            # Registered regardless of the switch; both return at once while it is off
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                "rpc_func": "usage_complexity_score_runs",
+                "rpc_kwargs": {},
+                "name": "usage_complexity_score_runs",
+                "cron": "23 * * * *",
+                "active": True,
+            })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                "rpc_func": "usage_complexity_nightly",
+                "rpc_kwargs": {},
+                "name": "usage_complexity_nightly",
+                "cron": "41 2 * * *",
                 "active": True,
             })
         except Empty:

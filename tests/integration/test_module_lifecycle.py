@@ -180,7 +180,7 @@ class TestReady:
         #
         instance.ready()
         #
-        assert [name for name, _ in calls if name == "cron"] == ["cron", "cron"]
+        assert [name for name, _ in calls if name == "cron"] == ["cron"] * 4
 
     def test_cron_targets_the_registered_rpc_name(self):
         instance, calls = build()
@@ -191,6 +191,7 @@ class TestReady:
         #
         assert [payload["rpc_func"] for payload in payloads] == [
             "usage_ensure_partitions", "usage_reconcile_counters",
+            "usage_complexity_score_runs", "usage_complexity_nightly",
         ]
         assert all(payload["active"] is True for payload in payloads)
 
@@ -299,11 +300,12 @@ class TestManagedSchedulesAndAdminTask:
         ))
         return calls
 
-    def test_get_managed_schedules_returns_the_two_entries(self):
+    def test_get_managed_schedules_returns_every_entry(self):
         instance, _ = build()
         #
         assert set(instance.get_managed_schedules()) == {
             "usage_ensure_partitions", "usage_reconcile_counters",
+            "usage_complexity_score_runs", "usage_complexity_nightly",
         }
 
     def test_ready_registers_the_admin_task(self, monkeypatch):

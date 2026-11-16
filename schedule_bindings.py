@@ -26,4 +26,12 @@ MANAGED_SCHEDULES = {
         "managed_by": {"section": "Usage", "fields": ["usage_reconcile_repair_batch_size"]},
         "rpc_func": "usage_reconcile_counters",
     },
+    "usage_complexity_score_runs": {
+        "managed_by": {"section": "cost_budgets", "fields": ["usage_complexity_enabled"]},
+        "rpc_func": "usage_complexity_score_runs",
+    },
+    "usage_complexity_nightly": {
+        "managed_by": {"section": "cost_budgets", "fields": ["usage_complexity_enabled"]},
+        "rpc_func": "usage_complexity_nightly",
+    },
 }

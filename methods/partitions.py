@@ -32,9 +32,9 @@ def next_month(year, month):
     return (year + 1, 1) if month == 12 else (year, month + 1)
 
 
-def partition_name(year, month):
+def partition_name(year, month, parent="usage_event"):
     """Child table name for one month."""
-    return f"usage_event_{year:04d}{month:02d}"
+    return f"{parent}_{year:04d}{month:02d}"
 
 
 def month_bounds(year, month):
@@ -70,12 +70,12 @@ def relation_exists(connection, schema, relname, relkinds=("r", "p")):
     ).first() is not None
 
 
-def parent_exists(connection, schema):
+def parent_exists(connection, schema, parent="usage_event"):
     """True when the partitioned parent is present."""
-    return relation_exists(connection, schema, "usage_event", relkinds=("p",))
+    return relation_exists(connection, schema, parent, relkinds=("p",))
 
 
-def partition_statements(schema, from_month, to_month):
+def partition_statements(schema, from_month, to_month, parent="usage_event"):
     """DDL for each month in the range, idempotent and in chronological order."""
     statements = []
     #
@@ -83,8 +83,8 @@ def partition_statements(schema, from_month, to_month):
         start, end = month_bounds(year, month)
         #
         statements.append(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{partition_name(year, month)} "
-            f"PARTITION OF {schema}.usage_event "
+            f"CREATE TABLE IF NOT EXISTS {schema}.{partition_name(year, month, parent)} "
+            f"PARTITION OF {schema}.{parent} "
             f"FOR VALUES FROM ('{start.isoformat()}') TO ('{end.isoformat()}');"
         )
     #

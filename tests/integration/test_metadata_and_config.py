@@ -14,6 +14,14 @@ EXPECTED_PROPERTIES = {
     "usage_warnings_dismissible",
     "usage_reconcile_repair_batch_size",
     "usage_features_web_search_warning_pct",
+    "usage_complexity_enabled",
+    "usage_complexity_default_medium", "usage_complexity_default_high",
+    "usage_complexity_default_extreme",
+    "usage_complexity_pinned_medium", "usage_complexity_pinned_high",
+    "usage_complexity_pinned_extreme",
+    "usage_complexity_calibration_min_runs", "usage_complexity_calibration_min_entities",
+    "usage_complexity_quiet_minutes", "usage_complexity_run_retention_days",
+    "usage_complexity_daily_retention_months",
 }
 
 
@@ -121,6 +129,13 @@ class TestAdminSchema:
     COST_BUDGETS_PROPERTIES = {
         "usage_mode", "usage_project_warning_pct", "usage_personal_project_warning_pct",
         "usage_user_warning_pct", "usage_warnings_dismissible",
+        # #7553: the Complexity switch and its labelling controls sit with the budget mode it needs
+        "usage_complexity_enabled",
+        "usage_complexity_default_medium", "usage_complexity_default_high",
+        "usage_complexity_default_extreme",
+        "usage_complexity_pinned_medium", "usage_complexity_pinned_high",
+        "usage_complexity_pinned_extreme",
+        "usage_complexity_calibration_min_runs", "usage_complexity_calibration_min_entities",
     }
 
     # Per-feature Tool Spend settings sit with the elitea_core feature switches in one admin section

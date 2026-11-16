@@ -266,6 +266,210 @@
         "minimum": 1,
         "maximum": 100
       }
+    },
+    "usage_complexity_enabled": {
+      "type": "boolean",
+      "title": "Agent & Pipeline Complexity",
+      "description": "Score each finished agent and pipeline run in Complexity Units in the background. Works only while Cost Budgets Mode is observe or enforce.",
+      "path": "usage.complexity.enabled",
+      "section": "cost_budgets",
+      "default": false,
+      "requires_restart": false
+    },
+    "usage_complexity_default_medium": {
+      "type": "number",
+      "title": "Complexity: default Medium threshold (CU)",
+      "description": "Runs at or above this many Complexity Units are labelled Medium until enough runs exist to calibrate.",
+      "path": "usage.complexity.default_thresholds.medium",
+      "section": "cost_budgets",
+      "default": 10,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "number",
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_default_high": {
+      "type": "number",
+      "title": "Complexity: default High threshold (CU)",
+      "description": "Runs at or above this many Complexity Units are labelled High until enough runs exist to calibrate.",
+      "path": "usage.complexity.default_thresholds.high",
+      "section": "cost_budgets",
+      "default": 30,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "number",
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_default_extreme": {
+      "type": "number",
+      "title": "Complexity: default Extreme threshold (CU)",
+      "description": "Runs at or above this many Complexity Units are labelled Extreme until enough runs exist to calibrate.",
+      "path": "usage.complexity.default_thresholds.extreme",
+      "section": "cost_budgets",
+      "default": 100,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "number",
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_pinned_medium": {
+      "type": "number",
+      "title": "Complexity: pinned Medium threshold (CU)",
+      "description": "Fixed Medium cut-off that overrides both the default and the calibrated value. Empty lets calibration decide.",
+      "path": "usage.complexity.pinned_thresholds.medium",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_pinned_high": {
+      "type": "number",
+      "title": "Complexity: pinned High threshold (CU)",
+      "description": "Fixed High cut-off that overrides both the default and the calibrated value. Empty lets calibration decide.",
+      "path": "usage.complexity.pinned_thresholds.high",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_pinned_extreme": {
+      "type": "number",
+      "title": "Complexity: pinned Extreme threshold (CU)",
+      "description": "Fixed Extreme cut-off that overrides both the default and the calibrated value. Empty lets calibration decide.",
+      "path": "usage.complexity.pinned_thresholds.extreme",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0.1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_calibration_min_runs": {
+      "type": "integer",
+      "title": "Complexity: calibration minimum runs",
+      "description": "Scored runs in the last 30 days needed before thresholds are calibrated on this installation's own runs.",
+      "path": "usage.complexity.calibration.min_runs",
+      "section": "cost_budgets",
+      "default": 200,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_calibration_min_entities": {
+      "type": "integer",
+      "title": "Complexity: calibration minimum agents/pipelines",
+      "description": "Distinct agents and pipelines in the last 30 days needed before thresholds are calibrated.",
+      "path": "usage.complexity.calibration.min_entities",
+      "section": "cost_budgets",
+      "default": 10,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100000
+      },
+      "visible_when": {
+        "field": "usage_complexity_enabled",
+        "value": true
+      }
+    },
+    "usage_complexity_quiet_minutes": {
+      "type": "integer",
+      "title": "Complexity: run finished after (minutes)",
+      "description": "A run is scored once it has had no new usage for this long.",
+      "path": "usage.complexity.quiet_minutes",
+      "section": "Usage",
+      "default": 30,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 1440
+      }
+    },
+    "usage_complexity_run_retention_days": {
+      "type": "integer",
+      "title": "Complexity: per-run score retention (days)",
+      "description": "Per-run scores are dropped a whole month at a time once older than this.",
+      "path": "usage.complexity.run_retention_days",
+      "section": "Usage",
+      "default": 90,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 31,
+        "maximum": 730
+      }
+    },
+    "usage_complexity_daily_retention_months": {
+      "type": "integer",
+      "title": "Complexity: daily rollup retention (months)",
+      "description": "Daily per-agent rollup rows older than this are deleted.",
+      "path": "usage.complexity.daily_retention_months",
+      "section": "Usage",
+      "default": 13,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 120
+      }
     }
   }
 }

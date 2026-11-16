@@ -59,6 +59,28 @@ usage:
     # Counter rows repaired per transaction when the hourly reconciler applies a fix.
     repair_batch_size: 500
   #
+  # Agent/pipeline complexity scoring (#7553). Runs only when enabled AND mode is observe/enforce.
+  complexity:
+    enabled: false
+    # Run label cut-offs in Complexity Units; used until enough runs exist to calibrate.
+    default_thresholds:
+      medium: 10
+      high: 30
+      extreme: 100
+    # Admin overrides; a non-null value wins over the default and the calibrated one.
+    pinned_thresholds:
+      medium: null
+      high: null
+      extreme: null
+    # Nightly calibration needs this many scored runs from this many agents/pipelines in 30 days.
+    calibration:
+      min_runs: 200
+      min_entities: 10
+    # A run is scored once it has had no new usage for this long.
+    quiet_minutes: 30
+    run_retention_days: 90
+    daily_retention_months: 13
+  #
   # Tool Spend features (#6980): per-feature warning thresholds; null falls back to warning_thresholds.
   features:
     web_search:
