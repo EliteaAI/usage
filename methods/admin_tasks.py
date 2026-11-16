@@ -20,6 +20,8 @@
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
+from .complexity import _parse_days
+
 
 class Method:  # pylint: disable=E1101,R0903,W0201
     """ Method resource (self is the Module instance) """
@@ -64,3 +66,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         self.usage_ensure_trigger_source_column()
         log.info("usage: admin task ensured usage_event.trigger_source")
+
+    @web.method()
+    def usage_complexity_backfill_task(self, *args, **kwargs):  # pylint: disable=W0613
+        """Score agent/pipeline complexity for the last 30 days (param: days=N, max 90), then
+        recalibrate thresholds (#7553). Safe to rerun. Does nothing unless Complexity is enabled
+        and Cost Budgets Mode is observe or enforce.
+        """
+        days = _parse_days(kwargs.get("param"), 30)
+        result = self.usage_complexity_backfill(days=days)
+        log.info("usage: complexity backfill (%s days): %s", days, result)
+        #
+        return result

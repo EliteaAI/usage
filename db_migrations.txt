@@ -13,3 +13,8 @@ Run admin task usage_ensure_budget_exempt_column_task
 
 # R-2.0.8
 Run admin task usage_ensure_trigger_source_column_task
+
+# R-2.0.9
+# New tables entity_complexity_run/_daily/_state come from create_all (startup auto-create or the
+# admin create_tables task). After enabling Complexity, optionally run the 30-day backfill:
+Run admin task usage_complexity_backfill_task
