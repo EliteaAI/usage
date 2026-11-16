@@ -125,6 +125,9 @@ class TestSql:
         assert "entity_complexity_daily" in sql and "entity_complexity_run" not in sql
         assert "root_entity_project_id = :entity_project_id" in str(ca.entity_statement("runs DESC", key=True))
 
+    def test_the_median_join_keeps_entities_with_an_inconsistent_histogram(self):
+        assert "LEFT JOIN LATERAL" in str(ca.entity_statement("runs DESC")) and ") m ON true" in str(ca.entity_statement("runs DESC"))
+
     def test_day_bounds_treat_date_to_as_exclusive(self):
         start = datetime.datetime(2026, 11, 9, tzinfo=UTC)
         assert ca.day_bounds(start, datetime.datetime(2026, 11, 16, tzinfo=UTC)) == (

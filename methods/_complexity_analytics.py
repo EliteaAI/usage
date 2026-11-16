@@ -38,7 +38,7 @@ RUN_SORTS = {"ts": "ts", "cu_total": "cu_total"}
 _HIST_SUMS = ", ".join(f"sum(cu_histogram[{i + 1}])" for i in range(cx.HISTOGRAM_BUCKETS))
 
 # Interpolated median inside the bucket holding the middle run; mirrors cx.histogram_median.
-# With one or two runs the average is the exact median.
+# With one or two runs the average is the exact median; an inconsistent histogram keeps the row with a NULL median.
 _ENTITY_SQL = f"""
 WITH a AS (
     SELECT root_entity_project_id, root_entity_type, root_entity_id,
@@ -57,7 +57,7 @@ WITH a AS (
 SELECT a.*, CASE WHEN a.runs <= 2 THEN a.cu_avg ELSE m.cu_median END AS cu_median,
        count(*) OVER () AS total
 FROM a
-CROSS JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT lo + (greatest(lo, least(hi, a.cu_max)) - lo) * (a.runs / 2.0 - (cum - n)) / n AS cu_median
     FROM (
         SELECT n, cum,
@@ -70,7 +70,7 @@ CROSS JOIN LATERAL (
         WHERE n > 0 AND cum >= a.runs / 2.0
         ORDER BY k LIMIT 1
     ) b
-) m
+) m ON true
 ORDER BY {{order}}, a.root_entity_project_id, a.root_entity_type, a.root_entity_id
 LIMIT :limit OFFSET :offset
 """
