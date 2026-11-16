@@ -17,6 +17,8 @@
 
 """ Complexity Units: pure scoring, labelling and calibration helpers (#7552/#7553) """
 
+import bisect
+import datetime
 import json
 import pathlib
 
@@ -30,6 +32,9 @@ CALIBRATION_QUANTILES = (0.75, 0.90, 0.99)
 
 # Daily histogram: bucket 0 is CU < 1, bucket k is [2^(k-1), 2^k), the last one open-ended
 HISTOGRAM_BUCKETS = 13
+# Analytics shows thresholds older than this as stale (the nightly job missed a run)
+STALE_AFTER = datetime.timedelta(hours=26)
+ENTITY_LABEL_MIN_RUNS = 3
 
 WEIGHTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "tool_weights_v1.json"
 
@@ -134,3 +139,39 @@ def resolve_thresholds(calibrated, sample_runs, sample_entities, config):
     if pinned and _valid(candidate):
         return candidate, "pinned"
     return thresholds, source
+
+
+def bucket_bounds(index, cu_max):
+    """[lo, hi] of a histogram bucket, hi capped by the largest CU actually seen."""
+    lo = 0.0 if index == 0 else float(2 ** (index - 1))
+    hi = float(cu_max) if index == HISTOGRAM_BUCKETS - 1 else float(2 ** index)
+    return lo, max(lo, min(hi, float(cu_max)))
+
+
+def histogram_median(histogram, cu_max, cu_avg=None):
+    """Median CU interpolated inside its bucket; mirrors the SQL in _complexity_analytics."""
+    counts = [int(n or 0) for n in histogram or ()]
+    target = sum(counts) / 2.0
+    if target <= 0:
+        return None
+    if target <= 1 and cu_avg is not None:
+        return float(cu_avg)
+    seen = 0
+    for index, count in enumerate(counts):
+        if count and seen + count >= target:
+            lo, hi = bucket_bounds(index, cu_max)
+            return lo + (hi - lo) * (target - seen) / count
+        seen += count
+    return None
+
+
+def percentile_of(value, breakpoints):
+    """Share of p1..p99 breakpoints at or below value, i.e. "more complex than X%"."""
+    if value is None or not breakpoints:
+        return None
+    return round(100.0 * bisect.bisect_right(sorted(breakpoints), value) / (len(breakpoints) + 1))
+
+
+def is_stale(computed_at, now):
+    """No thresholds yet, or the nightly calibration is overdue."""
+    return computed_at is None or now - computed_at > STALE_AFTER

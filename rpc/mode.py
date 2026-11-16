@@ -34,6 +34,7 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
         return {
             "mode": self.usage_get_mode(),
             "warnings_dismissible": self.usage_get_warnings_dismissible(),
+            "complexity_enabled": self.usage_complexity_is_enabled(),
         }
 
     @web.rpc("usage_ensure_partitions", "usage_ensure_partitions_now")
