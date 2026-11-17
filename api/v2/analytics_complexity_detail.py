@@ -70,7 +70,7 @@ if _API_AVAILABLE:
                     "schema": {"type": "string"},
                     "description": (
                         "Comma-separated conversation UUIDs (at most 100). Lists one row per conversation: "
-                        "its most complex scored run."
+                        "its most complex scored run. Summary, daily and versions are left empty."
                     ),
                 },
                 {
@@ -155,24 +155,26 @@ if _API_AVAILABLE:
                     "project_id": project_id, "entity_project_id": entity_project_id,
                     "entity_type": entity_type, "entity_id": entity_id,
                 }
-                summary = an.fetch_all(ca.entity_statement(ca.ENTITY_SORTS["runs"] + " DESC", key=True).bindparams(
-                    day_from=day_from, day_to=day_to, limit=1, offset=0, **key,
-                ))
-                if summary:
-                    exact = an.fetch_one(ca.exact_summary_statement().bindparams(dt_from=dt_from, dt_to=dt_to, **key))
-                    row = ca.exact_summary(summary[0], exact)
-                    body["summary"] = with_names(project_id, [ca.entity_row(row, state)])[0]
-                body["daily"] = [
-                    {"day": r["day"].isoformat(), "runs": int(r["runs"]),
-                     "cu_avg": round(float(r["cu_avg"]), 2), "cu_max": round(float(r["cu_max"]), 2)}
-                    for r in an.fetch_all(ca.daily_trend_statement().bindparams(
-                        day_from=day_from, day_to=day_to, **key,
+                # Run History asks only for labels by conversation: skip the summary, trend and versions
+                if conversation_ids is None:
+                    summary = an.fetch_all(ca.entity_statement(ca.ENTITY_SORTS["runs"] + " DESC", key=True).bindparams(
+                        day_from=day_from, day_to=day_to, limit=1, offset=0, **key,
                     ))
-                ]
-                body["versions"] = [
-                    ca.version_row(r, state)
-                    for r in an.fetch_all(ca.versions_statement().bindparams(dt_from=dt_from, dt_to=dt_to, **key))
-                ]
+                    if summary:
+                        exact = an.fetch_one(ca.exact_summary_statement().bindparams(dt_from=dt_from, dt_to=dt_to, **key))
+                        row = ca.exact_summary(summary[0], exact)
+                        body["summary"] = with_names(project_id, [ca.entity_row(row, state)])[0]
+                    body["daily"] = [
+                        {"day": r["day"].isoformat(), "runs": int(r["runs"]),
+                         "cu_avg": round(float(r["cu_avg"]), 2), "cu_max": round(float(r["cu_max"]), 2)}
+                        for r in an.fetch_all(ca.daily_trend_statement().bindparams(
+                            day_from=day_from, day_to=day_to, **key,
+                        ))
+                    ]
+                    body["versions"] = [
+                        ca.version_row(r, state)
+                        for r in an.fetch_all(ca.versions_statement().bindparams(dt_from=dt_from, dt_to=dt_to, **key))
+                    ]
                 statement, run_params = ca.runs_statement(order, version_id, conversation_ids)
                 runs = an.fetch_all(statement.bindparams(
                     dt_from=dt_from, dt_to=dt_to, limit=limit, offset=offset, **key, **run_params,

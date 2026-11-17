@@ -133,6 +133,12 @@ class TestShapes:
         assert ca.exact_summary(rollup, {"runs": 5, "cu_median": 9.0}) is rollup
         assert ca.exact_summary(rollup, None) is rollup
 
+    def test_summary_stays_exact_when_the_run_table_holds_more(self):
+        # #1570 review: a mid-day timestamp bound can count more exact runs than whole rollup days
+        exact = {"runs": 9, "cu_median": 9.07, "cu_avg": 9.9, "cu_max": 17.6,
+                 "cu_context": 1.0, "cu_llm": 2.0, "cu_tools": 3.0}
+        assert ca.exact_summary(entity(8, 8.0), exact)["cu_median"] == 9.07
+
     def test_meta_reports_freshness_and_defaults_before_calibration(self):
         assert ca.meta(STATE, True, NOW)["stale"] is False
         empty = ca.meta(None, False, NOW)
@@ -200,6 +206,19 @@ class TestEndpointGate:
         module = load_api_module(monkeypatch, "analytics_complexity_detail")
         module.request.args = args
         assert module.PromptLibAPI().get(3)[1] == 400
+
+    def test_conversation_lookup_runs_only_the_runs_query(self, monkeypatch):
+        # #1570 review: Run History reads only runs, so summary, daily and versions are skipped
+        module = load_api_module(monkeypatch, "analytics_complexity_detail")
+        module.request.args = {"entity_id": "7", "conversation_ids": "a,b"}
+        queries = []
+        monkeypatch.setattr(module.an, "fetch_one", lambda statement: STATE)
+        monkeypatch.setattr(module.an, "fetch_all", lambda statement: queries.append(str(statement)) or [])
+        handler = module.PromptLibAPI()
+        handler.module = types.SimpleNamespace(usage_complexity_is_enabled=lambda: True)
+        body, status = handler.get(3)
+        assert status == 200 and len(queries) == 1 and "DISTINCT ON (conversation_id)" in queries[0]
+        assert body["summary"] is None and body["daily"] == [] and body["versions"] == []
 
     def test_detail_requires_an_entity(self, monkeypatch):
         module = load_api_module(monkeypatch, "analytics_complexity_detail")

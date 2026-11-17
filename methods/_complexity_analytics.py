@@ -118,8 +118,8 @@ _EXACT_SUMMARY_SQL = f"SELECT {_EXACT_STATS} {_EXACT_WHERE}"
 
 
 def exact_summary(rollup, exact):
-    """Rollup row with exact run-table stats, unless part of the range is past run retention."""
-    if not exact or int(exact["runs"] or 0) != int(rollup["runs"] or 0):
+    """Rollup row with exact run-table stats, unless retention dropped runs the rollup still counts."""
+    if not exact or int(exact["runs"] or 0) < int(rollup["runs"] or 0):
         return rollup
     columns = ("cu_median", "cu_avg", "cu_max", "cu_context", "cu_llm", "cu_tools")
     return {**rollup, **{column: exact[column] for column in columns}}
