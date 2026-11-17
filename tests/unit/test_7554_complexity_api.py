@@ -4,6 +4,7 @@ The SQL median and cx.histogram_median must agree; the live check (API vs percen
 project 3) found the bucket interpolation within ~1.3 CU of the exact median.
 """
 import datetime
+import statistics
 import types
 
 import pytest
@@ -109,6 +110,35 @@ class TestShapes:
         row = ca.run_row(run, STATE)
         assert (row["label"], row["tool_counts"]) == ("X", {})
 
+    def test_version_row_uses_the_entity_labelling_rule(self):
+        # A version with fewer than three runs stays pending, like an entity.
+        row = {**entity(5, 40.0), "root_entity_version_id": 12, "last_run_at": NOW}
+        assert ca.version_row(row, STATE)["version_id"] == 12 and ca.version_row(row, STATE)["label"] == "H"
+        assert ca.version_row({**row, "runs": 2}, STATE)["label_pending"]
+
+    def test_summary_uses_the_exact_median_like_the_version_row(self):
+        # #7556 review: 8 runs straddling the 8-CU bucket edge; the histogram gives 8.0, exact is 9.07.
+        values = [6.193, 6.159, 14.907, 11.952, 4.476, 12.854, 5.037, 17.588]
+        exact_median = statistics.median(values)
+        rollup = {**entity(8, 8.0), "cu_avg": 9.9, "cu_max": 17.588}
+        exact = {"runs": 8, "cu_median": exact_median, "cu_avg": sum(values) / 8, "cu_max": max(values),
+                 "cu_context": 1.0, "cu_llm": 2.0, "cu_tools": 3.0}
+        summary = ca.entity_row(ca.exact_summary(rollup, exact), STATE)
+        version = ca.version_row({**exact, "root_entity_version_id": 30185, "last_run_at": NOW}, STATE)
+        assert summary["cu_median"] == version["cu_median"] == 9.07
+        assert summary["percentile"] == version["percentile"] and summary["label"] == version["label"]
+
+    def test_summary_keeps_the_rollup_past_run_retention(self):
+        rollup = entity(8, 8.0)
+        assert ca.exact_summary(rollup, {"runs": 5, "cu_median": 9.0}) is rollup
+        assert ca.exact_summary(rollup, None) is rollup
+
+    def test_summary_stays_exact_when_the_run_table_holds_more(self):
+        # #1570 review: a mid-day timestamp bound can count more exact runs than whole rollup days
+        exact = {"runs": 9, "cu_median": 9.07, "cu_avg": 9.9, "cu_max": 17.6,
+                 "cu_context": 1.0, "cu_llm": 2.0, "cu_tools": 3.0}
+        assert ca.exact_summary(entity(8, 8.0), exact)["cu_median"] == 9.07
+
     def test_meta_reports_freshness_and_defaults_before_calibration(self):
         assert ca.meta(STATE, True, NOW)["stale"] is False
         empty = ca.meta(None, False, NOW)
@@ -127,6 +157,25 @@ class TestSql:
 
     def test_the_median_join_keeps_entities_with_an_inconsistent_histogram(self):
         assert "LEFT JOIN LATERAL" in str(ca.entity_statement("runs DESC")) and ") m ON true" in str(ca.entity_statement("runs DESC"))
+
+    def test_runs_filter_by_version_only_when_asked(self):
+        assert ca.runs_statement("ts DESC")[1] == {}
+        statement, params = ca.runs_statement("ts DESC", version_id=12)
+        assert "root_entity_version_id = :version_id" in str(statement) and params == {"version_id": 12}
+
+    def test_conversation_filter_uses_the_raw_column_and_empty_matches_nothing(self):
+        statement, params = ca.runs_statement("ts DESC", conversation_ids=["a"])
+        assert "conversation_id IN" in str(statement) and "::text" not in str(statement)
+        # One row per conversation, its most complex run, so the result never exceeds the ids sent
+        assert "DISTINCT ON (conversation_id)" in str(statement) and "cu_total DESC" in str(statement)
+        assert "DISTINCT ON" not in str(ca.runs_statement("ts DESC")[0])
+        assert params == {"conversation_ids": ["a"]}
+        empty, params = ca.runs_statement("ts DESC", conversation_ids=[])
+        assert "AND false" in str(empty) and params == {}
+
+    def test_versions_statement_groups_the_run_table_by_version(self):
+        sql = str(ca.versions_statement())
+        assert "entity_complexity_run" in sql and "GROUP BY root_entity_version_id" in sql
 
     def test_day_bounds_treat_date_to_as_exclusive(self):
         start = datetime.datetime(2026, 11, 9, tzinfo=UTC)
@@ -148,6 +197,28 @@ class TestEndpointGate:
         body, status = handler.get(3)
         assert status == 200 and body["meta"]["enabled"] is False and body["total"] == 0
         assert not queries
+
+    @pytest.mark.parametrize("args", [
+        {"entity_id": "7", "version_id": "abc"},
+        {"entity_id": "7", "conversation_ids": ",".join(str(i) for i in range(101))},
+    ])
+    def test_detail_rejects_bad_run_filters(self, monkeypatch, args):
+        module = load_api_module(monkeypatch, "analytics_complexity_detail")
+        module.request.args = args
+        assert module.PromptLibAPI().get(3)[1] == 400
+
+    def test_conversation_lookup_runs_only_the_runs_query(self, monkeypatch):
+        # #1570 review: Run History reads only runs, so summary, daily and versions are skipped
+        module = load_api_module(monkeypatch, "analytics_complexity_detail")
+        module.request.args = {"entity_id": "7", "conversation_ids": "a,b"}
+        queries = []
+        monkeypatch.setattr(module.an, "fetch_one", lambda statement: STATE)
+        monkeypatch.setattr(module.an, "fetch_all", lambda statement: queries.append(str(statement)) or [])
+        handler = module.PromptLibAPI()
+        handler.module = types.SimpleNamespace(usage_complexity_is_enabled=lambda: True)
+        body, status = handler.get(3)
+        assert status == 200 and len(queries) == 1 and "DISTINCT ON (conversation_id)" in queries[0]
+        assert body["summary"] is None and body["daily"] == [] and body["versions"] == []
 
     def test_detail_requires_an_entity(self, monkeypatch):
         module = load_api_module(monkeypatch, "analytics_complexity_detail")

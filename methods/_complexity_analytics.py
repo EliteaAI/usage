@@ -19,7 +19,7 @@
 
 import datetime
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from tools import config as c  # pylint: disable=E0401
 
@@ -93,10 +93,36 @@ SELECT run_id, conversation_id, ts, last_event_at, trigger_source, root_entity_v
        cu_context, cu_llm, cu_tools, cu_total, formula_version, tool_weights_version, scored_at,
        count(*) OVER () AS total
 FROM {RUNS}
-WHERE project_id = :project_id AND ts >= :dt_from AND ts < :dt_to {_KEY_FILTER}
+WHERE project_id = :project_id AND ts >= :dt_from AND ts < :dt_to {_KEY_FILTER} {{run_filter}}
 ORDER BY {{order}}, ts DESC, run_id
 LIMIT :limit OFFSET :offset
 """
+
+# Exact median from the run table; one entity's runs in the window stay small enough for this.
+_EXACT_STATS = """count(*)::bigint AS runs,
+       avg(cu_total) AS cu_avg, max(cu_total) AS cu_max,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY cu_total) AS cu_median,
+       avg(cu_context) AS cu_context, avg(cu_llm) AS cu_llm, avg(cu_tools) AS cu_tools,
+       max(ts) AS last_run_at"""
+
+_EXACT_WHERE = f"FROM {RUNS} WHERE project_id = :project_id AND ts >= :dt_from AND ts < :dt_to {_KEY_FILTER}"
+
+_VERSIONS_SQL = f"""
+SELECT root_entity_version_id, {_EXACT_STATS}
+{_EXACT_WHERE}
+GROUP BY root_entity_version_id
+ORDER BY last_run_at DESC
+"""
+
+_EXACT_SUMMARY_SQL = f"SELECT {_EXACT_STATS} {_EXACT_WHERE}"
+
+
+def exact_summary(rollup, exact):
+    """Rollup row with exact run-table stats, unless retention dropped runs the rollup still counts."""
+    if not exact or int(exact["runs"] or 0) < int(rollup["runs"] or 0):
+        return rollup
+    columns = ("cu_median", "cu_avg", "cu_max", "cu_context", "cu_llm", "cu_tools")
+    return {**rollup, **{column: exact[column] for column in columns}}
 
 
 def day_bounds(dt_from, dt_to):
@@ -120,9 +146,47 @@ def daily_trend_statement():
     return text(_DAILY_TREND_SQL)
 
 
-def runs_statement(order):
-    """Scored runs of one entity."""
-    return text(_RUNS_SQL.format(order=order))
+# One row per conversation: its most complex run, so N ids never return more than N rows
+_CONVERSATION_RUNS_SQL = f"""
+SELECT *, count(*) OVER () AS total FROM (
+    SELECT DISTINCT ON (conversation_id)
+           run_id, conversation_id, ts, last_event_at, trigger_source, root_entity_version_id,
+           peak_input_tokens, llm_calls, tool_calls, tool_counts,
+           cu_context, cu_llm, cu_tools, cu_total, formula_version, tool_weights_version, scored_at
+    FROM {RUNS}
+    WHERE project_id = :project_id AND ts >= :dt_from AND ts < :dt_to {_KEY_FILTER} {{run_filter}}
+    ORDER BY conversation_id, cu_total DESC, ts DESC
+) top
+ORDER BY {{order}}, ts DESC, run_id
+LIMIT :limit OFFSET :offset
+"""
+
+
+def runs_statement(order, version_id=None, conversation_ids=None):
+    """Scored runs plus params; with conversation ids, the top run of each (an empty list matches nothing)."""
+    clauses, params = [], {}
+    if version_id is not None:
+        clauses.append("AND root_entity_version_id = :version_id")
+        params["version_id"] = version_id
+    if conversation_ids is not None:
+        clauses.append("AND conversation_id IN :conversation_ids" if conversation_ids else "AND false")
+        if conversation_ids:
+            params["conversation_ids"] = list(conversation_ids)
+    sql = _CONVERSATION_RUNS_SQL if conversation_ids is not None else _RUNS_SQL
+    statement = text(sql.format(order=order, run_filter=" ".join(clauses)))
+    if "conversation_ids" in params:
+        statement = statement.bindparams(bindparam("conversation_ids", expanding=True))
+    return statement, params
+
+
+def exact_summary_statement():
+    """All-version exact stats of one entity from the run table."""
+    return text(_EXACT_SUMMARY_SQL)
+
+
+def versions_statement():
+    """Per-version summary of one entity's scored runs."""
+    return text(_VERSIONS_SQL)
 
 
 def state_statement():
@@ -159,15 +223,11 @@ def meta(state, enabled, now=None):
     }
 
 
-def entity_row(row, state):
-    """API shape of one aggregated entity; labelled by median once it has enough runs."""
+def _summary(row, state):
     runs = int(row["runs"] or 0)
     median = _num(row["cu_median"])
     pending = runs < cx.ENTITY_LABEL_MIN_RUNS or median is None
     return {
-        "entity_id": row["root_entity_id"],
-        "entity_project_id": row["root_entity_project_id"],
-        "entity_type": row["root_entity_type"],
         "runs": runs,
         "cu_median": median,
         "cu_avg": _num(row["cu_avg"]),
@@ -180,6 +240,25 @@ def entity_row(row, state):
         "label": None if pending else cx.label_for(median, thresholds_of(state)),
         "label_pending": pending,
         "percentile": None if pending else cx.percentile_of(median, (state or {}).get("entity_percentiles")),
+    }
+
+
+def entity_row(row, state):
+    """API shape of one aggregated entity; labelled by median once it has enough runs."""
+    return {
+        "entity_id": row["root_entity_id"],
+        "entity_project_id": row["root_entity_project_id"],
+        "entity_type": row["root_entity_type"],
+        **_summary(row, state),
+    }
+
+
+def version_row(row, state):
+    """API shape of one version's summary; same labelling rule as the entity."""
+    return {
+        "version_id": row["root_entity_version_id"],
+        **_summary(row, state),
+        "last_run_at": _iso(row["last_run_at"]),
     }
 
 
