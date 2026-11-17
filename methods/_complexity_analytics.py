@@ -146,8 +146,24 @@ def daily_trend_statement():
     return text(_DAILY_TREND_SQL)
 
 
+# One row per conversation: its most complex run, so N ids never return more than N rows
+_CONVERSATION_RUNS_SQL = f"""
+SELECT *, count(*) OVER () AS total FROM (
+    SELECT DISTINCT ON (conversation_id)
+           run_id, conversation_id, ts, last_event_at, trigger_source, root_entity_version_id,
+           peak_input_tokens, llm_calls, tool_calls, tool_counts,
+           cu_context, cu_llm, cu_tools, cu_total, formula_version, tool_weights_version, scored_at
+    FROM {RUNS}
+    WHERE project_id = :project_id AND ts >= :dt_from AND ts < :dt_to {_KEY_FILTER} {{run_filter}}
+    ORDER BY conversation_id, cu_total DESC, ts DESC
+) top
+ORDER BY {{order}}, ts DESC, run_id
+LIMIT :limit OFFSET :offset
+"""
+
+
 def runs_statement(order, version_id=None, conversation_ids=None):
-    """Scored runs of one entity plus the filter params; an empty conversation list matches nothing."""
+    """Scored runs plus params; with conversation ids, the top run of each (an empty list matches nothing)."""
     clauses, params = [], {}
     if version_id is not None:
         clauses.append("AND root_entity_version_id = :version_id")
@@ -156,7 +172,8 @@ def runs_statement(order, version_id=None, conversation_ids=None):
         clauses.append("AND conversation_id IN :conversation_ids" if conversation_ids else "AND false")
         if conversation_ids:
             params["conversation_ids"] = list(conversation_ids)
-    statement = text(_RUNS_SQL.format(order=order, run_filter=" ".join(clauses)))
+    sql = _CONVERSATION_RUNS_SQL if conversation_ids is not None else _RUNS_SQL
+    statement = text(sql.format(order=order, run_filter=" ".join(clauses)))
     if "conversation_ids" in params:
         statement = statement.bindparams(bindparam("conversation_ids", expanding=True))
     return statement, params

@@ -160,6 +160,9 @@ class TestSql:
     def test_conversation_filter_uses_the_raw_column_and_empty_matches_nothing(self):
         statement, params = ca.runs_statement("ts DESC", conversation_ids=["a"])
         assert "conversation_id IN" in str(statement) and "::text" not in str(statement)
+        # One row per conversation, its most complex run, so the result never exceeds the ids sent
+        assert "DISTINCT ON (conversation_id)" in str(statement) and "cu_total DESC" in str(statement)
+        assert "DISTINCT ON" not in str(ca.runs_statement("ts DESC")[0])
         assert params == {"conversation_ids": ["a"]}
         empty, params = ca.runs_statement("ts DESC", conversation_ids=[])
         assert "AND false" in str(empty) and params == {}

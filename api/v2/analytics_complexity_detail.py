@@ -68,7 +68,10 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string"},
-                    "description": "Comma-separated conversation UUIDs (at most 100); only their scored runs are listed.",
+                    "description": (
+                        "Comma-separated conversation UUIDs (at most 100). Lists one row per conversation: "
+                        "its most complex scored run."
+                    ),
                 },
                 {
                     "name": "sort_by",
