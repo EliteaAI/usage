@@ -127,6 +127,7 @@ if _API_AVAILABLE:
                 },
                 "401": {"description": "Unauthorized"},
                 "500": {"description": "Internal server error"},
+                "503": {"description": "Name search unavailable (elitea_core lookup failed)"},
             },
             available_to_users=True,
         )
@@ -168,7 +169,11 @@ if _API_AVAILABLE:
                 search = request.args.get("search", "").strip()
                 search_params = {}
                 if search:
-                    matches, body["search_truncated"] = an.application_search(project_id, search)
+                    try:
+                        matches, body["search_truncated"] = an.application_search(project_id, search)
+                    except an.ApplicationSearchUnavailable:
+                        log.warning("Complexity name search unavailable for project %s", project_id, exc_info=True)
+                        return {"error": "Agent name search is temporarily unavailable"}, 503
                     if not matches:
                         return body, 200
                     search_params = ca.search_params(matches)

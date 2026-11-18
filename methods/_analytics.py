@@ -805,12 +805,27 @@ def application_meta(project_id, refs=()):
 APPLICATION_SEARCH_LIMIT = 50000
 
 
+class ApplicationSearchUnavailable(Exception):
+    """The name lookup failed, as opposed to matching nothing."""
+
+
 def application_search(project_id, search, limit=APPLICATION_SEARCH_LIMIT):
-    """([{"project_id", "id"}], truncated) of this project's and public applications whose name contains search."""
-    response = _entity_meta_rpc(
-        project_id, application_name_search=search, application_search_limit=limit,
-    )
-    return response.get("matched_applications") or [], bool(response.get("matched_applications_truncated"))
+    """([{"project_id", "id"}], truncated) of this project's and public applications whose name contains search.
+
+    Raises ApplicationSearchUnavailable when elitea_core cannot answer, so an outage is not shown as no matches.
+    """
+    from tools import rpc_tools  # pylint: disable=C0415,E0401
+    #
+    try:
+        response = rpc_tools.RpcMixin().rpc.timeout(5).elitea_core_usage_entity_meta(
+            project_id, application_name_search=search, application_search_limit=limit,
+        )
+    except Exception as exc:  # pylint: disable=W0703
+        raise ApplicationSearchUnavailable(str(exc)) from exc
+    # An older elitea_core ignores the argument and omits the key; that is not "no matches" either
+    if not isinstance(response, dict) or "matched_applications" not in response:
+        raise ApplicationSearchUnavailable("elitea_core does not support application_name_search")
+    return response["matched_applications"] or [], bool(response.get("matched_applications_truncated"))
 
 
 def active_users_expr():

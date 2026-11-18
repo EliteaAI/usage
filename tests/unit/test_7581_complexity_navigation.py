@@ -65,6 +65,11 @@ class TestSearch:
 
 
 class TestRunLookup:
+    # Cross-review: a conversation uuid resolves to the run Run History's CU column shows
+    def test_a_conversation_lookup_picks_its_most_complex_run_like_run_history(self):
+        statement, _ = ca.runs_statement("ts DESC", run_id="conv-1")
+        assert "DISTINCT ON (conversation_id)" in str(statement) and "cu_total DESC" in str(statement)
+
     def test_run_id_filter_only_when_asked(self):
         statement, params = ca.runs_statement("ts DESC", run_id="r1")
         assert "(run_id = :run_id OR conversation_id = :run_id)" in str(statement) and params == {"run_id": "r1"}
@@ -84,3 +89,50 @@ class TestRunLookup:
         handler_for(monkeypatch, "analytics_complexity_detail", {"entity_id": "7", "run_id": "r1"}, queries).get(3)
         dt_from = queries[0].compile().params["dt_from"]
         assert dt_from.year == 2000
+
+
+class TestSearchFailure:
+    """Cross-review: an elitea_core outage must not look like "no agents match"."""
+
+    def rpc(self, monkeypatch, behaviour):
+        import sys
+        tools = sys.modules["tools"]
+        call = types.SimpleNamespace(elitea_core_usage_entity_meta=behaviour)
+        rpc = types.SimpleNamespace(timeout=lambda seconds: call)
+        monkeypatch.setattr(tools, "rpc_tools", types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)), raising=False)
+
+    def test_a_failed_lookup_raises(self, monkeypatch):
+        from usage.methods import _analytics as an
+
+        def boom(*args, **kwargs):
+            raise TimeoutError("rpc timeout")
+
+        self.rpc(monkeypatch, boom)
+        import pytest
+        with pytest.raises(an.ApplicationSearchUnavailable):
+            an.application_search(3, "bot")
+
+    def test_an_elitea_core_without_search_support_raises(self, monkeypatch):
+        from usage.methods import _analytics as an
+        self.rpc(monkeypatch, lambda *a, **k: {"applications": []})
+        import pytest
+        with pytest.raises(an.ApplicationSearchUnavailable):
+            an.application_search(3, "bot")
+
+    def test_a_real_empty_match_is_not_an_error(self, monkeypatch):
+        from usage.methods import _analytics as an
+        self.rpc(monkeypatch, lambda *a, **k: {"matched_applications": [], "matched_applications_truncated": False})
+        assert an.application_search(3, "bot") == ([], False)
+
+    def test_the_list_returns_503_instead_of_an_empty_200(self, monkeypatch):
+        module = load_api_module(monkeypatch, "analytics_complexity")
+        module.request.args = {"search": "bot"}
+
+        def unavailable(project_id, search):
+            raise module.an.ApplicationSearchUnavailable("down")
+
+        monkeypatch.setattr(module.an, "fetch_one", lambda statement: STATE)
+        monkeypatch.setattr(module.an, "application_search", unavailable)
+        handler = module.PromptLibAPI()
+        handler.module = types.SimpleNamespace(usage_complexity_is_enabled=lambda: True)
+        assert handler.get(3)[1] == 503

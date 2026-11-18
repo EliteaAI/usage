@@ -183,7 +183,8 @@ LIMIT :limit OFFSET :offset
 def runs_statement(order, version_id=None, conversation_ids=None, run_id=None):
     """Scored runs plus params; with conversation ids, the top run of each (an empty list matches nothing)."""
     clauses, params = [], {}
-    # Run analytics passes either the usage run id or the Run History conversation uuid
+    # An exact usage run id matches itself; a Run History conversation uuid means that conversation's
+    # most complex run, the same representative run the Run History CU column shows
     if run_id is not None:
         clauses.append("AND (run_id = :run_id OR conversation_id = :run_id)")
         params["run_id"] = run_id
@@ -194,7 +195,7 @@ def runs_statement(order, version_id=None, conversation_ids=None, run_id=None):
         clauses.append("AND conversation_id IN :conversation_ids" if conversation_ids else "AND false")
         if conversation_ids:
             params["conversation_ids"] = list(conversation_ids)
-    sql = _CONVERSATION_RUNS_SQL if conversation_ids is not None else _RUNS_SQL
+    sql = _CONVERSATION_RUNS_SQL if conversation_ids is not None or run_id is not None else _RUNS_SQL
     statement = text(sql.format(order=order, run_filter=" ".join(clauses)))
     if "conversation_ids" in params:
         statement = statement.bindparams(bindparam("conversation_ids", expanding=True))
