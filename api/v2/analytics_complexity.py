@@ -95,7 +95,17 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string", "enum": sorted(ca.ENTITY_SORTS), "default": "cu_median"},
-                    "description": "Column to sort by.",
+                    "description": "Column to sort by; percentile ranks by median with unlabelled rows last.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": (
+                        "Case-insensitive substring of the agent/pipeline name. search_truncated is true when "
+                        "more names matched than the lookup returns, so some agents may be missing."
+                    ),
                 },
             ],
             responses={
@@ -105,6 +115,7 @@ if _API_AVAILABLE:
                         "meta": META_EXAMPLE,
                         "range": {"date_from": "2026-11-09", "date_to": "2026-11-16"},
                         "total": 1,
+                        "search_truncated": False,
                         "rows": [{
                             "entity_id": 7, "entity_project_id": 1, "entity_type": "application",
                             "entity_kind": "agent", "entity_name": "Code Review Bot", "runs": 42,
@@ -116,6 +127,7 @@ if _API_AVAILABLE:
                 },
                 "401": {"description": "Unauthorized"},
                 "500": {"description": "Internal server error"},
+                "503": {"description": "Name search unavailable (elitea_core lookup failed)"},
             },
             available_to_users=True,
         )
@@ -148,13 +160,26 @@ if _API_AVAILABLE:
                     "meta": ca.meta(state, enabled),
                     "range": {"date_from": day_from.isoformat(), "date_to": day_to.isoformat()},
                     "total": 0,
+                    "search_truncated": False,
                     "rows": [],
                 }
                 if not enabled:
                     return body, 200
                 #
-                rows = an.fetch_all(ca.entity_statement(order).bindparams(
+                search = request.args.get("search", "").strip()
+                search_params = {}
+                if search:
+                    try:
+                        matches, body["search_truncated"] = an.application_search(project_id, search)
+                    except an.ApplicationSearchUnavailable:
+                        log.warning("Complexity name search unavailable for project %s", project_id, exc_info=True)
+                        return {"error": "Agent name search is temporarily unavailable"}, 503
+                    if not matches:
+                        return body, 200
+                    search_params = ca.search_params(matches)
+                rows = an.fetch_all(ca.entity_statement(order, search=bool(search)).bindparams(
                     project_id=project_id, day_from=day_from, day_to=day_to, limit=limit, offset=offset,
+                    **search_params,
                 ))
                 body["total"] = int(rows[0]["total"]) if rows else 0
                 body["rows"] = with_names(project_id, [ca.entity_row(r, state) for r in rows])

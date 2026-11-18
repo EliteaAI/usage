@@ -2,6 +2,8 @@
 Complexity of one agent/pipeline (#7554): exact summary, per-version summary, daily trend and scored runs.
 """
 
+import datetime
+
 from pylon.core.tools import log
 
 try:
@@ -74,6 +76,16 @@ if _API_AVAILABLE:
                     ),
                 },
                 {
+                    "name": "run_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": (
+                        "Only this run: a usage run id or a Run History conversation uuid. Without dates "
+                        "all retained runs are searched. Summary, daily and versions are left empty."
+                    ),
+                },
+                {
                     "name": "sort_by",
                     "in": "query",
                     "required": False,
@@ -123,6 +135,7 @@ if _API_AVAILABLE:
             version_id = an.clamp_int(request.args.get("version_id"), None)
             if request.args.get("version_id") and version_id is None:
                 return {"error": "version_id must be an integer"}, 400
+            run_id = (request.args.get("run_id") or "").strip() or None
             # A supplied but empty list matches no runs rather than switching the filter off
             conversation_ids = None
             if "conversation_ids" in request.args:
@@ -134,6 +147,11 @@ if _API_AVAILABLE:
                 if invalid_range:
                     return invalid_range
                 dt_from, dt_to = an.parse_date_range(request.args)
+                # One run has no period: without explicit dates search all retained runs
+                if run_id is not None and not request.args.get("date_from"):
+                    dt_from = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+                if run_id is not None and not request.args.get("date_to"):
+                    dt_to = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
                 day_from, day_to = ca.day_bounds(dt_from, dt_to)
                 limit = an.clamp_int(request.args.get("limit"), 20, minimum=1, maximum=100)
                 offset = an.clamp_int(request.args.get("offset"), 0, minimum=0)
@@ -155,8 +173,8 @@ if _API_AVAILABLE:
                     "project_id": project_id, "entity_project_id": entity_project_id,
                     "entity_type": entity_type, "entity_id": entity_id,
                 }
-                # Run History asks only for labels by conversation: skip the summary, trend and versions
-                if conversation_ids is None:
+                # Run History and run analytics ask for single runs: skip the summary, trend and versions
+                if conversation_ids is None and run_id is None:
                     summary = an.fetch_all(ca.entity_statement(ca.ENTITY_SORTS["runs"] + " DESC", key=True).bindparams(
                         day_from=day_from, day_to=day_to, limit=1, offset=0, **key,
                     ))
@@ -175,7 +193,7 @@ if _API_AVAILABLE:
                         ca.version_row(r, state)
                         for r in an.fetch_all(ca.versions_statement().bindparams(dt_from=dt_from, dt_to=dt_to, **key))
                     ]
-                statement, run_params = ca.runs_statement(order, version_id, conversation_ids)
+                statement, run_params = ca.runs_statement(order, version_id, conversation_ids, run_id)
                 runs = an.fetch_all(statement.bindparams(
                     dt_from=dt_from, dt_to=dt_to, limit=limit, offset=offset, **key, **run_params,
                 ))
