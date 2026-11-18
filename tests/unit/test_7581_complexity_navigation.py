@@ -9,12 +9,12 @@ from usage.methods import _complexity_analytics as ca
 STATE = {"thresholds": cx.DEFAULT_THRESHOLDS}
 
 
-def handler_for(monkeypatch, name, args, queries, matches=None):
+def handler_for(monkeypatch, name, args, queries, matches=None, truncated=False):
     module = load_api_module(monkeypatch, name)
     module.request.args = args
     monkeypatch.setattr(module.an, "fetch_one", lambda statement: STATE)
     monkeypatch.setattr(module.an, "fetch_all", lambda statement: queries.append(statement) or [])
-    monkeypatch.setattr(module.an, "application_search", lambda project_id, search: matches or [])
+    monkeypatch.setattr(module.an, "application_search", lambda project_id, search: (matches or [], truncated))
     handler = module.PromptLibAPI()
     handler.module = types.SimpleNamespace(usage_complexity_is_enabled=lambda: True)
     return handler
@@ -51,8 +51,17 @@ class TestSearch:
         handler = handler_for(
             monkeypatch, "analytics_complexity", {"search": "bot"}, queries, matches=[{"project_id": 3, "id": 7}],
         )
-        assert handler.get(3)[1] == 200
+        body, status = handler.get(3)
+        assert status == 200 and body["search_truncated"] is False
         assert len(queries) == 1 and ":search_entity_ids" in str(queries[0])
+
+    def test_a_truncated_name_lookup_is_reported(self, monkeypatch):
+        queries = []
+        handler = handler_for(
+            monkeypatch, "analytics_complexity", {"search": "a"}, queries,
+            matches=[{"project_id": 3, "id": 7}], truncated=True,
+        )
+        assert handler.get(3)[0]["search_truncated"] is True
 
 
 class TestRunLookup:

@@ -102,7 +102,10 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string"},
-                    "description": "Case-insensitive substring of the agent/pipeline name.",
+                    "description": (
+                        "Case-insensitive substring of the agent/pipeline name. search_truncated is true when "
+                        "more names matched than the lookup returns, so some agents may be missing."
+                    ),
                 },
             ],
             responses={
@@ -112,6 +115,7 @@ if _API_AVAILABLE:
                         "meta": META_EXAMPLE,
                         "range": {"date_from": "2026-11-09", "date_to": "2026-11-16"},
                         "total": 1,
+                        "search_truncated": False,
                         "rows": [{
                             "entity_id": 7, "entity_project_id": 1, "entity_type": "application",
                             "entity_kind": "agent", "entity_name": "Code Review Bot", "runs": 42,
@@ -155,6 +159,7 @@ if _API_AVAILABLE:
                     "meta": ca.meta(state, enabled),
                     "range": {"date_from": day_from.isoformat(), "date_to": day_to.isoformat()},
                     "total": 0,
+                    "search_truncated": False,
                     "rows": [],
                 }
                 if not enabled:
@@ -163,7 +168,7 @@ if _API_AVAILABLE:
                 search = request.args.get("search", "").strip()
                 search_params = {}
                 if search:
-                    matches = an.application_search(project_id, search)
+                    matches, body["search_truncated"] = an.application_search(project_id, search)
                     if not matches:
                         return body, 200
                     search_params = ca.search_params(matches)

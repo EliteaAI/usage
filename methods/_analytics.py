@@ -801,12 +801,16 @@ def application_meta(project_id, refs=()):
     return {(item["project_id"], item["id"]): item for item in response.get("scoped_applications") or []}
 
 
-def application_search(project_id, search, limit=1000):
-    """[{"project_id", "id"}] of this project's and public applications whose name contains search."""
+# Past this many name matches per schema the search is reported as truncated, never silently cut
+APPLICATION_SEARCH_LIMIT = 50000
+
+
+def application_search(project_id, search, limit=APPLICATION_SEARCH_LIMIT):
+    """([{"project_id", "id"}], truncated) of this project's and public applications whose name contains search."""
     response = _entity_meta_rpc(
         project_id, application_name_search=search, application_search_limit=limit,
     )
-    return response.get("matched_applications") or []
+    return response.get("matched_applications") or [], bool(response.get("matched_applications_truncated"))
 
 
 def active_users_expr():
