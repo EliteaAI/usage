@@ -95,7 +95,14 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string", "enum": sorted(ca.ENTITY_SORTS), "default": "cu_median"},
-                    "description": "Column to sort by.",
+                    "description": "Column to sort by; percentile ranks by median with unlabelled rows last.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Case-insensitive substring of the agent/pipeline name.",
                 },
             ],
             responses={
@@ -153,8 +160,16 @@ if _API_AVAILABLE:
                 if not enabled:
                     return body, 200
                 #
-                rows = an.fetch_all(ca.entity_statement(order).bindparams(
+                search = request.args.get("search", "").strip()
+                search_params = {}
+                if search:
+                    matches = an.application_search(project_id, search)
+                    if not matches:
+                        return body, 200
+                    search_params = ca.search_params(matches)
+                rows = an.fetch_all(ca.entity_statement(order, search=bool(search)).bindparams(
                     project_id=project_id, day_from=day_from, day_to=day_to, limit=limit, offset=offset,
+                    **search_params,
                 ))
                 body["total"] = int(rows[0]["total"]) if rows else 0
                 body["rows"] = with_names(project_id, [ca.entity_row(r, state) for r in rows])

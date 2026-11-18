@@ -32,6 +32,8 @@ STATE = f"{c.POSTGRES_SCHEMA}.entity_complexity_state"
 ENTITY_SORTS = {
     "cu_median": "cu_median", "cu_avg": "a.cu_avg", "cu_max": "a.cu_max", "runs": "a.runs",
     "cu_context": "a.cu_context", "cu_llm": "a.cu_llm", "cu_tools": "a.cu_tools",
+    # Percentile rises with the median; NULL below the label minimum so unlabelled rows sort last
+    "percentile": f"(CASE WHEN a.runs >= {cx.ENTITY_LABEL_MIN_RUNS} THEN m.cu_median END)",
 }
 RUN_SORTS = {"ts": "ts", "cu_total": "cu_total"}
 
@@ -50,7 +52,7 @@ WITH a AS (
            max(cu_max) AS cu_max,
            ARRAY[{_HIST_SUMS}]::bigint[] AS hist
     FROM {DAILY}
-    WHERE project_id = :project_id AND day >= :day_from AND day <= :day_to {{key_filter}}
+    WHERE project_id = :project_id AND day >= :day_from AND day <= :day_to {{key_filter}} {{search_filter}}
     GROUP BY root_entity_project_id, root_entity_type, root_entity_id
     HAVING sum(runs) > 0
 )
@@ -136,9 +138,25 @@ def order_clause(sorts, sort_by, sort_order, default):
     return f"{column} {'ASC' if sort_order == 'asc' else 'DESC'} NULLS LAST"
 
 
-def entity_statement(order, key=False):
-    """List (or one-key) aggregation over the daily rollup."""
-    return text(_ENTITY_SQL.format(key_filter=_KEY_FILTER if key else "", order=order))
+_SEARCH_FILTER = (
+    "AND (root_entity_project_id, root_entity_id) IN"
+    " (SELECT * FROM unnest(CAST(:search_project_ids AS bigint[]), CAST(:search_entity_ids AS bigint[])))"
+)
+
+
+def entity_statement(order, key=False, search=False):
+    """List (or one-key) aggregation over the daily rollup; search binds search_project_ids/search_entity_ids."""
+    return text(_ENTITY_SQL.format(
+        key_filter=_KEY_FILTER if key else "", search_filter=_SEARCH_FILTER if search else "", order=order,
+    ))
+
+
+def search_params(matches):
+    """Parallel id arrays for the search filter from [{"project_id", "id"}] matches."""
+    return {
+        "search_project_ids": [int(m["project_id"]) for m in matches],
+        "search_entity_ids": [int(m["id"]) for m in matches],
+    }
 
 
 def daily_trend_statement():
@@ -162,9 +180,13 @@ LIMIT :limit OFFSET :offset
 """
 
 
-def runs_statement(order, version_id=None, conversation_ids=None):
+def runs_statement(order, version_id=None, conversation_ids=None, run_id=None):
     """Scored runs plus params; with conversation ids, the top run of each (an empty list matches nothing)."""
     clauses, params = [], {}
+    # Run analytics passes either the usage run id or the Run History conversation uuid
+    if run_id is not None:
+        clauses.append("AND (run_id = :run_id OR conversation_id = :run_id)")
+        params["run_id"] = run_id
     if version_id is not None:
         clauses.append("AND root_entity_version_id = :version_id")
         params["version_id"] = version_id
