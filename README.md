@@ -67,7 +67,7 @@ full-partition scan. A report that needs a new number gets a new named RPC here.
 
 Both tables are provisioned the same way every other plugin's are: `init()` imports the models so
 they register in the shared metadata, and whoever applies that metadata creates them — `shared.ready()`
-when `apply_shared_metadata` is on, the `admin.create_tables` task when it is off. This plugin never
+when `apply_shared_metadata` is on, the `admin.create_tables` task (param `project_id=all;dry_run=false`) when it is off. This plugin never
 calls `create_all()` itself, so the flag governs it by construction.
 
 `usage_event` is monthly RANGE-partitioned; SQLAlchemy emits `PARTITION BY RANGE (ts)` from
