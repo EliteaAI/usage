@@ -232,7 +232,7 @@ def ensure_run_partitions(connection, months):
     """Create missing monthly run partitions; False when the parent table is absent."""
     if not relation_exists(connection, c.POSTGRES_SCHEMA, RUN_PARENT, relkinds=("p",)):
         log.warning(
-            "usage: %s.%s is missing; run the admin create_tables task",
+            "usage: %s.%s is missing; run the admin create_tables task with param project_id=all;dry_run=false",
             c.POSTGRES_SCHEMA, RUN_PARENT,
         )
         return False

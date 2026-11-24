@@ -131,8 +131,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # still has to run the admin create_tables task
             if not parent_exists(connection, c.POSTGRES_SCHEMA):
                 log.warning(
-                    "usage: %s.usage_event is missing; run the admin create_tables task. "
-                    "No partitions created", c.POSTGRES_SCHEMA,
+                    "usage: %s.usage_event is missing; run the admin create_tables task "
+                    "with param project_id=all;dry_run=false. No partitions created", c.POSTGRES_SCHEMA,
                 )
                 return 0
             #
