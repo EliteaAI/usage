@@ -60,6 +60,11 @@ DEFAULT_RUN_RETENTION_DAYS = 90
 DEFAULT_DAILY_RETENTION_MONTHS = 13
 MAX_BACKFILL_DAYS = 90
 CALIBRATION_WINDOW_DAYS = 30
+# A run with no score is "Not scored yet" only after this long; before it, the score may still be coming (pending).
+# Matches the Run History page's PENDING_WINDOW_MS (2 hours).
+PENDING_WINDOW_MS = 2 * 60 * 60 * 1000
+# The label filter returns at most this many conversation ids; the caller pages through them
+MAX_LABEL_CONVERSATIONS = 5000
 CALIBRATION_RUNS_PER_ENTITY = 50
 ENTITY_LABEL_MIN_RUNS = 3
 DAILY_DELETE_BATCH = 5000
@@ -515,6 +520,56 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return {"scored": scored, "scored_through": reached.isoformat()}
         #
         return self.usage_complexity_locked(job)
+
+    @web.method()
+    def usage_complexity_labelled_conversation_ids(self, entity_project_id, entity_id, dt_from, dt_to, labels):
+        """Read-only (#7682 BE-2): conversation ids of an entity's runs in [dt_from, dt_to) with one of the labels.
+
+        `labels` holds any of L, M, H, X and not_scored. A scored run is labelled with the same rule the analytics
+        detail uses (label_for of its cu_total against the stored thresholds). not_scored matches a run that has no
+        score and whose last event is older than the pending window: a run still inside it is pending, not not scored.
+        Returns {"conversation_ids": [...], "truncated": bool}; the caller pages through the ids.
+        """
+        from ._complexity_analytics import thresholds_of  # pylint: disable=C0415
+        wanted = {str(label) for label in labels or ()}
+        pending = datetime.timedelta(milliseconds=PENDING_WINDOW_MS)
+        with db.engine.connect() as connection:
+            state = connection.execute(text(f"SELECT * FROM {c.POSTGRES_SCHEMA}.entity_complexity_state WHERE id = 1")).mappings().first()
+            thresholds = thresholds_of(state)
+            scored = connection.execute(text(f"""
+                SELECT r.conversation_id, r.cu_total
+                FROM {c.POSTGRES_SCHEMA}.entity_complexity_run r
+                WHERE r.ts >= :dt_from AND r.ts < :dt_to
+                  AND r.root_entity_project_id = :entity_project_id
+                  AND r.root_entity_id = :entity_id AND r.conversation_id IS NOT NULL
+            """), {"dt_from": dt_from, "dt_to": dt_to, "entity_project_id": entity_project_id,
+                   "entity_id": entity_id}).mappings().all()
+            matched = {
+                str(row["conversation_id"]) for row in scored
+                if cx.label_for(float(row["cu_total"] or 0), thresholds) in wanted
+            }
+            if "not_scored" in wanted:
+                now = _utcnow()
+                unscored = connection.execute(text(f"""
+                    SELECT e.conversation_id, max(e.ts) AS last_event_at
+                    FROM {c.POSTGRES_SCHEMA}.usage_event e
+                    WHERE e.ts >= :dt_from AND e.ts < :dt_to
+                      AND e.root_entity_project_id = :entity_project_id
+                      AND e.root_entity_id = :entity_id AND e.conversation_id IS NOT NULL
+                      AND e.run_id IS NOT NULL AND e.event_type IN ('llm', 'tool')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {c.POSTGRES_SCHEMA}.entity_complexity_run r
+                          WHERE r.project_id = e.project_id AND r.run_id = e.run_id
+                      )
+                    GROUP BY e.conversation_id
+                """), {"dt_from": dt_from, "dt_to": dt_to, "entity_project_id": entity_project_id,
+                       "entity_id": entity_id}).mappings().all()
+                matched |= {
+                    str(row["conversation_id"]) for row in unscored
+                    if row["last_event_at"] is not None and now - row["last_event_at"] > pending
+                }
+        ids = sorted(matched)
+        return {"conversation_ids": ids, "truncated": len(ids) > MAX_LABEL_CONVERSATIONS}
 
     @web.method()
     def usage_complexity_calibrate(self):

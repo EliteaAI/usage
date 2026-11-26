@@ -30,6 +30,16 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
             return {"skipped": "disabled"}
         return self.usage_complexity_spawn("usage-complexity-score", self.usage_complexity_score)
 
+    @web.rpc("usage_complexity_conversations_by_label", "usage_complexity_conversations_by_label")
+    def usage_complexity_conversations_by_label_rpc(self, entity_project_id, entity_id, dt_from, dt_to, labels,
+                                                    **kwargs):  # pylint: disable=W0613
+        """Read-only (#7682 BE-2): the conversation ids of an entity's runs with one of the complexity labels."""
+        if not self.usage_complexity_is_enabled():
+            return {"conversation_ids": [], "truncated": False, "skipped": "disabled"}
+        return self.usage_complexity_labelled_conversation_ids(
+            entity_project_id, entity_id, dt_from, dt_to, labels,
+        )
+
     @web.rpc("usage_complexity_nightly", "usage_complexity_nightly_now")
     def usage_complexity_nightly_rpc(self, **kwargs):  # pylint: disable=W0613
         """Nightly cron: catch-up scoring, calibration, retention."""
