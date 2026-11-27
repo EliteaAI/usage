@@ -30,6 +30,25 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
             return {"skipped": "disabled"}
         return self.usage_complexity_spawn("usage-complexity-score", self.usage_complexity_score)
 
+    @web.rpc("usage_complexity_conversations_by_label", "usage_complexity_conversations_by_label")
+    def usage_complexity_conversations_by_label_rpc(self, entity_project_id, entity_id, dt_from, dt_to, labels,
+                                                    project_id=None, entity_type="application",
+                                                    **kwargs):  # pylint: disable=W0613
+        """Read-only (#7682 BE-2): the conversation ids of an entity's runs with one of the complexity labels.
+
+        Internal RPC, not an HTTP endpoint, and it does no authorization of its own: the caller must have checked
+        that the user may read the entity. The only caller (elitea_core's conversation list) uses the ids to narrow
+        a query that is already limited to the conversations the user can see, so an id of another user's run never
+        reaches the user. `project_id` (the project of those conversations) keeps the query on the indexes; an
+        older caller that omits it still works, but slowly. `labels` outside L, M, H, X and not_scored are an error
+        (ValueError).
+        """
+        if not self.usage_complexity_is_enabled():
+            return {"conversation_ids": [], "truncated": False, "skipped": "disabled"}
+        return self.usage_complexity_labelled_conversation_ids(
+            entity_project_id, entity_id, dt_from, dt_to, labels, project_id=project_id, entity_type=entity_type,
+        )
+
     @web.rpc("usage_complexity_nightly", "usage_complexity_nightly_now")
     def usage_complexity_nightly_rpc(self, **kwargs):  # pylint: disable=W0613
         """Nightly cron: catch-up scoring, calibration, retention."""
