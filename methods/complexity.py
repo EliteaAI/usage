@@ -63,8 +63,41 @@ CALIBRATION_WINDOW_DAYS = 30
 # A run with no score is "Not scored yet" only after this long; before it, the score may still be coming (pending).
 # Matches the Run History page's PENDING_WINDOW_MS (2 hours).
 PENDING_WINDOW_MS = 2 * 60 * 60 * 1000
-# The label filter returns at most this many conversation ids; the caller pages through them
+# The label filter returns at most this many conversation ids (the newest); `truncated` tells the caller more matched
 MAX_LABEL_CONVERSATIONS = 5000
+SCORED_LABELS = ("L", "M", "H", "X")
+LABEL_FILTER_VALUES = (*SCORED_LABELS, "not_scored")
+# The scored runs with one of :labels, one row per conversation. The CASE is label_for: the highest threshold met.
+SCORED_LABEL_SQL = """
+    SELECT r.conversation_id, max(r.ts) AS last_ts
+    FROM {schema}.entity_complexity_run r
+    WHERE r.ts >= :dt_from AND r.ts < :dt_to
+      AND r.root_entity_project_id = :entity_project_id AND r.root_entity_id = :entity_id
+      AND r.conversation_id IS NOT NULL
+      AND CASE WHEN COALESCE(r.cu_total, 0) >= :extreme THEN 'X'
+               WHEN COALESCE(r.cu_total, 0) >= :high THEN 'H'
+               WHEN COALESCE(r.cu_total, 0) >= :medium THEN 'M'
+               ELSE 'L' END = ANY(:labels)
+    GROUP BY r.conversation_id
+    ORDER BY last_ts DESC
+    LIMIT :limit
+"""
+# The conversations with a run that has events but no score, quiet for longer than the pending window
+NOT_SCORED_SQL = """
+    SELECT e.conversation_id, max(e.ts) AS last_ts
+    FROM {schema}.usage_event e
+    WHERE e.ts >= :dt_from AND e.ts < :dt_to
+      AND e.root_entity_project_id = :entity_project_id AND e.root_entity_id = :entity_id
+      AND e.conversation_id IS NOT NULL AND e.run_id IS NOT NULL AND e.event_type IN ('llm', 'tool')
+      AND NOT EXISTS (
+          SELECT 1 FROM {schema}.entity_complexity_run r
+          WHERE r.project_id = e.project_id AND r.run_id = e.run_id
+      )
+    GROUP BY e.conversation_id
+    HAVING max(e.ts) < :pending_before
+    ORDER BY last_ts DESC
+    LIMIT :limit
+"""
 CALIBRATION_RUNS_PER_ENTITY = 50
 ENTITY_LABEL_MIN_RUNS = 3
 DAILY_DELETE_BATCH = 5000
@@ -525,51 +558,40 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def usage_complexity_labelled_conversation_ids(self, entity_project_id, entity_id, dt_from, dt_to, labels):
         """Read-only (#7682 BE-2): conversation ids of an entity's runs in [dt_from, dt_to) with one of the labels.
 
-        `labels` holds any of L, M, H, X and not_scored. A scored run is labelled with the same rule the analytics
-        detail uses (label_for of its cu_total against the stored thresholds). not_scored matches a run that has no
-        score and whose last event is older than the pending window: a run still inside it is pending, not not scored.
-        Returns {"conversation_ids": [...], "truncated": bool}; the caller pages through the ids.
+        `labels` holds any of L, M, H, X and not_scored; anything else raises ValueError. A scored run is labelled in
+        SQL with the rule of `label_for` (cu_total against the stored thresholds). not_scored matches a conversation
+        with an unscored run whose last event is older than the pending window: a run still inside it is pending.
+        The newest conversations come first and at most MAX_LABEL_CONVERSATIONS are returned; `truncated` says more
+        matched. Returns {"conversation_ids": [...], "truncated": bool}.
         """
         from ._complexity_analytics import thresholds_of  # pylint: disable=C0415
         wanted = {str(label) for label in labels or ()}
-        pending = datetime.timedelta(milliseconds=PENDING_WINDOW_MS)
+        unknown = wanted - set(LABEL_FILTER_VALUES)
+        if unknown or not wanted:
+            raise ValueError(f"labels must be among {', '.join(LABEL_FILTER_VALUES)}: {sorted(unknown) or 'none given'}")
+        scope = {"dt_from": dt_from, "dt_to": dt_to, "entity_project_id": entity_project_id, "entity_id": entity_id,
+                 "limit": MAX_LABEL_CONVERSATIONS + 1}
+        found = {}
         with db.engine.connect() as connection:
             state = connection.execute(text(f"SELECT * FROM {c.POSTGRES_SCHEMA}.entity_complexity_state WHERE id = 1")).mappings().first()
             thresholds = thresholds_of(state)
-            scored = connection.execute(text(f"""
-                SELECT r.conversation_id, r.cu_total
-                FROM {c.POSTGRES_SCHEMA}.entity_complexity_run r
-                WHERE r.ts >= :dt_from AND r.ts < :dt_to
-                  AND r.root_entity_project_id = :entity_project_id
-                  AND r.root_entity_id = :entity_id AND r.conversation_id IS NOT NULL
-            """), {"dt_from": dt_from, "dt_to": dt_to, "entity_project_id": entity_project_id,
-                   "entity_id": entity_id}).mappings().all()
-            matched = {
-                str(row["conversation_id"]) for row in scored
-                if cx.label_for(float(row["cu_total"] or 0), thresholds) in wanted
-            }
+            if wanted & set(SCORED_LABELS):
+                rows = connection.execute(text(SCORED_LABEL_SQL.format(schema=c.POSTGRES_SCHEMA)), {
+                    **scope, "labels": sorted(wanted & set(SCORED_LABELS)), **thresholds,
+                }).all()
+                found.update({str(conversation_id): last_ts for conversation_id, last_ts in rows})
             if "not_scored" in wanted:
-                now = _utcnow()
-                unscored = connection.execute(text(f"""
-                    SELECT e.conversation_id, max(e.ts) AS last_event_at
-                    FROM {c.POSTGRES_SCHEMA}.usage_event e
-                    WHERE e.ts >= :dt_from AND e.ts < :dt_to
-                      AND e.root_entity_project_id = :entity_project_id
-                      AND e.root_entity_id = :entity_id AND e.conversation_id IS NOT NULL
-                      AND e.run_id IS NOT NULL AND e.event_type IN ('llm', 'tool')
-                      AND NOT EXISTS (
-                          SELECT 1 FROM {c.POSTGRES_SCHEMA}.entity_complexity_run r
-                          WHERE r.project_id = e.project_id AND r.run_id = e.run_id
-                      )
-                    GROUP BY e.conversation_id
-                """), {"dt_from": dt_from, "dt_to": dt_to, "entity_project_id": entity_project_id,
-                       "entity_id": entity_id}).mappings().all()
-                matched |= {
-                    str(row["conversation_id"]) for row in unscored
-                    if row["last_event_at"] is not None and now - row["last_event_at"] > pending
-                }
-        ids = sorted(matched)
-        return {"conversation_ids": ids, "truncated": len(ids) > MAX_LABEL_CONVERSATIONS}
+                rows = connection.execute(text(NOT_SCORED_SQL.format(schema=c.POSTGRES_SCHEMA)), {
+                    **scope, "pending_before": _utcnow() - datetime.timedelta(milliseconds=PENDING_WINDOW_MS),
+                }).all()
+                for conversation_id, last_ts in rows:
+                    key = str(conversation_id)
+                    found[key] = max(found.get(key, last_ts), last_ts)
+        newest_first = sorted(found, key=lambda key: found[key], reverse=True)
+        return {
+            "conversation_ids": newest_first[:MAX_LABEL_CONVERSATIONS],
+            "truncated": len(newest_first) > MAX_LABEL_CONVERSATIONS,
+        }
 
     @web.method()
     def usage_complexity_calibrate(self):

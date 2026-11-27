@@ -33,7 +33,13 @@ class RPC:  # pylint: disable=E1101,R0903,W0201
     @web.rpc("usage_complexity_conversations_by_label", "usage_complexity_conversations_by_label")
     def usage_complexity_conversations_by_label_rpc(self, entity_project_id, entity_id, dt_from, dt_to, labels,
                                                     **kwargs):  # pylint: disable=W0613
-        """Read-only (#7682 BE-2): the conversation ids of an entity's runs with one of the complexity labels."""
+        """Read-only (#7682 BE-2): the conversation ids of an entity's runs with one of the complexity labels.
+
+        Internal RPC, not an HTTP endpoint, and it does no authorization of its own: the caller must have checked
+        that the user may read the entity. The only caller (elitea_core's conversation list) uses the ids to narrow
+        a query that is already limited to the conversations the user can see, so an id of another user's run never
+        reaches the user. `labels` outside L, M, H, X and not_scored are an error (ValueError).
+        """
         if not self.usage_complexity_is_enabled():
             return {"conversation_ids": [], "truncated": False, "skipped": "disabled"}
         return self.usage_complexity_labelled_conversation_ids(
