@@ -34,7 +34,7 @@ def labelled(monkeypatch):
     """Runs the method with scored and not scored rows given; returns (result, statements)."""
     statements = []
 
-    def run(scored=(), unscored=(), labels=("L",)):
+    def run(scored=(), unscored=(), labels=("L",), **extra):
         class Connection:
             def __enter__(self):
                 return self
@@ -54,7 +54,7 @@ def labelled(monkeypatch):
         monkeypatch.setattr(jobs, "db", types.SimpleNamespace(engine=types.SimpleNamespace(connect=Connection)))
         monkeypatch.setattr(jobs.c, "POSTGRES_SCHEMA", "centry", raising=False)
         method = types.SimpleNamespace(usage_complexity_labelled_conversation_ids=None)
-        return jobs.Method.usage_complexity_labelled_conversation_ids(method, 3, 26, FROM, TO, labels)
+        return jobs.Method.usage_complexity_labelled_conversation_ids(method, 3, 26, FROM, TO, labels, **extra)
 
     return run, statements
 
@@ -117,3 +117,30 @@ def test_exactly_the_cap_is_not_truncated(labelled, monkeypatch):
     monkeypatch.setattr(jobs, "MAX_LABEL_CONVERSATIONS", 3)
     rows = [(f"c{i}", LATER - datetime.timedelta(hours=i)) for i in range(3)]
     assert run(scored=rows) == {"conversation_ids": ["c0", "c1", "c2"], "truncated": False}
+
+
+# --- PR 80 re-review: both queries lead with project_id so the indexes (which start with it) can be used ----------
+
+def test_the_project_leads_both_queries_when_the_caller_names_it(labelled):
+    run, statements = labelled
+    run(labels=["L", "not_scored"], project_id=7)
+    scored_sql, scored_params = next((s, p) for s, p in statements if "CASE" in s)
+    unscored_sql, unscored_params = next((s, p) for s, p in statements if "NOT EXISTS" in s)
+    assert "AND r.project_id = :project_id" in scored_sql and scored_params["project_id"] == 7
+    assert "AND e.project_id = :project_id" in unscored_sql and unscored_params["project_id"] == 7
+
+
+def test_without_a_project_the_queries_still_run_but_do_not_filter_on_it(labelled):
+    run, statements = labelled
+    run(labels=["L", "not_scored"])
+    assert all("project_id = :project_id" not in sql for sql, _ in statements)
+    assert all("project_id" not in (params or {}) for _, params in statements)
+
+
+def test_the_entity_type_narrows_both_queries(labelled):
+    run, statements = labelled
+    run(labels=["L", "not_scored"])
+    for sql, params in statements:
+        if "CASE" in sql or "NOT EXISTS" in sql:
+            assert "root_entity_type = :entity_type" in sql
+            assert params["entity_type"] == "application"
